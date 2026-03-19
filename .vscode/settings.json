@@ -1,15 +1,20 @@
 {
     "workbench.colorCustomizations": {
-        "activityBar.background": "#610606",
-        "titleBar.activeBackground": "#880909",
-        "titleBar.activeForeground": "#FFFBFB",
-        "titleBar.inactiveBackground": "#610606",
-        "titleBar.inactiveForeground": "#FFFBFB",
-        "statusBar.background": "#610606",
-        "statusBar.foreground": "#FFFBFB",
-        "statusBar.debuggingBackground": "#610606",
-        "statusBar.debuggingForeground": "#FFFBFB",
-        "statusBar.noFolderBackground": "#610606",
-        "statusBar.noFolderForeground": "#FFFBFB"
+        "editor.background": "#3d0000",
+        "editor.foreground": "#ff9999",
+        "activityBar.background": "#5a0000",
+        "sideBar.background": "#350000",
+        "sideBarSectionHeader.background": "#4a0000",
+        "statusBar.background": "#cc0000",
+        "statusBar.foreground": "#ffffff",
+        "titleBar.activeBackground": "#5a0000",
+        "titleBar.activeForeground": "#ffcccc",
+        "tab.activeBackground": "#3d0000",
+        "tab.activeForeground": "#ffcccc",
+        "tab.inactiveBackground": "#2d0000",
+        "editorGroupHeader.tabsBackground": "#350000",
+        "panel.background": "#3d0000",
+        "titleBar.inactiveBackground": "#5A0000",
+        "titleBar.inactiveForeground": "#FFF8F8"
     }
 }

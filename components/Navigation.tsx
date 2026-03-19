@@ -30,6 +30,8 @@ const NAV_ITEMS = [
       { name: "Radix Sort",     path: "/sorting/radix",     badge: "O(nk)" },
       { name: "Bucket Sort",    path: "/sorting/bucket",    badge: "O(n+k)" },
       { name: "Tim Sort",       path: "/sorting/timsort",   badge: "O(n log n)" },
+      { name: "Logos Sort",     path: "/sorting/logos",     badge: "O(n log n)" },
+      { name: "Benchmark",      path: "/sorting/benchmark", badge: "race" },
     ],
   },
   {

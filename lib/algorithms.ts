@@ -174,6 +174,25 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
       "concatenate all buckets into arr",
     ],
   },
+  logos: {
+    name: "Logos Sort",
+    slug: "logos",
+    timeComplexity: "O(n log n)",
+    spaceComplexity: "O(log n)",
+    stable: false,
+    description:
+      "A φ-pivot, 3-way-partition quicksort variant. Selects the pivot at index ⌊(hi−lo)·φ⌋ using the golden ratio for adversarial resistance, then applies a Dutch National Flag 3-way partition. Elements equal to the pivot are placed in their final position in one pass. Recurses on the smaller partition to keep stack depth O(log n).",
+    pseudocode: [
+      "if hi − lo < 16: insertionSort(arr, lo, hi)",
+      "pivot_idx = lo + ⌊(hi − lo) × φ⌋",
+      "lt = lo;  gt = hi;  i = lo",
+      "while i ≤ gt:",
+      "  if arr[i] < pivot: swap arr[lt] ↔ arr[i]; lt++; i++",
+      "  elif arr[i] > pivot: swap arr[i] ↔ arr[gt]; gt--",
+      "  else: i++   // equal to pivot",
+      "recurse smaller half; tail-call larger half",
+    ],
+  },
   timsort: {
     name: "Tim Sort",
     slug: "timsort",
@@ -940,6 +959,135 @@ export function getTimSortSteps(arr: number[]): SortStep[] {
   return steps;
 }
 
+export function getLogosSortSteps(arr: number[]): SortStep[] {
+  const PHI = 0.6180339887498949;
+  const BASE = 16;
+  const steps: SortStep[] = [];
+  const a = [...arr];
+  const n = a.length;
+  let comparisons = 0;
+  let swaps = 0;
+  const sorted = new Set<number>();
+
+  function insertionSort(lo: number, hi: number) {
+    for (let i = lo + 1; i <= hi; i++) {
+      const key = a[i];
+      let j = i - 1;
+      while (j >= lo && a[j] > key) {
+        comparisons++;
+        steps.push({
+          array: [...a],
+          states: makeStates(n, sorted, { [j]: "comparing", [j + 1]: "current" }),
+          description: `Insertion: ${a[j]} > ${key}, shift right`,
+          comparisons, swaps, pseudocodeLine: 0,
+        });
+        a[j + 1] = a[j];
+        swaps++;
+        j--;
+      }
+      a[j + 1] = key;
+    }
+    for (let i = lo; i <= hi; i++) sorted.add(i);
+  }
+
+  const stack: [number, number][] = [[0, n - 1]];
+
+  while (stack.length > 0) {
+    let [lo, hi] = stack.pop()!;
+
+    while (lo < hi) {
+      if (hi - lo + 1 <= BASE) {
+        insertionSort(lo, hi);
+        steps.push({
+          array: [...a],
+          states: makeStates(n, sorted, {}),
+          description: `Subarray [${lo}..${hi}] sorted by insertion sort`,
+          comparisons, swaps, pseudocodeLine: 0,
+        });
+        break;
+      }
+
+      const pivotIdx = lo + Math.floor((hi - lo) * PHI);
+      const pivot = a[pivotIdx];
+
+      steps.push({
+        array: [...a],
+        states: makeStates(n, sorted, { [pivotIdx]: "pivot" }),
+        description: `φ-pivot at index ${pivotIdx}: value ${pivot}  (lo=${lo}, hi=${hi})`,
+        comparisons, swaps, pseudocodeLine: 1,
+      });
+
+      let lt = lo, gt = hi, i = lo;
+      while (i <= gt) {
+        comparisons++;
+        if (a[i] < pivot) {
+          steps.push({
+            array: [...a],
+            states: makeStates(n, sorted, { [i]: "comparing", [lt]: "swapping" }),
+            description: `${a[i]} < pivot ${pivot} → swap arr[${i}] ↔ arr[${lt}]`,
+            comparisons, swaps, pseudocodeLine: 4,
+          });
+          [a[lt], a[i]] = [a[i], a[lt]];
+          swaps++;
+          lt++; i++;
+        } else if (a[i] > pivot) {
+          steps.push({
+            array: [...a],
+            states: makeStates(n, sorted, { [i]: "comparing", [gt]: "swapping" }),
+            description: `${a[i]} > pivot ${pivot} → swap arr[${i}] ↔ arr[${gt}]`,
+            comparisons, swaps, pseudocodeLine: 5,
+          });
+          [a[i], a[gt]] = [a[gt], a[i]];
+          swaps++;
+          gt--;
+        } else {
+          steps.push({
+            array: [...a],
+            states: makeStates(n, sorted, { [i]: "minimum" }),
+            description: `${a[i]} = pivot ${pivot} → equal region`,
+            comparisons, swaps, pseudocodeLine: 6,
+          });
+          i++;
+        }
+      }
+
+      for (let x = lt; x <= gt; x++) sorted.add(x);
+      steps.push({
+        array: [...a],
+        states: makeStates(n, sorted, {}),
+        description: `Partitioned: [${lo}..${lt - 1}] < ${pivot} | [${lt}..${gt}] = ${pivot} | [${gt + 1}..${hi}] > ${pivot}`,
+        comparisons, swaps, pseudocodeLine: 7,
+      });
+
+      const hasLeft  = lo < lt;
+      const hasRight = gt + 1 <= hi;
+      if (!hasLeft && !hasRight) break;
+      if (!hasLeft)  { lo = gt + 1; continue; }
+      if (!hasRight) { hi = lt - 1; continue; }
+
+      const leftSize  = lt - 1 - lo;
+      const rightSize = hi - gt - 1;
+      if (leftSize <= rightSize) {
+        stack.push([lo, lt - 1]);
+        lo = gt + 1;
+      } else {
+        stack.push([gt + 1, hi]);
+        hi = lt - 1;
+      }
+    }
+
+    if (lo === hi && !sorted.has(lo)) sorted.add(lo);
+  }
+
+  steps.push({
+    array: [...a],
+    states: Array(n).fill("sorted"),
+    description: "Array is fully sorted!",
+    comparisons, swaps, pseudocodeLine: -1,
+  });
+  return steps;
+}
+
 export function getSteps(algorithm: SortAlgorithm, arr: number[]): SortStep[] {
   switch (algorithm) {
     case "bubble":
@@ -964,6 +1112,8 @@ export function getSteps(algorithm: SortAlgorithm, arr: number[]): SortStep[] {
       return getBucketSortSteps(arr);
     case "timsort":
       return getTimSortSteps(arr);
+    case "logos":
+      return getLogosSortSteps(arr);
   }
 }
 
