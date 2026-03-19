@@ -276,6 +276,9 @@ export default function BenchmarkVisualizer() {
   const [runConfig, setRunConfig] = useState<{
     sizes: number[]; scenario: string; trials: number; algos: string[];
   } | null>(null);
+  const [sampleProof, setSampleProof] = useState<{
+    before: number[]; after: number[]; n: number;
+  } | null>(null);
   const stopRef = useRef(false);
 
   // Slow algos are disabled if the largest selected size exceeds the threshold
@@ -341,6 +344,7 @@ export default function BenchmarkVisualizer() {
     stopRef.current = false;
     setStatus("running");
     setCurveData({});
+    setSampleProof(null);
     setProgress({ done: 0, total });
     setRunConfig({ sizes, scenario, trials, algos });
 
@@ -348,6 +352,7 @@ export default function BenchmarkVisualizer() {
     // Use a plain object accumulated locally, push to state after each measurement
     const acc: CurveData = {};
     const timedOutAlgos = new Set<string>();
+    let sampleCaptured = false;
 
     for (const sz of sizes) {
       if (stopRef.current) break;
@@ -363,13 +368,33 @@ export default function BenchmarkVisualizer() {
         const fn = SORT_FNS[id];
         let best = Infinity;
         let didTimeout = false;
-        for (let t = 0; t < trials; t++) {
+
+        // Capture a before/after proof sample from the very first sort run
+        if (!sampleCaptured) {
+          const SAMPLE = 24;
+          const step = Math.max(1, Math.floor(input.length / SAMPLE));
+          const before = Array.from({ length: SAMPLE }, (_, i) => input[i * step]);
+          const sorted = fn([...input]);
+          const after = Array.from({ length: SAMPLE }, (_, i) => sorted[i * step]);
+          setSampleProof({ before, after, n: sz });
+          sampleCaptured = true;
+          // Time this first run separately so it still counts
           const copy = [...input];
           const t0 = performance.now();
           fn(copy);
-          const elapsed = performance.now() - t0;
-          best = Math.min(best, elapsed);
-          if (elapsed >= TIMEOUT_MS) { didTimeout = true; best = elapsed; break; }
+          best = performance.now() - t0;
+          if (best >= TIMEOUT_MS) didTimeout = true;
+        }
+
+        if (!didTimeout) {
+          for (let t = sampleCaptured && done === 0 ? 1 : 0; t < trials; t++) {
+            const copy = [...input];
+            const t0 = performance.now();
+            fn(copy);
+            const elapsed = performance.now() - t0;
+            best = Math.min(best, elapsed);
+            if (elapsed >= TIMEOUT_MS) { didTimeout = true; best = elapsed; break; }
+          }
         }
 
         if (!acc[id]) acc[id] = [];
@@ -394,6 +419,7 @@ export default function BenchmarkVisualizer() {
     stopRef.current = true;
     setStatus("idle");
     setCurveData({});
+    setSampleProof(null);
     setCurrentN(null);
     setCurrentAlgo(null);
     setRunConfig(null);
@@ -801,6 +827,47 @@ export default function BenchmarkVisualizer() {
                         {" "}dotted line / ✕ = timed out (&gt;30 s); subsequent sizes skipped
                       </p>
                     )}
+                  </div>
+                )}
+
+                {/* Before / after proof sample */}
+                {sampleProof && (
+                  <div className="mt-4 pt-4" style={{ borderTop: "1px solid var(--color-border)" }}>
+                    <p className="text-xs font-semibold uppercase tracking-wider mb-2.5" style={{ color: "var(--color-muted)" }}>
+                      Proof · 24 values sampled from n={fmtN(sampleProof.n)}
+                    </p>
+                    {(["before", "after"] as const).map(phase => {
+                      const vals = sampleProof[phase];
+                      const max = Math.max(...sampleProof.before);
+                      return (
+                        <div key={phase} className="mb-2">
+                          <span className="text-xs font-mono mr-2" style={{ color: "var(--color-muted)", minWidth: 40, display: "inline-block" }}>
+                            {phase === "before" ? "before" : "after "}
+                          </span>
+                          <span className="inline-flex flex-wrap gap-1">
+                            {vals.map((v, i) => {
+                              const pct = max > 0 ? v / max : 0;
+                              const hue = Math.round(200 - pct * 200); // blue→green: high=green(120), low=blue(200)
+                              const bg = `hsl(${hue}, 80%, 38%)`;
+                              return (
+                                <span key={i} style={{
+                                  display: "inline-block",
+                                  fontSize: 10,
+                                  fontFamily: "monospace",
+                                  padding: "1px 5px",
+                                  borderRadius: 4,
+                                  background: bg,
+                                  color: "#fff",
+                                  border: `1px solid hsl(${hue}, 80%, 52%)`,
+                                }}>
+                                  {v}
+                                </span>
+                              );
+                            })}
+                          </span>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
 
