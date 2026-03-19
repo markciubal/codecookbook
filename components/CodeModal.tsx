@@ -2,10 +2,11 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { GripVertical } from "lucide-react";
+import { GripVertical, Mic, MicOff } from "lucide-react";
 import { ANNOTATED_CODE, LANGUAGE_META, LANGUAGES } from "@/lib/annotatedCode";
 import type { Language } from "@/lib/annotatedCode";
 import { getSortHighlightLines, getMethodLineRange } from "@/lib/codeUtils";
+import { VOICE_NARRATION } from "@/lib/voiceNarration";
 
 interface Props {
   isOpen: boolean;
@@ -36,9 +37,31 @@ function ModalBody({
   activeMethod,
 }: Props) {
   const hasPseudo = Boolean(pseudocode && pseudocode.length > 0);
-  const [tab, setTab]   = useState<"pseudocode" | "code">(hasPseudo ? "pseudocode" : "code");
-  const [lang, setLang] = useState<Language>("typescript");
-  const [pos, setPos]   = useState({ x: 80, y: 80 });
+  const [tab, setTab]        = useState<"pseudocode" | "code">(hasPseudo ? "pseudocode" : "code");
+  const [lang, setLang]      = useState<Language>("typescript");
+  const [pos, setPos]        = useState({ x: 80, y: 80 });
+  const [voiceOn, setVoiceOn]               = useState(false);
+  const [voices, setVoices]                 = useState<SpeechSynthesisVoice[]>([]);
+  const [selectedVoiceURI, setSelectedVoiceURI] = useState<string>("");
+
+  // Load browser voices (async on Chrome/Edge)
+  useEffect(() => {
+    const load = () => {
+      const v = window.speechSynthesis.getVoices();
+      if (!v.length) return;
+      setVoices(v);
+      setSelectedVoiceURI((prev) => {
+        if (prev) return prev;
+        const female = v.find((x) =>
+          /female|woman|zira|samantha|victoria|karen|tessa|moira|fiona/i.test(x.name)
+        ) ?? v[0];
+        return female.voiceURI;
+      });
+    };
+    load();
+    window.speechSynthesis.addEventListener("voiceschanged", load);
+    return () => window.speechSynthesis.removeEventListener("voiceschanged", load);
+  }, []);
 
   // Center on first mount
   useEffect(() => {
@@ -47,6 +70,27 @@ function ModalBody({
       y: Math.max(20, Math.min(window.innerHeight - 400, 80)),
     });
   }, []);
+
+  // ── Voice narration ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!voiceOn || tab !== "pseudocode") return;
+    if (activePseudocodeLine === undefined || activePseudocodeLine < 0) return;
+    const narration = VOICE_NARRATION[algorithmId]?.[activePseudocodeLine]
+      ?? pseudocode?.[activePseudocodeLine]?.trim();
+    if (!narration) return;
+    window.speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(narration);
+    utter.rate = 0.95;
+    const voice = voices.find((v) => v.voiceURI === selectedVoiceURI);
+    if (voice) utter.voice = voice;
+    window.speechSynthesis.speak(utter);
+  }, [activePseudocodeLine, voiceOn, tab, pseudocode, voices, selectedVoiceURI]);
+
+  // Cancel speech when voice is turned off or modal unmounts
+  useEffect(() => {
+    if (!voiceOn) window.speechSynthesis.cancel();
+  }, [voiceOn]);
+  useEffect(() => () => { window.speechSynthesis.cancel(); }, []);
 
   // ── Dragging ────────────────────────────────────────────────────────────────
   const dragging   = useRef(false);
@@ -185,6 +229,54 @@ function ModalBody({
         <TabBtn active={tab === "code"} onClick={() => setTab("code")}>
           Code
         </TabBtn>
+
+        {tab === "pseudocode" && hasPseudo && (
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
+            {voices.length > 0 && (
+              <select
+                value={selectedVoiceURI}
+                onChange={(e) => setSelectedVoiceURI(e.target.value)}
+                title="Select voice"
+                style={{
+                  fontSize: 11,
+                  padding: "3px 6px",
+                  borderRadius: 6,
+                  background: "var(--color-surface-3)",
+                  border: "1px solid var(--color-border)",
+                  color: "var(--color-text)",
+                  cursor: "pointer",
+                  outline: "none",
+                  maxWidth: 140,
+                }}
+              >
+                {voices.map((v) => (
+                  <option key={v.voiceURI} value={v.voiceURI}>
+                    {v.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            <button
+              onClick={() => setVoiceOn((p) => !p)}
+              title={voiceOn ? "Turn voice off" : "Turn voice on"}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+                padding: "3px 8px",
+                borderRadius: 6,
+                fontSize: 11,
+                background: voiceOn ? "var(--color-accent-muted)" : "var(--color-surface-3)",
+                border: `1px solid ${voiceOn ? "var(--color-accent)" : "var(--color-border)"}`,
+                color: voiceOn ? "var(--color-accent)" : "var(--color-muted)",
+                cursor: "pointer",
+              }}
+            >
+              {voiceOn ? <Mic size={11} strokeWidth={2} /> : <MicOff size={11} strokeWidth={2} />}
+              {voiceOn ? "Voice on" : "Voice off"}
+            </button>
+          </div>
+        )}
 
         {tab === "code" && (
           <select

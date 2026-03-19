@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Play, Pause, SkipBack, SkipForward, ChevronLeft, ChevronRight, RotateCcw, Settings, Info, Volume2, VolumeX, Timer } from "lucide-react";
+import { RotateCcw, Settings, Volume2, VolumeX, BrainCircuit } from "lucide-react";
+import PlaybackControls from "./PlaybackControls";
 import {
   generateArray,
   getSteps,
@@ -9,6 +10,7 @@ import {
   ALGORITHM_META,
 } from "@/lib/algorithms";
 import type { SortAlgorithm, SortStep } from "@/lib/types";
+import { MNEMONICS } from "@/lib/mnemonics";
 import CodePanel from "./CodePanel";
 import CodeModal from "./CodeModal";
 import PanelModal from "./PanelModal";
@@ -17,18 +19,6 @@ interface Props {
   algorithm: SortAlgorithm;
 }
 
-const SPEED_MIN = 20;   // fastest (ms)
-const SPEED_MAX = 1200; // slowest (ms)
-
-const FINISH_PRESETS = [
-  { label: "1s",  ms: 1_000 },
-  { label: "5s",  ms: 5_000 },
-  { label: "10s", ms: 10_000 },
-  { label: "15s", ms: 15_000 },
-  { label: "30s", ms: 30_000 },
-  { label: "1m",  ms: 60_000 },
-  { label: "5m",  ms: 300_000 },
-];
 
 export default function SortingVisualizer({ algorithm }: Props) {
   const meta = ALGORITHM_META[algorithm];
@@ -42,6 +32,7 @@ export default function SortingVisualizer({ algorithm }: Props) {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isMuted, setIsMuted] = useState(true);
+  const [isMnemonicOpen, setIsMnemonicOpen] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
 
@@ -110,8 +101,6 @@ export default function SortingVisualizer({ algorithm }: Props) {
   const sortedCount = step.states.filter((s) => s === "sorted").length;
   const sortedPct = Math.round((sortedCount / step.array.length) * 100);
 
-  const canBack = stepIdx > 0;
-  const canForward = stepIdx < steps.length - 1;
 
   return (
     <div className="flex flex-col h-dvh overflow-hidden">
@@ -128,7 +117,7 @@ export default function SortingVisualizer({ algorithm }: Props) {
             <button
               onClick={() => setIsMuted((p) => !p)}
               title={isMuted ? "Unmute" : "Mute"}
-              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-mono transition-colors"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-mono transition-colors"
               style={{
                 background: "var(--color-surface-3)",
                 border: "1px solid var(--color-border)",
@@ -140,9 +129,22 @@ export default function SortingVisualizer({ algorithm }: Props) {
               {isMuted ? "Sound off" : "Sound on"}
             </button>
             <button
+              onClick={() => setIsMnemonicOpen((p) => !p)}
+              title="Mnemonic Devices"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-mono transition-colors"
+              style={{
+                background: isMnemonicOpen ? "var(--color-accent)" : "var(--color-surface-3)",
+                border: "1px solid var(--color-border)",
+                color: isMnemonicOpen ? "#fff" : "var(--color-muted)",
+                cursor: "pointer",
+              }}
+            >
+              <BrainCircuit size={13} strokeWidth={1.75} /> Mnemonics
+            </button>
+            <button
               onClick={() => setIsSettingsOpen((p) => !p)}
               title="Settings"
-              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-mono transition-colors"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-mono transition-colors"
               style={{
                 background: isSettingsOpen ? "var(--color-accent)" : "var(--color-surface-3)",
                 border: "1px solid var(--color-border)",
@@ -155,7 +157,7 @@ export default function SortingVisualizer({ algorithm }: Props) {
             <button
               onClick={() => setIsModalOpen(true)}
               title="View Code"
-              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-mono transition-colors"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-mono transition-colors"
               style={{
                 background: isModalOpen ? "var(--color-accent)" : "var(--color-surface-3)",
                 border: "1px solid var(--color-border)",
@@ -233,85 +235,23 @@ export default function SortingVisualizer({ algorithm }: Props) {
             ))}
           </div>
 
-          {/* Progress scrubber */}
-          <input
-            type="range"
-            min={0}
-            max={Math.max(0, steps.length - 1)}
-            value={stepIdx}
-            onChange={(e) => { setIsPlaying(false); setStepIdx(Number(e.target.value)); }}
-            className="w-full"
-            style={{ accentColor: "var(--color-accent)", cursor: "pointer" }}
+          <PlaybackControls
+            stepCount={steps.length}
+            stepIdx={stepIdx}
+            setStepIdx={setStepIdx}
+            isPlaying={isPlaying}
+            setIsPlaying={setIsPlaying}
+            speed={speed}
+            setSpeed={setSpeed}
+            onReset={reset}
           />
-
-          {/* Playback controls + inline speed */}
-          <div className="flex flex-wrap items-center gap-2">
-            <Btn onClick={() => { setIsPlaying(false); setStepIdx(0); }} disabled={!canBack}><SkipBack size={14} strokeWidth={1.75} /></Btn>
-            <Btn onClick={() => { setIsPlaying(false); setStepIdx((p) => Math.max(0, p - 1)); }} disabled={!canBack}><ChevronLeft size={14} strokeWidth={1.75} /></Btn>
-            <Btn
-              primary
-              onClick={() => setIsPlaying((p) => !p)}
-              disabled={!canForward}
-              style={{ minWidth: 88 }}
-            >
-              {isPlaying ? <><Pause size={13} strokeWidth={1.75} /> Pause</> : <><Play size={13} strokeWidth={1.75} /> Play</>}
-            </Btn>
-            <Btn onClick={() => { setIsPlaying(false); setStepIdx((p) => Math.min(steps.length - 1, p + 1)); }} disabled={!canForward}><ChevronRight size={14} strokeWidth={1.75} /></Btn>
-            <Btn onClick={() => { setIsPlaying(false); setStepIdx(steps.length - 1); }} disabled={!canForward}><SkipForward size={14} strokeWidth={1.75} /></Btn>
-            <Btn onClick={reset}><RotateCcw size={13} strokeWidth={1.75} /> Reset</Btn>
-
-            {/* Inline speed slider */}
-            <div
-              className="flex items-center gap-2 pl-3 ml-1"
-              style={{ borderLeft: "1px solid var(--color-border)" }}
-            >
-              <span className="text-xs" style={{ color: "var(--color-muted)", whiteSpace: "nowrap" }}>
-                Slow
-              </span>
-              <input
-                type="range"
-                min={SPEED_MIN}
-                max={SPEED_MAX}
-                step={10}
-                value={SPEED_MAX + SPEED_MIN - speed}
-                onChange={(e) => setSpeed(SPEED_MAX + SPEED_MIN - Number(e.target.value))}
-                style={{ width: 80, accentColor: "var(--color-accent)", cursor: "pointer" }}
-              />
-              <span className="text-xs" style={{ color: "var(--color-muted)", whiteSpace: "nowrap" }}>
-                Fast
-              </span>
-            </div>
-          </div>
-
-          {/* Finish-in presets */}
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center gap-1 text-xs" style={{ color: "var(--color-muted)", whiteSpace: "nowrap" }}>
-              <Timer size={12} strokeWidth={1.75} /> Finish in
-            </span>
-            {FINISH_PRESETS.map(({ label, ms }) => (
-              <button
-                key={label}
-                onClick={() => {
-                  const remaining = Math.max(1, steps.length - stepIdx - 1);
-                  setSpeed(Math.max(SPEED_MIN, Math.min(SPEED_MAX, Math.round(ms / remaining))));
-                  setIsPlaying(true);
-                }}
-                disabled={!canForward}
-                className="px-2 py-0.5 rounded text-xs font-mono transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                style={{
-                  background: "var(--color-surface-3)",
-                  border: "1px solid var(--color-border)",
-                  color: "var(--color-muted)",
-                  cursor: "pointer",
-                }}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
         </div>
 
       </div>
+
+      <PanelModal isOpen={isMnemonicOpen} onClose={() => setIsMnemonicOpen(false)} title="Mnemonic Devices">
+        <MnemonicPanel algorithm={algorithm} />
+      </PanelModal>
 
       <PanelModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} title="Settings">
         <SettingsPanel
@@ -382,37 +322,6 @@ function Badge({
     >
       {text}
     </span>
-  );
-}
-
-function Btn({
-  children,
-  onClick,
-  disabled,
-  primary,
-  style,
-}: {
-  children: React.ReactNode;
-  onClick?: () => void;
-  disabled?: boolean;
-  primary?: boolean;
-  style?: React.CSSProperties;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-      style={{
-        background: primary ? "var(--color-accent)" : "var(--color-surface-3)",
-        color: primary ? "#fff" : "var(--color-text)",
-        border: "1px solid " + (primary ? "var(--color-accent)" : "var(--color-border)"),
-        cursor: disabled ? "not-allowed" : "pointer",
-        ...style,
-      }}
-    >
-      {children}
-    </button>
   );
 }
 
@@ -533,3 +442,44 @@ function SettingsPanel({
     </div>
   );
 }
+
+function MnemonicPanel({ algorithm }: { algorithm: string }) {
+  const items = MNEMONICS[algorithm] ?? [];
+  if (items.length === 0) {
+    return (
+      <p style={{ color: "var(--color-muted)", fontSize: 13 }}>
+        No mnemonic devices available for this algorithm yet.
+      </p>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {items.map((m, i) => (
+        <div
+          key={i}
+          style={{
+            padding: "12px 14px",
+            borderRadius: 8,
+            background: "var(--color-surface-2)",
+            border: "1px solid var(--color-border)",
+          }}
+        >
+          <div
+            style={{
+              fontSize: 12,
+              fontWeight: 700,
+              color: "var(--color-accent)",
+              marginBottom: 6,
+            }}
+          >
+            {m.headline}
+          </div>
+          <div style={{ fontSize: 12, color: "var(--color-muted)", lineHeight: 1.65 }}>
+            {m.body}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+

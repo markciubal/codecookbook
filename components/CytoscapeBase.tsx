@@ -13,10 +13,11 @@ interface Props {
   stylesheet: object[];
   style?: React.CSSProperties;
   className?: string;
+  onReady?: () => void;
 }
 
 const CytoscapeBase = forwardRef<CytoscapeBaseHandle, Props>(
-  ({ stylesheet, style, className }, ref) => {
+  ({ stylesheet, style, className, onReady }, ref) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const cyRef = useRef<cytoscape.Core | null>(null);
 
@@ -42,6 +43,7 @@ const CytoscapeBase = forwardRef<CytoscapeBaseHandle, Props>(
           boxSelectionEnabled: false,
           autoungrabify: true,
         });
+        onReady?.();
       });
 
       return () => {

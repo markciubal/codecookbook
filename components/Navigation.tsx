@@ -154,8 +154,34 @@ export default function Navigation() {
             <Heart size={14} strokeWidth={2} />
             Donate via PayPal
           </Link>
-          <p className="text-xs text-center" style={{ color: "var(--color-muted)" }}>
-            Inspired by VisuAlgo
+          <p className="text-xs text-center" style={{ color: "var(--color-muted)", lineHeight: 1.7 }}>
+            Inspired by{" "}
+            <a
+              href="http://devincook.com/csc/130/"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: "var(--color-accent)", textDecoration: "underline" }}
+            >
+              Devin Cook
+            </a>
+            {", "}
+            <a
+              href="https://visualgo.net"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: "var(--color-accent)", textDecoration: "underline" }}
+            >
+              VisuAlgo
+            </a>
+            {" & "}
+            <a
+              href="https://www.youtube.com/@TimoBingmann"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: "var(--color-accent)", textDecoration: "underline" }}
+            >
+              Timo Bingmann
+            </a>
           </p>
         </div>
       </aside>
