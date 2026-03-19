@@ -308,8 +308,8 @@ export default function GraphVisualizer() {
     if (traversalSteps.length > 0) return;
     const cy = cyHandle.current?.cy() ?? null;
     if (!cy) return;
-    cy.nodes().forEach(n => n.removeClass("visited current queued start"));
-    cy.edges().forEach(e => e.removeClass("traversed shortest"));
+    cy.nodes().forEach(n => { n.removeClass("visited current queued start"); });
+    cy.edges().forEach(e => { e.removeClass("traversed shortest"); });
   }, [traversalSteps.length]);
 
   // Toggle Cytoscape user interaction (pan/zoom/drag)
