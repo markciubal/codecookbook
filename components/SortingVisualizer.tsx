@@ -97,7 +97,6 @@ export default function SortingVisualizer({ algorithm }: Props) {
   if (!step) return null;
 
   const peak = Math.max(...step.array, 1);
-  const progress = steps.length > 1 ? (stepIdx / (steps.length - 1)) * 100 : 0;
   const sortedCount = step.states.filter((s) => s === "sorted").length;
   const sortedPct = Math.round((sortedCount / step.array.length) * 100);
 
@@ -169,6 +168,16 @@ export default function SortingVisualizer({ algorithm }: Props) {
             </button>
           </div>
         </div>
+        {meta.quote && (
+          <div className="flex items-baseline gap-2 mt-0.5">
+            <span className="text-sm italic" style={{ color: "var(--color-accent)" }}>
+              "{meta.quote.text}"
+            </span>
+            <span className="text-xs" style={{ color: "var(--color-muted)" }}>
+              — {meta.quote.attribution}
+            </span>
+          </div>
+        )}
         <p className="text-sm max-w-xl" style={{ color: "var(--color-muted)" }}>
           {meta.description}
         </p>
@@ -404,8 +413,8 @@ function SettingsPanel({
 
       {tab === "settings" ? (
         <div>
-          <Slider label="Array size" badge={String(size)} min={5} max={80} value={size} onChange={setSize} disabled={isPlaying} />
-          <Slider label="Max value" badge={String(maxVal)} min={10} max={500} value={maxVal} onChange={setMaxVal} disabled={isPlaying} />
+          <Slider label="Array size" badge={String(size)} min={5} max={512} value={size} onChange={setSize} disabled={isPlaying} />
+          <Slider label="Max value" badge={String(maxVal)} min={10} max={512} value={maxVal} onChange={setMaxVal} disabled={isPlaying} />
           <button
             onClick={onNewArray}
             disabled={isPlaying}

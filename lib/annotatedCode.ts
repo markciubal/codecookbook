@@ -7193,4 +7193,774 @@ func main() {
 // Time: O(n log n)  Space: O(n)  Stable: YES`,
 
   },
+
+  // ── LOGOS SORT (ULTRA) ─────────────────────────────────────────────────────
+  logos: {
+
+    typescript: `// Logos Ultra Sort — dual-φ-pivot introsort hybrid
+// (1) Counting sort shortcut  (2) Gallop pre-scan  (3/4) dual φ²/φ pivots
+// (5) per-level chaos         (6) dual partition    (7) smallest-first recursion
+// (8) introsort depth guard   (9) insertion sort base case
+const PHI  = 0.6180339887498949; // φ⁻¹  ≈ 0.618
+const PHI2 = 0.3819660112501051; // φ⁻²  ≈ 0.382
+
+function logosUltraSort(arr: number[]): number[] {
+  const n = arr.length;
+  if (n < 2) return arr.slice();
+  const a = arr.slice();
+  const depthLimit = 2 * Math.floor(Math.log2(n)) + 4;
+
+  function median3(x: number, y: number, z: number): number {
+    if (x > y) { const t = x; x = y; y = t; }
+    if (y > z) { const t = y; y = z; z = t; }
+    if (x > y) { const t = x; x = y; y = t; }
+    return y;
+  }
+  function ninther(lo: number, hi: number, idx: number): number {
+    return median3(a[Math.max(lo,idx-1)], a[idx], a[Math.min(hi,idx+1)]);
+  }
+  function dualPartition(lo: number, hi: number, p1: number, p2: number): [number, number] {
+    if (p1 > p2) { const t = p1; p1 = p2; p2 = t; }
+    let lt = lo, gt = hi, i = lo;
+    while (i <= gt) {
+      if      (a[i] < p1) { [a[lt], a[i]] = [a[i], a[lt]]; lt++; i++; }
+      else if (a[i] > p2) { [a[i], a[gt]] = [a[gt], a[i]]; gt--; }
+      else                 { i++; }
+    }
+    return [lt, gt];
+  }
+
+  function sort(lo: number, hi: number, depth: number): void {
+    while (lo < hi) {
+      const size = hi - lo + 1;
+      // (8) introsort guard
+      if (depth <= 0) {
+        const sub = a.slice(lo, hi+1).sort((x, y) => x - y);
+        for (let k = lo; k <= hi; k++) a[k] = sub[k - lo];
+        return;
+      }
+      // (9) base case: insertion sort
+      if (size <= 48) {
+        for (let i = lo+1; i <= hi; i++) {
+          const key = a[i]; let j = i-1;
+          while (j >= lo && a[j] > key) { a[j+1] = a[j]; j--; }
+          a[j+1] = key;
+        }
+        return;
+      }
+      // (1) counting sort shortcut
+      let mn = a[lo], mx = a[lo];
+      for (let k = lo+1; k <= hi; k++) { if (a[k]<mn) mn=a[k]; if (a[k]>mx) mx=a[k]; }
+      const span = mx - mn;
+      if (Number.isInteger(mn) && span < size * 4) {
+        const counts = new Array(span+1).fill(0);
+        for (let k = lo; k <= hi; k++) counts[a[k]-mn]++;
+        let k = lo;
+        for (let v = 0; v <= span; v++) { while (counts[v]-- > 0) a[k++] = v + mn; }
+        return;
+      }
+      // (2) gallop pre-scan
+      if (a[lo] <= a[lo+1] && a[lo+1] <= a[lo+2]) {
+        let sorted = true;
+        for (let k = lo; k < hi; k++) { if (a[k] > a[k+1]) { sorted = false; break; } }
+        if (sorted) return;
+        let reversed = true;
+        for (let k = lo; k < hi; k++) { if (a[k] < a[k+1]) { reversed = false; break; } }
+        if (reversed) {
+          for (let l = lo, r = hi; l < r; l++, r--) { [a[l], a[r]] = [a[r], a[l]]; }
+          return;
+        }
+      }
+      // (5) per-level chaos
+      let c = 0;
+      while (c === 0) c = Math.random() * 2 - 1;
+      const chaos = Math.abs(c);
+      // (3) dual φ-pivot indices  (4) ninther quality
+      const range = hi - lo;
+      const idx1 = lo + Math.min(range, Math.floor(range * PHI2 * chaos));
+      const idx2 = lo + Math.min(range, Math.floor(range * PHI  * chaos));
+      const p1 = ninther(lo, hi, idx1);
+      const p2 = ninther(lo, hi, idx2);
+      // (6) dual partition → three regions
+      const [lt, gt] = dualPartition(lo, hi, p1, p2);
+      // (7) smallest-first recursion
+      const regions: [number, number, number][] = [
+        [lt - lo,     lo,    lt - 1],
+        [gt - lt + 1, lt,    gt    ],
+        [hi - gt,     gt+1,  hi    ],
+      ];
+      regions.sort((x, y) => x[0] - y[0]);
+      if (regions[0][1] < regions[0][2]) sort(regions[0][1], regions[0][2], depth-1);
+      if (regions[1][1] < regions[1][2]) sort(regions[1][1], regions[1][2], depth-1);
+      lo = regions[2][1]; hi = regions[2][2]; depth--;
+    }
+  }
+
+  sort(0, n-1, depthLimit);
+  return a;
+}
+// Time: O(n log n)  Space: O(log n)  Stable: NO
+
+// ── demo ──
+const data = [64, 34, 25, 12, 22, 11, 90, 42, 5, 77];
+console.log("Before:", [...data]);
+console.log("After: ", logosUltraSort(data));
+// Run: npx ts-node solution.ts`,
+
+    javascript: `// Logos Ultra Sort — dual-φ-pivot introsort hybrid
+const PHI  = 0.6180339887498949;
+const PHI2 = 0.3819660112501051;
+
+function logosUltraSort(arr) {
+  const n = arr.length;
+  if (n < 2) return arr.slice();
+  const a = arr.slice();
+  const depthLimit = 2 * Math.floor(Math.log2(n)) + 4;
+
+  function median3(x, y, z) {
+    if (x>y){const t=x;x=y;y=t;} if(y>z){const t=y;y=z;z=t;} if(x>y){const t=x;x=y;y=t;}
+    return y;
+  }
+  function ninther(lo, hi, idx) {
+    return median3(a[Math.max(lo,idx-1)], a[idx], a[Math.min(hi,idx+1)]);
+  }
+  function dualPartition(lo, hi, p1, p2) {
+    if (p1>p2){const t=p1;p1=p2;p2=t;}
+    let lt=lo, gt=hi, i=lo;
+    while (i<=gt) {
+      if      (a[i]<p1){[a[lt],a[i]]=[a[i],a[lt]];lt++;i++;}
+      else if (a[i]>p2){[a[i],a[gt]]=[a[gt],a[i]];gt--;}
+      else               {i++;}
+    }
+    return [lt, gt];
+  }
+
+  function sort(lo, hi, depth) {
+    while (lo < hi) {
+      const size = hi - lo + 1;
+      if (depth<=0) {                                              // (8) guard
+        const sub=a.slice(lo,hi+1).sort((x,y)=>x-y);
+        for (let k=lo;k<=hi;k++) a[k]=sub[k-lo]; return;
+      }
+      if (size<=48) {                                             // (9) base
+        for (let i=lo+1;i<=hi;i++){const key=a[i];let j=i-1;while(j>=lo&&a[j]>key){a[j+1]=a[j];j--;}a[j+1]=key;}
+        return;
+      }
+      let mn=a[lo],mx=a[lo];                                     // (1) counting
+      for (let k=lo+1;k<=hi;k++){if(a[k]<mn)mn=a[k];if(a[k]>mx)mx=a[k];}
+      const span=mx-mn;
+      if (Number.isInteger(mn)&&span<size*4) {
+        const counts=new Array(span+1).fill(0);
+        for (let k=lo;k<=hi;k++) counts[a[k]-mn]++;
+        let k=lo; for(let v=0;v<=span;v++){while(counts[v]-->0)a[k++]=v+mn;} return;
+      }
+      if (a[lo]<=a[lo+1]&&a[lo+1]<=a[lo+2]) {                   // (2) gallop
+        let ok=true; for(let k=lo;k<hi;k++){if(a[k]>a[k+1]){ok=false;break;}}
+        if (ok) return;
+        let rev=true; for(let k=lo;k<hi;k++){if(a[k]<a[k+1]){rev=false;break;}}
+        if (rev){for(let l=lo,r=hi;l<r;l++,r--){[a[l],a[r]]=[a[r],a[l]];}return;}
+      }
+      let c=0; while(c===0) c=Math.random()*2-1;                // (5) chaos
+      const chaos=Math.abs(c), range=hi-lo;
+      const idx1=lo+Math.min(range,Math.floor(range*PHI2*chaos)); // (3) pivots
+      const idx2=lo+Math.min(range,Math.floor(range*PHI *chaos));
+      const p1=ninther(lo,hi,idx1), p2=ninther(lo,hi,idx2);     // (4) ninther
+      const [lt,gt]=dualPartition(lo,hi,p1,p2);                 // (6) partition
+      const regions=[                                             // (7) smallest-first
+        [lt-lo,lo,lt-1],[gt-lt+1,lt,gt],[hi-gt,gt+1,hi]
+      ].sort((x,y)=>x[0]-y[0]);
+      if(regions[0][1]<regions[0][2]) sort(regions[0][1],regions[0][2],depth-1);
+      if(regions[1][1]<regions[1][2]) sort(regions[1][1],regions[1][2],depth-1);
+      lo=regions[2][1]; hi=regions[2][2]; depth--;
+    }
+  }
+  sort(0, n-1, depthLimit);
+  return a;
+}
+// Time: O(n log n)  Space: O(log n)  Stable: NO
+
+// ── demo ──
+const data = [64, 34, 25, 12, 22, 11, 90, 42, 5, 77];
+console.log("Before:", [...data]);
+console.log("After: ", logosUltraSort(data));
+// Run: node solution.js`,
+
+    python: `import random
+import math
+
+# Fixed-point φ constants (integer arithmetic for exact pivot positioning)
+PHI_SHIFT = 61
+PHI_NUM   = round(0.6180339887498949 * (1 << PHI_SHIFT))  # φ⁻¹ × 2^61
+PHI2_NUM  = round(0.3819660112501051 * (1 << PHI_SHIFT))  # φ⁻² × 2^61
+
+
+def logos_ultra_sort(arr):
+    import math as _math
+
+    n = len(arr)
+    if n < 2:
+        return arr[:]
+
+    depth_limit = 2 * int(_math.log2(n)) + 4
+
+    def _ninther(a, lo, hi, idx):
+        i0, i2 = max(lo, idx - 1), min(hi, idx + 1)
+        x, y, z = a[i0], a[idx], a[i2]
+        if x > y: x, y = y, x
+        if y > z: y, z = z, y
+        if x > y: x, y = y, x
+        return y  # median
+
+    def _dual_partition(a, lo, hi, p1, p2):
+        if p1 > p2:
+            p1, p2 = p2, p1
+        lt, gt, i = lo, hi, lo
+        while i <= gt:
+            v = a[i]
+            if v < p1:
+                a[lt], a[i] = a[i], a[lt]
+                lt += 1; i += 1
+            elif v > p2:
+                a[i], a[gt] = a[gt], a[i]
+                gt -= 1
+            else:
+                i += 1
+        return lt, gt
+
+    def _sort(a, lo, hi, depth):
+        while lo < hi:
+            size = hi - lo + 1
+
+            if depth <= 0:                          # (8) introsort guard
+                a[lo:hi + 1] = sorted(a[lo:hi + 1])
+                return
+
+            if size <= 48:                          # (9) base case
+                a[lo:hi + 1] = sorted(a[lo:hi + 1])
+                break
+
+            if isinstance(a[lo], int):              # (1) counting sort shortcut
+                mn = min(a[lo:hi + 1])
+                mx = max(a[lo:hi + 1])
+                span = mx - mn
+                if span < size * 4:
+                    counts = [0] * (span + 1)
+                    for i in range(lo, hi + 1):
+                        counts[a[i] - mn] += 1
+                    k = lo
+                    for v, cnt in enumerate(counts):
+                        if cnt:
+                            a[k:k + cnt] = [v + mn] * cnt
+                            k += cnt
+                    break
+
+            if a[lo] <= a[lo+1] <= a[lo+2]:        # (2) gallop pre-scan
+                if all(a[i] <= a[i+1] for i in range(lo, hi)):
+                    break
+                if all(a[i] >= a[i+1] for i in range(lo, hi)):
+                    a[lo:hi+1] = a[lo:hi+1][::-1]
+                    break
+
+            c = 0.0
+            while c == 0.0:
+                c = random.uniform(-1.0, 1.0)
+            chaos_int = int(abs(c) * (1 << 53))    # (5) per-level chaos
+
+            pn1 = PHI2_NUM * chaos_int              # (3) dual φ-pivot indices
+            pn2 = PHI_NUM  * chaos_int
+            ps  = PHI_SHIFT + 53
+            span = hi - lo
+            idx1 = lo + (span * pn1 >> ps)
+            idx2 = lo + (span * pn2 >> ps)
+
+            p1 = _ninther(a, lo, hi, idx1)          # (4) ninther quality
+            p2 = _ninther(a, lo, hi, idx2)
+
+            lt, gt = _dual_partition(a, lo, hi, p1, p2)  # (6) 3-region partition
+
+            left_n  = lt - lo
+            mid_n   = gt - lt + 1
+            right_n = hi - gt
+
+            regions = sorted(                       # (7) smallest-first recursion
+                [(left_n, lo, lt-1), (mid_n, lt, gt), (right_n, gt+1, hi)],
+                key=lambda r: r[0]
+            )
+            for _, r_lo, r_hi in regions[:2]:
+                if r_lo < r_hi:
+                    _sort(a, r_lo, r_hi, depth - 1)
+            lo, hi = regions[2][1], regions[2][2]
+            depth -= 1
+
+    a = arr[:]
+    _sort(a, 0, n - 1, depth_limit)
+    return a
+# Time: O(n log n)  Space: O(log n)  Stable: NO
+
+# ── demo ──
+data = [64, 34, 25, 12, 22, 11, 90, 42, 5, 77]
+print("Before:", data[:])
+print("After: ", logos_ultra_sort(data))
+# Run: python solution.py`,
+
+    java: `import java.util.*;
+
+// Logos Ultra Sort — dual-φ-pivot introsort hybrid
+public class Solution {
+    private static final double PHI  = 0.6180339887498949;
+    private static final double PHI2 = 0.3819660112501051;
+    private static final int    BASE = 48;
+    private static final Random RNG  = new Random();
+
+    public static int[] logosUltraSort(int[] input) {
+        int[] a = Arrays.copyOf(input, input.length);
+        if (a.length < 2) return a;
+        int depth = 2 * (int)(Math.log(a.length) / Math.log(2)) + 4;
+        sort(a, 0, a.length - 1, depth);
+        return a;
+    }
+
+    private static int median3(int x, int y, int z) {
+        if (x>y){int t=x;x=y;y=t;} if(y>z){int t=y;y=z;z=t;} if(x>y){int t=x;x=y;y=t;}
+        return y;
+    }
+    private static int ninther(int[] a, int lo, int hi, int idx) {
+        return median3(a[Math.max(lo,idx-1)], a[idx], a[Math.min(hi,idx+1)]);
+    }
+    private static int[] dualPartition(int[] a, int lo, int hi, int p1, int p2) {
+        if (p1>p2){int t=p1;p1=p2;p2=t;}
+        int lt=lo, gt=hi, i=lo;
+        while (i<=gt) {
+            if      (a[i]<p1){int t=a[lt];a[lt++]=a[i];a[i++]=t;}
+            else if (a[i]>p2){int t=a[i];a[i]=a[gt];a[gt--]=t;}
+            else               {i++;}
+        }
+        return new int[]{lt, gt};
+    }
+    private static void ins(int[] a, int lo, int hi) {
+        for (int i=lo+1;i<=hi;i++){int key=a[i],j=i-1;while(j>=lo&&a[j]>key)a[j+1]=a[j--];a[j+1]=key;}
+    }
+
+    private static void sort(int[] a, int lo, int hi, int depth) {
+        while (lo < hi) {
+            int size = hi - lo + 1;
+            if (depth<=0){Arrays.sort(a,lo,hi+1);return;}          // (8) guard
+            if (size<=BASE){ins(a,lo,hi);return;}                    // (9) base
+            int mn=a[lo],mx=a[lo];
+            for(int k=lo+1;k<=hi;k++){if(a[k]<mn)mn=a[k];if(a[k]>mx)mx=a[k];}
+            int span=mx-mn;
+            if((long)span<(long)size*4){                             // (1) counting
+                int[] c=new int[span+1];
+                for(int k=lo;k<=hi;k++)c[a[k]-mn]++;
+                int k=lo;for(int v=0;v<=span;v++)while(c[v]-->0)a[k++]=v+mn;
+                return;
+            }
+            if(a[lo]<=a[lo+1]&&a[lo+1]<=a[lo+2]){                  // (2) gallop
+                boolean ok=true;for(int k=lo;k<hi;k++)if(a[k]>a[k+1]){ok=false;break;}
+                if(ok)return;
+                boolean rev=true;for(int k=lo;k<hi;k++)if(a[k]<a[k+1]){rev=false;break;}
+                if(rev){for(int l=lo,r=hi;l<r;l++,r--){int t=a[l];a[l]=a[r];a[r]=t;}return;}
+            }
+            double ch=0;while(ch==0)ch=Math.abs(RNG.nextDouble()*2-1); // (5) chaos
+            int range=hi-lo;
+            int idx1=lo+(int)Math.min(range,range*PHI2*ch);           // (3) pivots
+            int idx2=lo+(int)Math.min(range,range*PHI *ch);
+            int p1=ninther(a,lo,hi,idx1),p2=ninther(a,lo,hi,idx2);   // (4) ninther
+            int[] b=dualPartition(a,lo,hi,p1,p2);                     // (6) partition
+            int lt=b[0],gt=b[1];
+            int[][] regions={{lt-lo,lo,lt-1},{gt-lt+1,lt,gt},{hi-gt,gt+1,hi}};
+            Arrays.sort(regions,(x,y)->x[0]-y[0]);                    // (7) smallest-first
+            if(regions[0][1]<regions[0][2])sort(a,regions[0][1],regions[0][2],depth-1);
+            if(regions[1][1]<regions[1][2])sort(a,regions[1][1],regions[1][2],depth-1);
+            lo=regions[2][1];hi=regions[2][2];depth--;
+        }
+    }
+
+    public static void main(String[] args) {
+        int[] data={64,34,25,12,22,11,90,42,5,77};
+        System.out.println("Before: "+Arrays.toString(data));
+        System.out.println("After:  "+Arrays.toString(logosUltraSort(data)));
+    }
+}
+// Time: O(n log n)  Space: O(log n)  Stable: NO
+// Run: javac Solution.java && java Solution`,
+
+    c: `#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <time.h>
+
+/* Logos Ultra Sort — dual-φ-pivot introsort hybrid */
+#define PHI  0.6180339887498949
+#define PHI2 0.3819660112501051
+#define BASE 48
+
+static int cmp_int(const void *x, const void *y){return *(int*)x-*(int*)y;}
+
+static int median3(int x,int y,int z){
+    if(x>y){int t=x;x=y;y=t;} if(y>z){int t=y;y=z;z=t;} if(x>y){int t=x;x=y;y=t;}
+    return y;
+}
+static int ninther(int *a,int lo,int hi,int idx){
+    int i0=idx-1>lo?idx-1:lo, i2=idx+1<hi?idx+1:hi;
+    return median3(a[i0],a[idx],a[i2]);
+}
+static void sw(int *a,int i,int j){int t=a[i];a[i]=a[j];a[j]=t;}
+static void ins(int *a,int lo,int hi){
+    for(int i=lo+1;i<=hi;i++){int key=a[i],j=i-1;while(j>=lo&&a[j]>key)a[j+1]=a[j--];a[j+1]=key;}
+}
+
+static void logos_rec(int *a,int lo,int hi,int depth){
+    while(lo<hi){
+        int size=hi-lo+1;
+        if(depth<=0){qsort(a+lo,size,sizeof(int),cmp_int);return;} /* (8) guard */
+        if(size<=BASE){ins(a,lo,hi);return;}                          /* (9) base  */
+        int mn=a[lo],mx=a[lo];
+        for(int k=lo+1;k<=hi;k++){if(a[k]<mn)mn=a[k];if(a[k]>mx)mx=a[k];}
+        int span=mx-mn;
+        if((long long)span<(long long)size*4){                        /* (1) count */
+            int *c=(int*)calloc(span+1,sizeof(int));
+            for(int k=lo;k<=hi;k++)c[a[k]-mn]++;
+            int k=lo;for(int v=0;v<=span;v++)while(c[v]-->0)a[k++]=v+mn;
+            free(c);return;
+        }
+        if(a[lo]<=a[lo+1]&&a[lo+1]<=a[lo+2]){                       /* (2) gallop*/
+            int ok=1;for(int k=lo;k<hi;k++)if(a[k]>a[k+1]){ok=0;break;}
+            if(ok)return;
+            int rev=1;for(int k=lo;k<hi;k++)if(a[k]<a[k+1]){rev=0;break;}
+            if(rev){for(int l=lo,r=hi;l<r;l++,r--)sw(a,l,r);return;}
+        }
+        double ch=(double)rand()/RAND_MAX; if(ch==0.0)ch=0.5;        /* (5) chaos */
+        int range=hi-lo;
+        int idx1=lo+(int)(range*PHI2*ch); if(idx1>hi)idx1=hi;        /* (3) pivots*/
+        int idx2=lo+(int)(range*PHI *ch); if(idx2>hi)idx2=hi;
+        int p1=ninther(a,lo,hi,idx1),p2=ninther(a,lo,hi,idx2);       /* (4) ninther*/
+        if(p1>p2){int t=p1;p1=p2;p2=t;}
+        int lt=lo,gt=hi,i=lo;                                         /* (6) partition*/
+        while(i<=gt){
+            if(a[i]<p1)sw(a,lt++,i++); else if(a[i]>p2)sw(a,i,gt--); else i++;
+        }
+        /* (7) smallest-first: sort 3 regions by size */
+        int sz[3]={lt-lo,gt-lt+1,hi-gt};
+        int rlo[3]={lo,lt,gt+1},rhi[3]={lt-1,gt,hi};
+        for(int x=0;x<2;x++)for(int y=0;y<2;y++)if(sz[y]>sz[y+1]){
+            int ts=sz[y];sz[y]=sz[y+1];sz[y+1]=ts;
+            int tl=rlo[y];rlo[y]=rlo[y+1];rlo[y+1]=tl;
+            int th=rhi[y];rhi[y]=rhi[y+1];rhi[y+1]=th;
+        }
+        if(rlo[0]<rhi[0])logos_rec(a,rlo[0],rhi[0],depth-1);
+        if(rlo[1]<rhi[1])logos_rec(a,rlo[1],rhi[1],depth-1);
+        lo=rlo[2];hi=rhi[2];depth--;
+    }
+}
+
+void logos_ultra_sort(int *arr,int n){
+    if(n<2)return;
+    srand((unsigned)time(NULL));
+    logos_rec(arr,0,n-1,(int)(2*log2(n))+4);
+}
+
+int main(void){
+    int data[]={64,34,25,12,22,11,90,42,5,77};
+    int n=sizeof(data)/sizeof(data[0]);
+    printf("Before:"); for(int i=0;i<n;i++)printf(" %d",data[i]);
+    logos_ultra_sort(data,n);
+    printf("\nAfter: "); for(int i=0;i<n;i++)printf(" %d",data[i]);
+    printf("\n"); return 0;
+}
+/* Time: O(n log n)  Space: O(log n)  Stable: NO */
+/* Run: gcc -O2 -lm -o solution solution.c && ./solution */`,
+
+    cpp: `#include <iostream>
+#include <vector>
+#include <algorithm>
+#include <cmath>
+#include <random>
+
+// Logos Ultra Sort — dual-φ-pivot introsort hybrid
+constexpr double PHI  = 0.6180339887498949;
+constexpr double PHI2 = 0.3819660112501051;
+constexpr int    BASE = 48;
+
+namespace {
+std::mt19937_64 rng(std::random_device{}());
+double chaos() {
+    std::uniform_real_distribution<double> d(-1.0,1.0);
+    double c=0.0; while(c==0.0) c=d(rng); return std::abs(c);
+}
+int median3(int x,int y,int z){
+    if(x>y)std::swap(x,y); if(y>z)std::swap(y,z); if(x>y)std::swap(x,y); return y;
+}
+int ninther(std::vector<int>&a,int lo,int hi,int idx){
+    return median3(a[std::max(lo,idx-1)],a[idx],a[std::min(hi,idx+1)]);
+}
+std::pair<int,int> dualPart(std::vector<int>&a,int lo,int hi,int p1,int p2){
+    if(p1>p2)std::swap(p1,p2);
+    int lt=lo,gt=hi,i=lo;
+    while(i<=gt){
+        if(a[i]<p1)std::swap(a[lt++],a[i++]);
+        else if(a[i]>p2)std::swap(a[i],a[gt--]);
+        else i++;
+    }
+    return {lt,gt};
+}
+void ins(std::vector<int>&a,int lo,int hi){
+    for(int i=lo+1;i<=hi;i++){int key=a[i],j=i-1;while(j>=lo&&a[j]>key)a[j+1]=a[j--];a[j+1]=key;}
+}
+void sort_rec(std::vector<int>&a,int lo,int hi,int depth){
+    while(lo<hi){
+        int size=hi-lo+1;
+        if(depth<=0){std::sort(a.begin()+lo,a.begin()+hi+1);return;}     // (8)
+        if(size<=BASE){ins(a,lo,hi);return;}                               // (9)
+        auto [mn,mx]=std::minmax_element(a.begin()+lo,a.begin()+hi+1);
+        int span=*mx-*mn;
+        if((long long)span<(long long)size*4){                             // (1)
+            std::vector<int>c(span+1,0);
+            int base=*mn;
+            for(int k=lo;k<=hi;k++)c[a[k]-base]++;
+            int k=lo;for(int v=0;v<=span;v++)while(c[v]-->0)a[k++]=v+base;
+            return;
+        }
+        if(a[lo]<=a[lo+1]&&a[lo+1]<=a[lo+2]){                            // (2)
+            if(std::is_sorted(a.begin()+lo,a.begin()+hi+1))return;
+            if(std::is_sorted(a.begin()+lo,a.begin()+hi+1,std::greater<int>())){
+                std::reverse(a.begin()+lo,a.begin()+hi+1);return;
+            }
+        }
+        double ch=chaos(); int range=hi-lo;                                // (5)
+        int idx1=lo+(int)std::min((double)range,range*PHI2*ch);            // (3)
+        int idx2=lo+(int)std::min((double)range,range*PHI *ch);
+        int p1=ninther(a,lo,hi,idx1),p2=ninther(a,lo,hi,idx2);            // (4)
+        auto[lt,gt]=dualPart(a,lo,hi,p1,p2);                              // (6)
+        std::array<std::array<int,3>,3> regions{{{lt-lo,lo,lt-1},{gt-lt+1,lt,gt},{hi-gt,gt+1,hi}}};
+        std::sort(regions.begin(),regions.end(),[](auto&x,auto&y){return x[0]<y[0];}); // (7)
+        if(regions[0][1]<regions[0][2])sort_rec(a,regions[0][1],regions[0][2],depth-1);
+        if(regions[1][1]<regions[1][2])sort_rec(a,regions[1][1],regions[1][2],depth-1);
+        lo=regions[2][1];hi=regions[2][2];depth--;
+    }
+}
+}
+
+std::vector<int> logosUltraSort(std::vector<int> arr){
+    if((int)arr.size()<2)return arr;
+    int depth=(int)(2*std::log2(arr.size()))+4;
+    sort_rec(arr,0,(int)arr.size()-1,depth);
+    return arr;
+}
+
+int main(){
+    std::vector<int>data={64,34,25,12,22,11,90,42,5,77};
+    std::cout<<"Before:"; for(int x:data)std::cout<<" "<<x;
+    auto s=logosUltraSort(data);
+    std::cout<<"\nAfter: "; for(int x:s)std::cout<<" "<<x;
+    std::cout<<"\n"; return 0;
+}
+// Time: O(n log n)  Space: O(log n)  Stable: NO
+// Run: g++ -std=c++20 -O2 -o solution solution.cpp && ./solution`,
+
+    rust: `// Logos Ultra Sort — dual-φ-pivot introsort hybrid
+const PHI:  f64 = 0.618_033_988_749_894_9;
+const PHI2: f64 = 0.381_966_011_250_105_1;
+const BASE: usize = 48;
+
+fn median3(x: i32, y: i32, z: i32) -> i32 {
+    let mut a = [x, y, z];
+    if a[0]>a[1]{a.swap(0,1);} if a[1]>a[2]{a.swap(1,2);} if a[0]>a[1]{a.swap(0,1);}
+    a[1]
+}
+fn ninther(a: &[i32], lo: usize, hi: usize, idx: usize) -> i32 {
+    let i0 = lo.max(idx.saturating_sub(1));
+    let i2 = hi.min(idx + 1);
+    median3(a[i0], a[idx], a[i2])
+}
+fn dual_partition(a: &mut [i32], lo: usize, hi: usize, mut p1: i32, mut p2: i32) -> (usize, usize) {
+    if p1 > p2 { std::mem::swap(&mut p1, &mut p2); }
+    let (mut lt, mut gt, mut i) = (lo, hi, lo);
+    while i <= gt {
+        if      a[i] < p1 { a.swap(lt, i); lt += 1; i += 1; }
+        else if a[i] > p2 { a.swap(i, gt); if gt == 0 { break; } gt -= 1; }
+        else               { i += 1; }
+    }
+    (lt, gt)
+}
+fn ins(a: &mut [i32], lo: usize, hi: usize) {
+    for i in (lo + 1)..=hi {
+        let key = a[i]; let mut j = i;
+        while j > lo && a[j-1] > key { a[j] = a[j-1]; j -= 1; }
+        a[j] = key;
+    }
+}
+// Simple deterministic chaos using a global counter + time seed
+fn chaos_val() -> f64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CTR: AtomicU64 = AtomicU64::new(0x9e3779b97f4a7c15);
+    let s = CTR.fetch_add(0x6c62272e07bb0142, Ordering::Relaxed);
+    let s = s ^ (s >> 30); let s = s.wrapping_mul(0xbf58476d1ce4e5b9);
+    let s = s ^ (s >> 27); let s = s.wrapping_mul(0x94d049bb133111eb);
+    let f = (s >> 11) as f64 / (1u64 << 53) as f64;
+    if f == 0.0 { 0.5 } else { f }
+}
+
+fn logos_rec(a: &mut [i32], lo: usize, hi: usize, depth: i32) {
+    let (mut lo, mut hi, mut depth) = (lo, hi, depth);
+    while lo < hi {
+        let size = hi - lo + 1;
+        if depth <= 0 { a[lo..=hi].sort_unstable(); return; }         // (8)
+        if size <= BASE { ins(a, lo, hi); return; }                    // (9)
+        let mn = *a[lo..=hi].iter().min().unwrap();
+        let mx = *a[lo..=hi].iter().max().unwrap();
+        let span = (mx - mn) as usize;
+        if span < size * 4 {                                           // (1) counting
+            let mut c = vec![0usize; span + 1];
+            for k in lo..=hi { c[(a[k]-mn) as usize] += 1; }
+            let mut k = lo;
+            for v in 0..=span { while c[v]>0 { a[k]=(v as i32)+mn; k+=1; c[v]-=1; } }
+            return;
+        }
+        if a[lo]<=a[lo+1] && a[lo+1]<=a[lo+2] {                      // (2) gallop
+            if a[lo..=hi].windows(2).all(|w|w[0]<=w[1]) { return; }
+            if a[lo..=hi].windows(2).all(|w|w[0]>=w[1]) { a[lo..=hi].reverse(); return; }
+        }
+        let ch = chaos_val(); let range = hi - lo;                     // (5) chaos
+        let idx1 = lo + ((range as f64*PHI2*ch) as usize).min(range); // (3) pivots
+        let idx2 = lo + ((range as f64*PHI *ch) as usize).min(range);
+        let p1 = ninther(a, lo, hi, idx1);                             // (4) ninther
+        let p2 = ninther(a, lo, hi, idx2);
+        let (lt, gt) = dual_partition(a, lo, hi, p1, p2);             // (6) partition
+        let mut regions = [                                             // (7) smallest-first
+            (lt.saturating_sub(lo), lo,   lt.saturating_sub(1)),
+            (gt - lt + 1,           lt,   gt),
+            (if hi>gt{hi-gt}else{0},gt+1, hi),
+        ];
+        regions.sort_unstable_by_key(|r| r.0);
+        if regions[0].1 < regions[0].2 { logos_rec(a, regions[0].1, regions[0].2, depth-1); }
+        if regions[1].1 < regions[1].2 { logos_rec(a, regions[1].1, regions[1].2, depth-1); }
+        lo = regions[2].1; hi = regions[2].2; depth -= 1;
+    }
+}
+
+pub fn logos_ultra_sort(arr: &mut Vec<i32>) {
+    let n = arr.len();
+    if n < 2 { return; }
+    let depth = (2.0 * (n as f64).log2()) as i32 + 4;
+    logos_rec(arr, 0, n - 1, depth);
+}
+
+fn main() {
+    let mut data = vec![64, 34, 25, 12, 22, 11, 90, 42, 5, 77];
+    println!("Before: {:?}", data);
+    logos_ultra_sort(&mut data);
+    println!("After:  {:?}", data);
+}
+// Time: O(n log n)  Space: O(log n)  Stable: NO
+// Run: rustc solution.rs && ./solution`,
+
+    go: `package main
+
+import (
+	"fmt"
+	"math"
+	"math/rand"
+	"sort"
+)
+
+// Logos Ultra Sort — dual-φ-pivot introsort hybrid
+const (
+	phi  = 0.6180339887498949
+	phi2 = 0.3819660112501051
+	base = 48
+)
+
+func median3(x, y, z int) int {
+	if x > y { x, y = y, x }
+	if y > z { y, z = z, y }
+	if x > y { x, y = y, x }
+	return y
+}
+func ninther(a []int, lo, hi, idx int) int {
+	i0, i2 := lo, hi
+	if idx-1 >= lo { i0 = idx - 1 }
+	if idx+1 <= hi { i2 = idx + 1 }
+	return median3(a[i0], a[idx], a[i2])
+}
+func dualPartition(a []int, lo, hi, p1, p2 int) (int, int) {
+	if p1 > p2 { p1, p2 = p2, p1 }
+	lt, gt, i := lo, hi, lo
+	for i <= gt {
+		switch {
+		case a[i] < p1: a[lt], a[i] = a[i], a[lt]; lt++; i++
+		case a[i] > p2: a[i], a[gt] = a[gt], a[i]; gt--
+		default:        i++
+		}
+	}
+	return lt, gt
+}
+func insSort(a []int, lo, hi int) {
+	for i := lo + 1; i <= hi; i++ {
+		key, j := a[i], i-1
+		for j >= lo && a[j] > key { a[j+1] = a[j]; j-- }
+		a[j+1] = key
+	}
+}
+func logosRec(a []int, lo, hi, depth int) {
+	for lo < hi {
+		size := hi - lo + 1
+		if depth <= 0 { sort.Ints(a[lo:hi+1]); return }     // (8)
+		if size <= base { insSort(a, lo, hi); return }        // (9)
+		mn, mx := a[lo], a[lo]
+		for k := lo+1; k <= hi; k++ {
+			if a[k]<mn { mn=a[k] } else if a[k]>mx { mx=a[k] }
+		}
+		span := mx - mn
+		if span < size*4 {                                    // (1) counting
+			counts := make([]int, span+1)
+			for k := lo; k <= hi; k++ { counts[a[k]-mn]++ }
+			k := lo
+			for v, c := range counts { for ; c>0; c-- { a[k]=v+mn; k++ } }
+			return
+		}
+		if a[lo]<=a[lo+1] && a[lo+1]<=a[lo+2] {             // (2) gallop
+			sorted := true
+			for k := lo; k < hi; k++ { if a[k]>a[k+1] { sorted=false; break } }
+			if sorted { return }
+			rev := true
+			for k := lo; k < hi; k++ { if a[k]<a[k+1] { rev=false; break } }
+			if rev { for l,r:=lo,hi;l<r;l,r=l+1,r-1{a[l],a[r]=a[r],a[l]}; return }
+		}
+		ch := rand.Float64(); if ch==0 { ch=0.5 }            // (5) chaos
+		rng := hi - lo
+		idx1 := lo + int(math.Min(float64(rng), float64(rng)*phi2*ch)) // (3)
+		idx2 := lo + int(math.Min(float64(rng), float64(rng)*phi *ch))
+		p1 := ninther(a, lo, hi, idx1)                        // (4) ninther
+		p2 := ninther(a, lo, hi, idx2)
+		lt, gt := dualPartition(a, lo, hi, p1, p2)            // (6) partition
+		type reg struct{ sz, lo, hi int }
+		regions := []reg{                                      // (7) smallest-first
+			{lt - lo,     lo,   lt - 1},
+			{gt - lt + 1, lt,   gt},
+			{hi - gt,     gt+1, hi},
+		}
+		sort.Slice(regions, func(i, j int) bool { return regions[i].sz < regions[j].sz })
+		if regions[0].lo < regions[0].hi { logosRec(a, regions[0].lo, regions[0].hi, depth-1) }
+		if regions[1].lo < regions[1].hi { logosRec(a, regions[1].lo, regions[1].hi, depth-1) }
+		lo, hi, depth = regions[2].lo, regions[2].hi, depth-1
+	}
+}
+
+func logosUltraSort(arr []int) {
+	n := len(arr)
+	if n < 2 { return }
+	logosRec(arr, 0, n-1, int(2*math.Log2(float64(n)))+4)
+}
+
+func main() {
+	arr := []int{64, 34, 25, 12, 22, 11, 90, 42, 5, 77}
+	fmt.Println("Before:", arr)
+	logosUltraSort(arr)
+	fmt.Println("After: ", arr)
+}
+
+// Time: O(n log n)  Space: O(log n)  Stable: NO`,
+
+  },
 };

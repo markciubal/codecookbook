@@ -9,7 +9,6 @@ import {
   BarChart2,
   Database,
   Menu,
-  ArrowUpDown,
   Layers,
   Heart,
 } from "lucide-react";

@@ -40,6 +40,7 @@ function ModalBody({
   const [tab, setTab]        = useState<"pseudocode" | "code">(hasPseudo ? "pseudocode" : "code");
   const [lang, setLang]      = useState<Language>("typescript");
   const [pos, setPos]        = useState({ x: 80, y: 80 });
+  const [copied, setCopied]  = useState(false);
   const [voiceOn, setVoiceOn]               = useState(false);
   const [voices, setVoices]                 = useState<SpeechSynthesisVoice[]>([]);
   const [selectedVoiceURI, setSelectedVoiceURI] = useState<string>("");
@@ -279,25 +280,45 @@ function ModalBody({
         )}
 
         {tab === "code" && (
-          <select
-            value={lang}
-            onChange={(e) => setLang(e.target.value as Language)}
-            style={{
-              marginLeft: "auto",
-              fontSize: 11,
-              padding: "3px 6px",
-              borderRadius: 6,
-              background: "var(--color-surface-3)",
-              border: "1px solid var(--color-border)",
-              color: "var(--color-text)",
-              cursor: "pointer",
-              outline: "none",
-            }}
-          >
-            {LANGUAGES.map((l) => (
-              <option key={l} value={l}>{LANGUAGE_META[l].label}</option>
-            ))}
-          </select>
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
+            <select
+              value={lang}
+              onChange={(e) => { setLang(e.target.value as Language); setCopied(false); }}
+              style={{
+                fontSize: 11,
+                padding: "3px 6px",
+                borderRadius: 6,
+                background: "var(--color-surface-3)",
+                border: "1px solid var(--color-border)",
+                color: "var(--color-text)",
+                cursor: "pointer",
+                outline: "none",
+              }}
+            >
+              {LANGUAGES.map((l) => (
+                <option key={l} value={l}>{LANGUAGE_META[l].label}</option>
+              ))}
+            </select>
+            <button
+              onClick={() => {
+                navigator.clipboard.writeText(code).then(() => {
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1500);
+                });
+              }}
+              style={{
+                fontSize: 11,
+                padding: "3px 8px",
+                borderRadius: 6,
+                background: "var(--color-surface-3)",
+                border: "1px solid var(--color-border)",
+                color: copied ? "var(--color-state-sorted)" : "var(--color-muted)",
+                cursor: "pointer",
+              }}
+            >
+              {copied ? "✓ Copied" : "Copy"}
+            </button>
+          </div>
         )}
       </div>
 

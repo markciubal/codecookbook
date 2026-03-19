@@ -27,6 +27,8 @@ export interface AlgorithmMeta {
   stable: boolean;
   description: string;
   pseudocode: string[];
+  /** Optional epigraph shown beneath the algorithm name */
+  quote?: { text: string; attribution: string };
 }
 
 export interface CyNodeDef {

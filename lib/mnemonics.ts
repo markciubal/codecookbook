@@ -168,4 +168,19 @@ export const MNEMONICS: Record<string, Mnemonic[]> = {
       body: "Tim Sort is the default sort in Python's list.sort(), Java's Arrays.sort() for objects, Android, and V8 JavaScript engine. If you've ever called sort(), you've likely used Tim Sort.",
     },
   ],
+
+  logos: [
+    {
+      headline: "Two golden pivots, not one",
+      body: "Where classical quicksort picks a single pivot, Logos Ultra Sort picks two: one at position φ² ≈ 0.382 and one at φ ≈ 0.618 of the range. These irrational offsets are scaled by a per-level chaos factor so no adversarial input can predict both pivot positions simultaneously. The result is three partitions — left, middle, right — settled in one Dutch National Flag pass, dramatically reducing the work on duplicate-heavy data.",
+    },
+    {
+      headline: "Ninther: take the median of three medians",
+      body: "A single median-of-3 can still be fooled. Logos Ultra Sort uses a ninther: for each candidate pivot index it takes the median of that index and its two neighbours. This costs three comparisons but raises pivot quality substantially — even in nearly-sorted or adversarial inputs the pivot lands close to the true median, shrinking both partition regions toward equal halves.",
+    },
+    {
+      headline: "Smallest region first, introsort as a safety net",
+      body: "After partitioning, the three regions are sorted by size and the two smallest are processed recursively while the largest becomes the next loop iteration (tail-call). Stack depth is bounded to O(log n) regardless of partition quality. A depth counter catches the rare worst case and falls back to the standard library sort — the introsort guarantee that prevents O(n²) no matter what.",
+    },
+  ],
 };

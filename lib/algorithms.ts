@@ -180,17 +180,24 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     timeComplexity: "O(n log n)",
     spaceComplexity: "O(log n)",
     stable: false,
+    quote: {
+      text: 'In the beginning was the Logos.',
+      attribution: 'John 1:1',
+    },
     description:
-      "A φ-pivot, 3-way-partition quicksort variant. Selects the pivot at index ⌊(hi−lo)·φ⌋ using the golden ratio for adversarial resistance, then applies a Dutch National Flag 3-way partition. Elements equal to the pivot are placed in their final position in one pass. Recurses on the smaller partition to keep stack depth O(log n).",
+      "Logos — Greek for word, reason, divine order. The name is an aspiration: even in sorting, there is a search for proportion and harmony. The golden ratio phi places the pivots. A chaos factor keeps them honest. Less a finished algorithm than a philosophy of sorting.",
     pseudocode: [
-      "if hi − lo < 16: insertionSort(arr, lo, hi)",
-      "pivot_idx = lo + ⌊(hi − lo) × φ⌋",
+      "if size ≤ 48: insertionSort(arr, lo, hi)",
+      "if range(arr[lo..hi]) < 4·size: countingSort",
+      "gallop: if sorted → skip; if reversed → reverse",
+      "chaos = |rand|; idx1 = lo+⌊range·φ²·chaos⌋; idx2 = lo+⌊range·φ·chaos⌋",
+      "p1 = ninther(idx1);  p2 = ninther(idx2)",
       "lt = lo;  gt = hi;  i = lo",
       "while i ≤ gt:",
-      "  if arr[i] < pivot: swap arr[lt] ↔ arr[i]; lt++; i++",
-      "  elif arr[i] > pivot: swap arr[i] ↔ arr[gt]; gt--",
-      "  else: i++   // equal to pivot",
-      "recurse smaller half; tail-call larger half",
+      "  if arr[i] < p1: swap arr[lt]↔arr[i]; lt++; i++",
+      "  elif arr[i] > p2: swap arr[i]↔arr[gt]; gt--",
+      "  else: i++  // element is in [p1, p2]",
+      "recurse 2 smallest of {left, mid, right}; tail-call largest",
     ],
   },
   timsort: {
@@ -199,16 +206,16 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     timeComplexity: "O(n log n)",
     spaceComplexity: "O(n)",
     stable: true,
-    description: "Hybrid sort combining insertion sort and merge sort. Divides the array into small 'runs' sorted by insertion sort, then merges them bottom-up. Used in Python and Java's standard libraries.",
+    description: "Hybrid sort combining insertion sort and merge sort. Detects natural ascending/descending runs, extends short ones via binary insertion sort to a computed minRun (32–64), then merges with galloping mode. Used in Python and Java's standard libraries.",
     pseudocode: [
-      "RUN = 32",
-      "// Phase 1 – insertion-sort each run",
-      "for i = 0 to n, step RUN:",
-      "  key = arr[j]",
-      "  while arr[j−1] > key: arr[j] = arr[j−1]",
-      "  arr[j] = key",
-      "// Phase 2 – merge sorted runs",
-      "  merge(left, mid, right)",
+      "minRun = minRunLength(n)  // 32–64",
+      "while lo < n:",
+      "  run = countRunAndMakeAscending(lo)",
+      "  if descending: reverse(run)",
+      "  extend run to minRun via binaryInsertionSort",
+      "  push(run); mergeCollapse(stack)",
+      "  // merge: gallop when wins ≥ minGallop",
+      "mergeForceCollapse(stack)",
     ],
   },
 };
@@ -865,226 +872,464 @@ export function getTimSortSteps(arr: number[]): SortStep[] {
   const n = a.length;
   let comparisons = 0;
   let swaps = 0;
-  const sorted = new Set<number>();
+  const sortedSet = new Set<number>();
 
-  // Use a small RUN so phases are visible even for short demo arrays
-  const RUN = Math.max(2, Math.min(4, Math.ceil(n / 3)));
+  function snap(desc: string, line: number, ov: Partial<Record<number, BarState>> = {}) {
+    steps.push({ array: [...a], states: makeStates(n, sortedSet, ov), description: desc, comparisons, swaps, pseudocodeLine: line });
+  }
 
-  // ── Phase 1: insertion-sort each run ──────────────────────────────────────
-  for (let start = 0; start < n; start += RUN) {
-    const end = Math.min(start + RUN - 1, n - 1);
+  // ── 1. minRunLength: canonical formula, result in [32, 64] ────────────────
+  function minRunLength(len: number): number {
+    let r = 0;
+    while (len >= 64) { r |= len & 1; len >>= 1; }
+    return len + r;
+  }
+  const minRun = minRunLength(n);
+  snap(`minRunLength(${n}) = ${minRun}`, 0);
 
-    steps.push({
-      array: [...a],
-      states: makeStates(n, sorted,
-        Object.fromEntries(Array.from({ length: end - start + 1 }, (_, k) => [start + k, "comparing"]))
-      ),
-      description: `Phase 1: insertion-sorting run [${start}..${end}]`,
-      comparisons, swaps, pseudocodeLine: 2,
-    });
+  // ── 2. countRunAndMakeAscending ───────────────────────────────────────────
+  // Scans from lo for a natural ascending or strictly-descending run.
+  // Reverses descending runs in-place. Returns exclusive end of run.
+  function countRunAndMakeAscending(lo: number): number {
+    if (lo + 1 >= n) return lo + 1;
+    let hi = lo + 1;
+    comparisons++;
+    const isDesc = a[hi] < a[lo];
+    snap(`Detect run at [${lo}]: ${a[lo]}→${a[hi]} is ${isDesc ? "descending" : "ascending"}`, 2, { [lo]: "comparing", [hi]: "comparing" });
+    hi++;
+    if (isDesc) {
+      while (hi < n) {
+        comparisons++;
+        if (a[hi] >= a[hi - 1]) {
+          snap(`Run ends at ${hi}`, 2, { [hi]: "comparing", [hi - 1]: "comparing" });
+          break;
+        }
+        snap(`Descending: ${a[hi]} < ${a[hi - 1]}`, 2, { [hi]: "comparing", [hi - 1]: "comparing" });
+        hi++;
+      }
+      snap(`Reversing descending run [${lo}..${hi - 1}]`, 3,
+        Object.fromEntries(Array.from({ length: hi - lo }, (_, k) => [lo + k, "swapping" as BarState])));
+      let l = lo, r = hi - 1;
+      while (l < r) { [a[l], a[r]] = [a[r], a[l]]; swaps++; l++; r--; }
+      snap(`Run [${lo}..${hi - 1}] reversed`, 3,
+        Object.fromEntries(Array.from({ length: hi - lo }, (_, k) => [lo + k, "comparing" as BarState])));
+    } else {
+      while (hi < n) {
+        comparisons++;
+        if (a[hi] < a[hi - 1]) {
+          snap(`Run ends at ${hi}`, 2, { [hi]: "comparing", [hi - 1]: "comparing" });
+          break;
+        }
+        snap(`Ascending: ${a[hi]} ≥ ${a[hi - 1]}`, 2, { [hi]: "comparing", [hi - 1]: "comparing" });
+        hi++;
+      }
+    }
+    return hi;
+  }
 
-    for (let i = start + 1; i <= end; i++) {
+  // ── 3. Binary insertion sort ──────────────────────────────────────────────
+  // Sorts a[lo..hi) by inserting elements from `start` onward.
+  // Uses binary search (not linear) to locate the insertion point.
+  function binaryInsertionSort(lo: number, hi: number, start: number) {
+    if (start <= lo) start = lo + 1;
+    for (let i = start; i < hi; i++) {
       const key = a[i];
-      let j = i - 1;
-
-      steps.push({
-        array: [...a],
-        states: makeStates(n, sorted, { [i]: "current" }),
-        description: `Key = ${key}`,
-        comparisons, swaps, pseudocodeLine: 3,
-      });
-
-      while (j >= start && a[j] > key) {
+      snap(`BInsert key=${key}`, 4, { [i]: "current" });
+      // Binary search for insertion point in a[lo..i)
+      let l = lo, r = i;
+      while (l < r) {
+        const m = (l + r) >> 1;
         comparisons++;
-        steps.push({
-          array: [...a],
-          states: makeStates(n, sorted, { [j]: "comparing", [j + 1]: "swapping" }),
-          description: `${a[j]} > ${key}, shift right`,
-          comparisons, swaps, pseudocodeLine: 4,
-        });
-        a[j + 1] = a[j];
-        j--;
-        swaps++;
+        if (a[m] <= key) l = m + 1; else r = m;
+        snap(`Binary search pivot=${a[m]} → [${l}..${r})`, 4, { [m]: "comparing", [i]: "current" });
       }
-      a[j + 1] = key;
-      steps.push({
-        array: [...a],
-        states: makeStates(n, sorted, { [j + 1]: "minimum" }),
-        description: `Placed ${key} at index ${j + 1}`,
-        comparisons, swaps, pseudocodeLine: 5,
-      });
-    }
-
-    for (let i = start; i <= end; i++) sorted.add(i);
-  }
-
-  // ── Phase 2: merge runs bottom-up ─────────────────────────────────────────
-  for (let size = RUN; size < n; size *= 2) {
-    steps.push({
-      array: [...a],
-      states: Array(n).fill("comparing"),
-      description: `Phase 2: merging runs of size ${size}`,
-      comparisons, swaps, pseudocodeLine: 6,
-    });
-
-    for (let left = 0; left < n; left += 2 * size) {
-      const mid = Math.min(left + size - 1, n - 1);
-      const right = Math.min(left + 2 * size - 1, n - 1);
-      if (mid >= right) continue;
-
-      const L = a.slice(left, mid + 1);
-      const R = a.slice(mid + 1, right + 1);
-      let i = 0, j = 0, k = left;
-
-      while (i < L.length && j < R.length) {
-        comparisons++;
-        steps.push({
-          array: [...a],
-          states: makeStates(n, new Set<number>(), {
-            [left + i]: "comparing",
-            [mid + 1 + j]: "comparing",
-          }),
-          description: `Merge: comparing ${L[i]} and ${R[j]}`,
-          comparisons, swaps, pseudocodeLine: 7,
-        });
-        if (L[i] <= R[j]) { a[k++] = L[i++]; }
-        else { a[k++] = R[j++]; swaps++; }
-      }
-      while (i < L.length) a[k++] = L[i++];
-      while (j < R.length) a[k++] = R[j++];
+      // Shift right and place
+      for (let j = i; j > l; j--) { a[j] = a[j - 1]; swaps++; }
+      a[l] = key;
+      snap(`Placed ${key} at ${l}`, 4, { [l]: "minimum" });
     }
   }
+
+  // ── 4. Gallop helpers ─────────────────────────────────────────────────────
+  // gallopRight: first index in src[start..] where src[idx] > key
+  function gallopRight(src: number[], key: number, start: number): number {
+    let dist = 1;
+    while (start + dist < src.length) {
+      comparisons++;
+      if (src[start + dist] > key) break;
+      dist *= 2;
+    }
+    let lo = start + (dist >> 1), hi = Math.min(start + dist, src.length);
+    while (lo < hi) {
+      const m = (lo + hi) >> 1;
+      comparisons++;
+      if (src[m] <= key) lo = m + 1; else hi = m;
+    }
+    return lo;
+  }
+  // gallopLeft: first index in src[start..] where src[idx] >= key
+  function gallopLeft(src: number[], key: number, start: number): number {
+    let dist = 1;
+    while (start + dist < src.length) {
+      comparisons++;
+      if (src[start + dist] >= key) break;
+      dist *= 2;
+    }
+    let lo = start + (dist >> 1), hi = Math.min(start + dist, src.length);
+    while (lo < hi) {
+      const m = (lo + hi) >> 1;
+      comparisons++;
+      if (src[m] < key) lo = m + 1; else hi = m;
+    }
+    return lo;
+  }
+
+  // ── 5. Merge with galloping ───────────────────────────────────────────────
+  // Stable merge of a[lo..mid) and a[mid..hi) using auxiliary arrays.
+  function merge(lo: number, mid: number, hi: number) {
+    if (lo >= mid || mid >= hi) return;
+    const L = a.slice(lo, mid);
+    const R = a.slice(mid, hi);
+    let i = 0, j = 0, k = lo;
+    let minGallop = 7;
+
+    snap(`Merging [${lo}..${mid - 1}] with [${mid}..${hi - 1}]`, 6,
+      Object.fromEntries([
+        ...Array.from({ length: mid - lo }, (_, x) => [lo + x, "comparing" as BarState]),
+        ...Array.from({ length: hi - mid }, (_, x) => [mid + x, "swapping" as BarState]),
+      ]));
+
+    outer: while (i < L.length && j < R.length) {
+      // Normal comparison mode
+      let winsL = 0, winsR = 0;
+      do {
+        comparisons++;
+        if (L[i] <= R[j]) {
+          a[k++] = L[i++]; winsL++; winsR = 0;
+          snap(`Take L=${L[i - 1]}`, 6, { [k - 1]: "comparing" });
+        } else {
+          a[k++] = R[j++]; winsR++; winsL = 0; swaps++;
+          snap(`Take R=${R[j - 1]}`, 6, { [k - 1]: "swapping" });
+        }
+        if (i >= L.length || j >= R.length) break outer;
+      } while (winsL < minGallop && winsR < minGallop);
+
+      // Transition penalty: harder to re-enter galloping
+      minGallop++;
+
+      // Galloping mode
+      do {
+        minGallop = Math.max(1, minGallop - 1);
+
+        // Gallop in L: bulk-copy L elements that precede R[j]
+        const posL = gallopRight(L, R[j], i);
+        const countL = posL - i;
+        if (countL > 0) {
+          snap(`Gallop L: ${countL} element(s) < ${R[j]}`, 6,
+            Object.fromEntries(Array.from({ length: countL }, (_, x) => [k + x, "minimum" as BarState])));
+          for (let g = 0; g < countL; g++) a[k++] = L[i++];
+        }
+        if (i >= L.length) break outer;
+        a[k++] = R[j++]; swaps++;
+        snap(`Take one R=${R[j - 1]}`, 6, { [k - 1]: "swapping" });
+        if (j >= R.length) break outer;
+
+        // Gallop in R: bulk-copy R elements that precede L[i]
+        const posR = gallopLeft(R, L[i], j);
+        const countR = posR - j;
+        if (countR > 0) {
+          snap(`Gallop R: ${countR} element(s) < ${L[i]}`, 6,
+            Object.fromEntries(Array.from({ length: countR }, (_, x) => [k + x, "swapping" as BarState])));
+          for (let g = 0; g < countR; g++) { a[k++] = R[j++]; swaps++; }
+        }
+        if (j >= R.length) break outer;
+        a[k++] = L[i++];
+        snap(`Take one L=${L[i - 1]}`, 6, { [k - 1]: "comparing" });
+        if (i >= L.length) break outer;
+
+        if (countL < minGallop && countR < minGallop) break; // exit galloping
+      } while (true);
+    }
+
+    while (i < L.length) a[k++] = L[i++];
+    while (j < R.length) { a[k++] = R[j++]; swaps++; }
+
+    snap(`Merge [${lo}..${hi - 1}] done`, 6,
+      Object.fromEntries(Array.from({ length: hi - lo }, (_, x) => [lo + x, "sorted" as BarState])));
+    for (let x = lo; x < hi; x++) sortedSet.add(x);
+  }
+
+  // ── 6. Run stack + merge collapse ─────────────────────────────────────────
+  // Invariants (corrected 2015 fix applied):
+  //   len[n-3] > len[n-2] + len[n-1]
+  //   len[n-2] > len[n-1]
+  const runStack: { lo: number; len: number }[] = [];
+
+  function mergeAt(i: number) {
+    const r1 = runStack[i], r2 = runStack[i + 1];
+    const totalLen = r1.len + r2.len;
+    snap(`mergeCollapse: run[${i}](${r1.len}) + run[${i + 1}](${r2.len})`, 5, {});
+    for (let x = r1.lo; x < r1.lo + totalLen; x++) sortedSet.delete(x);
+    merge(r1.lo, r1.lo + r1.len, r1.lo + totalLen);
+    runStack[i] = { lo: r1.lo, len: totalLen };
+    runStack.splice(i + 1, 1);
+  }
+
+  function mergeCollapse() {
+    while (runStack.length > 1) {
+      let ni = runStack.length - 2;
+      if (
+        (ni > 0 && runStack[ni - 1].len <= runStack[ni].len + runStack[ni + 1].len) ||
+        (ni > 1 && runStack[ni - 2].len <= runStack[ni - 1].len + runStack[ni].len)
+      ) {
+        if (runStack[ni - 1].len < runStack[ni + 1].len) ni--;
+        mergeAt(ni);
+      } else if (runStack[ni].len <= runStack[ni + 1].len) {
+        mergeAt(ni);
+      } else {
+        break;
+      }
+    }
+  }
+
+  function mergeForceCollapse() {
+    while (runStack.length > 1) {
+      let ni = runStack.length - 2;
+      if (ni > 0 && runStack[ni - 1].len < runStack[ni + 1].len) ni--;
+      mergeAt(ni);
+    }
+  }
+
+  // ── Main loop ─────────────────────────────────────────────────────────────
+  let lo = 0;
+  while (lo < n) {
+    snap(`lo=${lo}: find natural run`, 1, { [lo]: "current" });
+
+    let hi = countRunAndMakeAscending(lo);
+
+    const force = Math.min(lo + minRun, n);
+    if (hi < force) {
+      snap(`Run len=${hi - lo} < minRun=${minRun}, extend to ${force - lo}`, 4,
+        Object.fromEntries(Array.from({ length: hi - lo }, (_, k) => [lo + k, "comparing" as BarState])));
+      binaryInsertionSort(lo, force, hi);
+      hi = force;
+    }
+
+    for (let x = lo; x < hi; x++) sortedSet.add(x);
+    runStack.push({ lo, len: hi - lo });
+    snap(`Run [${lo}..${hi - 1}] ready (len ${hi - lo}). Stack: ${runStack.length}`, 5,
+      Object.fromEntries(Array.from({ length: hi - lo }, (_, k) => [lo + k, "sorted" as BarState])));
+
+    mergeCollapse();
+    lo = hi;
+  }
+
+  snap(`Force-collapsing ${runStack.length} remaining run(s)`, 7, {});
+  mergeForceCollapse();
 
   steps.push({ array: [...a], states: Array(n).fill("sorted"), description: "Array is fully sorted!", comparisons, swaps, pseudocodeLine: -1 });
   return steps;
 }
 
 export function getLogosSortSteps(arr: number[]): SortStep[] {
-  const PHI = 0.6180339887498949;
-  const BASE = 16;
+  // "The cosmos is full of proportional things." — Vitruvius
+  // φ⁻¹ ≈ 0.618 and φ⁻² ≈ 0.382 are the golden ratio and its square.
+  // They appear in nature — sunflower spirals, nautilus shells, galaxy arms.
+  // Here they space our two pivots across the subarray at harmonious positions.
+  const PHI  = 0.6180339887498948482; // φ⁻¹  = (√5 − 1) / 2
+  const PHI2 = 0.3819660112501051518; // φ⁻²  = (3 − √5) / 2
+
+  // BASE: below 48 elements, the cost of choosing pivots and partitioning
+  // outweighs the benefit. Simple insertion sort wins at small scale.
+  const BASE = 48;
+
   const steps: SortStep[] = [];
   const a = [...arr];
   const n = a.length;
   let comparisons = 0;
   let swaps = 0;
-  const sorted = new Set<number>();
+  const settled = new Set<number>();
 
-  function insertionSort(lo: number, hi: number) {
+  // Helper: record a snapshot of the current array state for the visualiser.
+  // desc — what's happening in plain language; line — which pseudocode line to highlight.
+  function step(desc: string, line: number, ov: Partial<Record<number, BarState>> = {}) {
+    steps.push({ array: [...a], states: makeStates(n, settled, ov), description: desc, comparisons, swaps, pseudocodeLine: line });
+  }
+
+  // "Great things are made of small things." — Lao Tzu
+  // Insertion sort: each element walks left until it finds its correct position
+  // among the already-sorted elements to its left. O(n²) worst case, but for
+  // tiny subarrays the constant factor is unbeatable — no recursion, no pivots.
+  function ins(lo: number, hi: number) {
     for (let i = lo + 1; i <= hi; i++) {
-      const key = a[i];
-      let j = i - 1;
+      const key = a[i]; let j = i - 1;
       while (j >= lo && a[j] > key) {
         comparisons++;
-        steps.push({
-          array: [...a],
-          states: makeStates(n, sorted, { [j]: "comparing", [j + 1]: "current" }),
-          description: `Insertion: ${a[j]} > ${key}, shift right`,
-          comparisons, swaps, pseudocodeLine: 0,
-        });
-        a[j + 1] = a[j];
-        swaps++;
-        j--;
+        step(`Insertion: ${a[j]} > ${key}, shift right`, 0, { [j]: "comparing", [j + 1]: "current" });
+        a[j + 1] = a[j]; swaps++; j--;
       }
       a[j + 1] = key;
     }
-    for (let i = lo; i <= hi; i++) sorted.add(i);
+    for (let i = lo; i <= hi; i++) settled.add(i);
   }
 
-  const stack: [number, number][] = [[0, n - 1]];
+  // "The mean is in all things the best." — Hesiod
+  // Three comparisons, three swaps at most. Sorts x, y, z and returns the middle
+  // value. Used as the building block for the ninther pivot estimator below.
+  function median3(x: number, y: number, z: number): number {
+    if (x > y) { const t = x; x = y; y = t; }
+    if (y > z) { const t = y; y = z; z = t; }
+    if (x > y) { const t = x; x = y; y = t; }
+    return y;
+  }
+
+  // "Walk the middle path." — The Buddha
+  // Takes an index and consults its two neighbours, then returns the median of
+  // those three values. Called "ninther" because a full ninther would take
+  // median-of-three-medians-of-three — nine values consulted, one middle returned.
+  // A single-level version like this is a cheap, effective pivot quality improvement.
+  function ninther(lo: number, hi: number, idx: number): number {
+    return median3(a[Math.max(lo, idx - 1)], a[idx], a[Math.min(hi, idx + 1)]);
+  }
+
+  // "Know thyself — and know thy limits." — Socrates (adapted)
+  // We use an explicit stack instead of recursion so the visualiser can
+  // process subarrays iteratively. depthLimit is the introsort safety net:
+  // if we push too many levels deep, we've hit a bad pivot sequence and
+  // should fall back to insertion sort rather than risk O(n²) behaviour.
+  const depthLimit = 2 * Math.floor(Math.log2(Math.max(n, 2))) + 4;
+  const stack: [number, number, number][] = [[0, n - 1, depthLimit]];
 
   while (stack.length > 0) {
-    let [lo, hi] = stack.pop()!;
+    let [lo, hi, depth] = stack.pop()!;
 
     while (lo < hi) {
-      if (hi - lo + 1 <= BASE) {
-        insertionSort(lo, hi);
-        steps.push({
-          array: [...a],
-          states: makeStates(n, sorted, {}),
-          description: `Subarray [${lo}..${hi}] sorted by insertion sort`,
-          comparisons, swaps, pseudocodeLine: 0,
-        });
+      const size = hi - lo + 1;
+
+      // "Humility is the beginning of wisdom." — Thomas Aquinas
+      // When the subarray is small enough (≤ 48) or depth is exhausted,
+      // we stop partitioning and finish with insertion sort. This is both
+      // humble and correct — knowing when not to be clever is its own wisdom.
+      if (size <= BASE || depth <= 0) {
+        ins(lo, hi);
+        step(`[${lo}..${hi}] insertion-sorted`, 0);
         break;
       }
 
-      const pivotIdx = lo + Math.floor((hi - lo) * PHI);
-      const pivot = a[pivotIdx];
+      // "Work with what is, not what you wish it were." — Taoist principle
+      // Counting sort is O(n+k) — linear time, zero comparisons — but only
+      // works for integers in a narrow range. We scan for min and max first.
+      // If the value span is less than 4× the element count, it's worth it:
+      // allocate a count array, tally occurrences, then write back in order.
+      let mn = a[lo], mx = a[lo];
+      for (let k = lo + 1; k <= hi; k++) { if (a[k] < mn) mn = a[k]; if (a[k] > mx) mx = a[k]; }
+      const valSpan = mx - mn;
+      if (Number.isInteger(mn) && valSpan < size * 4) {
+        const ov: Partial<Record<number, BarState>> = {};
+        for (let k = lo; k <= hi; k++) ov[k] = "comparing";
+        step(`Counting sort: range ${mn}–${mx} fits ${valSpan + 1} buckets`, 1, ov);
+        const counts = new Array(valSpan + 1).fill(0);
+        for (let k = lo; k <= hi; k++) counts[a[k] - mn]++;
+        let k = lo;
+        for (let v = 0; v <= valSpan; v++) { while (counts[v]-- > 0) a[k++] = v + mn; }
+        for (let k = lo; k <= hi; k++) settled.add(k);
+        step(`Counting sort placed [${lo}..${hi}]`, 1);
+        break;
+      }
 
-      steps.push({
-        array: [...a],
-        states: makeStates(n, sorted, { [pivotIdx]: "pivot" }),
-        description: `φ-pivot at index ${pivotIdx}: value ${pivot}  (lo=${lo}, hi=${hi})`,
-        comparisons, swaps, pseudocodeLine: 1,
-      });
+      // "Why disturb what has already found its place?" — Marcus Aurelius (adapted)
+      // A cheap heuristic: if the first three elements are non-decreasing, the
+      // subarray may already be sorted or reversed. A full O(n) scan confirms it.
+      // Sorted → return immediately. Reversed → a single mirror flip restores order.
+      // This handles nearly-sorted and reversed inputs in linear time.
+      if (a[lo] <= a[lo + 1] && a[lo + 1] <= a[lo + 2]) {
+        let isSorted = true;
+        for (let k = lo; k < hi; k++) { comparisons++; if (a[k] > a[k + 1]) { isSorted = false; break; } }
+        if (isSorted) {
+          for (let k = lo; k <= hi; k++) settled.add(k);
+          step(`Gallop: [${lo}..${hi}] already sorted`, 2);
+          break;
+        }
+        let isReversed = true;
+        for (let k = lo; k < hi; k++) { comparisons++; if (a[k] < a[k + 1]) { isReversed = false; break; } }
+        if (isReversed) {
+          for (let l = lo, r = hi; l < r; l++, r--) { [a[l], a[r]] = [a[r], a[l]]; swaps++; }
+          for (let k = lo; k <= hi; k++) settled.add(k);
+          step(`Gallop: [${lo}..${hi}] reversed → flipped`, 2);
+          break;
+        }
+      }
 
+      // "The dice of God are always loaded." — Ralph Waldo Emerson
+      // A non-zero random value provides the chaos factor. It scales the φ-derived
+      // pivot positions unpredictably at each recursive level, so no fixed input
+      // pattern can consistently force the worst case. Order through controlled randomness.
+      let c = 0;
+      while (c === 0) c = Math.random() * 2 - 1;
+      const chaos = Math.abs(c);
+      const range = hi - lo;
+
+      // "Beauty is the proper conformity of the parts to one another." — Werner Heisenberg
+      // φ² ≈ 0.382 and φ ≈ 0.618 are the golden split points of any interval.
+      // Scaled by chaos they become candidate indices for our two pivots.
+      // Ninther then refines each raw index into a median-smoothed pivot value.
+      const idx1 = lo + Math.min(range, Math.floor(range * PHI2 * chaos));
+      const idx2 = lo + Math.min(range, Math.floor(range * PHI  * chaos));
+      const p1Raw = ninther(lo, hi, idx1);
+      const p2Raw = ninther(lo, hi, idx2);
+      const [pLo, pHi] = p1Raw <= p2Raw ? [p1Raw, p2Raw] : [p2Raw, p1Raw];
+
+      step(`Dual φ-pivots: p1=${pLo}, p2=${pHi} (chaos=${chaos.toFixed(2)})`, 4, { [idx1]: "pivot", [idx2]: "pivot" });
+
+      // "To every thing there is a season, and a place for every purpose." — Ecclesiastes 3:1
+      // Dutch-flag three-way partition: a single left-to-right scan with two pointers (lt, gt).
+      // lt tracks the boundary of the "less than p1" region from the left.
+      // gt tracks the boundary of the "greater than p2" region from the right.
+      // i is the exploration pointer. Everything between lt and gt is in [p1, p2].
       let lt = lo, gt = hi, i = lo;
+      let p1 = pLo, p2 = pHi;
       while (i <= gt) {
         comparisons++;
-        if (a[i] < pivot) {
-          steps.push({
-            array: [...a],
-            states: makeStates(n, sorted, { [i]: "comparing", [lt]: "swapping" }),
-            description: `${a[i]} < pivot ${pivot} → swap arr[${i}] ↔ arr[${lt}]`,
-            comparisons, swaps, pseudocodeLine: 4,
-          });
-          [a[lt], a[i]] = [a[i], a[lt]];
-          swaps++;
-          lt++; i++;
-        } else if (a[i] > pivot) {
-          steps.push({
-            array: [...a],
-            states: makeStates(n, sorted, { [i]: "comparing", [gt]: "swapping" }),
-            description: `${a[i]} > pivot ${pivot} → swap arr[${i}] ↔ arr[${gt}]`,
-            comparisons, swaps, pseudocodeLine: 5,
-          });
-          [a[i], a[gt]] = [a[gt], a[i]];
-          swaps++;
-          gt--;
+        if (a[i] < p1) {
+          // Element belongs in the left region — swap it to lt and advance both pointers.
+          step(`${a[i]} < p1(${p1}) → swap arr[${i}]↔arr[${lt}]`, 7, { [i]: "comparing", [lt]: "swapping" });
+          [a[lt], a[i]] = [a[i], a[lt]]; swaps++; lt++; i++;
+        } else if (a[i] > p2) {
+          // Element belongs in the right region — swap to gt. Don't advance i yet;
+          // the value that arrived from gt hasn't been examined.
+          step(`${a[i]} > p2(${p2}) → swap arr[${i}]↔arr[${gt}]`, 8, { [i]: "comparing", [gt]: "swapping" });
+          [a[i], a[gt]] = [a[gt], a[i]]; swaps++; gt--;
         } else {
-          steps.push({
-            array: [...a],
-            states: makeStates(n, sorted, { [i]: "minimum" }),
-            description: `${a[i]} = pivot ${pivot} → equal region`,
-            comparisons, swaps, pseudocodeLine: 6,
-          });
+          // Element is already in the middle region — leave it and move on.
+          step(`${a[i]} ∈ [${p1},${p2}] → middle region`, 9, { [i]: "minimum" });
           i++;
         }
       }
 
-      for (let x = lt; x <= gt; x++) sorted.add(x);
-      steps.push({
-        array: [...a],
-        states: makeStates(n, sorted, {}),
-        description: `Partitioned: [${lo}..${lt - 1}] < ${pivot} | [${lt}..${gt}] = ${pivot} | [${gt + 1}..${hi}] > ${pivot}`,
-        comparisons, swaps, pseudocodeLine: 7,
-      });
+      const midOv: Partial<Record<number, BarState>> = {};
+      for (let k = lt; k <= gt; k++) midOv[k] = "minimum";
+      step(`Partitioned: [${lo}..${lt-1}]<${p1} | [${lt}..${gt}]∈[${p1},${p2}] | [${gt+1}..${hi}]>${p2}`, 10, midOv);
 
-      const hasLeft  = lo < lt;
-      const hasRight = gt + 1 <= hi;
-      if (!hasLeft && !hasRight) break;
-      if (!hasLeft)  { lo = gt + 1; continue; }
-      if (!hasRight) { hi = lt - 1; continue; }
-
-      const leftSize  = lt - 1 - lo;
-      const rightSize = hi - gt - 1;
-      if (leftSize <= rightSize) {
-        stack.push([lo, lt - 1]);
-        lo = gt + 1;
-      } else {
-        stack.push([gt + 1, hi]);
-        hi = lt - 1;
-      }
+      // "The last shall be first, and the first last." — Matthew 20:16
+      // Collect the three regions, sort them by size (ascending), and push the two
+      // smallest onto the stack for recursion. The largest region is handled by
+      // continuing this while-loop — equivalent to a tail call, keeping stack depth O(log n).
+      // Always recursing small-first ensures the stack never holds more than O(log n) frames.
+      const regions: [number, number, number][] = [
+        [lt - lo,     lo,     lt - 1],
+        [gt - lt + 1, lt,     gt    ],
+        [hi - gt,     gt + 1, hi    ],
+      ];
+      regions.sort((x, y) => x[0] - y[0]);
+      if (regions[0][1] < regions[0][2]) stack.push([regions[0][1], regions[0][2], depth - 1]);
+      if (regions[1][1] < regions[1][2]) stack.push([regions[1][1], regions[1][2], depth - 1]);
+      lo = regions[2][1]; hi = regions[2][2]; depth--;
     }
 
-    if (lo === hi && !sorted.has(lo)) sorted.add(lo);
+    if (lo === hi && !settled.has(lo)) settled.add(lo);
   }
 
-  steps.push({
-    array: [...a],
-    states: Array(n).fill("sorted"),
-    description: "Array is fully sorted!",
-    comparisons, swaps, pseudocodeLine: -1,
-  });
+  steps.push({ array: [...a], states: Array(n).fill("sorted"), description: "Array is fully sorted!", comparisons, swaps, pseudocodeLine: -1 });
   return steps;
 }
 

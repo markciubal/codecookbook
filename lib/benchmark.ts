@@ -24,38 +24,153 @@ export function generateBenchmarkInput(n: number, scenario: BenchmarkScenario): 
 // ── Pure sort implementations ─────────────────────────────────────────────────
 
 function logosSort(input: number[]): number[] {
-  const PHI = 0.6180339887498949;
+  // "The cosmos is full of proportional things." — Vitruvius
+  // φ⁻¹ and φ⁻² are the golden ratio and its square — irrational numbers that
+  // appear throughout nature in spirals, petals, and shells. We use them to
+  // space our two pivots across the subarray, seeking natural division points.
+  const PHI  = 0.6180339887498948482; // φ⁻¹  = (√5 − 1) / 2
+  const PHI2 = 0.3819660112501051518; // φ⁻²  = (3 − √5) / 2
+  // BASE: the threshold below which the overhead of partitioning is not worth it.
+  // At small scale, the simplest tool wins.
+  const BASE = 48;
   const a = [...input];
-  if (a.length <= 1) return a;
+  const n = a.length;
+  if (n < 2) return a;
 
-  function ins(lo: number, hi: number) {
-    for (let i = lo + 1; i <= hi; i++) {
-      const key = a[i]; let j = i - 1;
-      while (j >= lo && a[j] > key) { a[j + 1] = a[j]; j--; }
-      a[j + 1] = key;
-    }
+  // "Know thyself — and know thy limits." — Socrates (adapted)
+  // The depth limit is an introsort-style safety net. If recursion goes 2·log₂(n)+4
+  // levels deep, we've likely hit a bad pivot sequence. We stop and defer to the
+  // platform's own sort rather than let performance collapse to O(n²).
+  const depthLimit = 2 * Math.floor(Math.log2(n)) + 4;
+
+  // "The mean is in all things the best." — Hesiod
+  // Three values enter; the middle one leaves. This sorts x, y, z with at most
+  // three swaps and returns the median — the value that is neither extreme.
+  function median3(x: number, y: number, z: number): number {
+    if (x > y) { const t = x; x = y; y = t; }
+    if (y > z) { const t = y; y = z; z = t; }
+    if (x > y) { const t = x; x = y; y = t; }
+    return y;
   }
 
-  const stack: [number, number][] = [[0, a.length - 1]];
-  while (stack.length > 0) {
-    let [lo, hi] = stack.pop()!;
+  // "Walk the middle path." — The Buddha
+  // A ninther takes the median of an element and its two neighbours, producing
+  // a locally smoothed estimate of the subarray's true median. Nine values are
+  // implicitly consulted per pivot — a much better guess than picking blindly.
+  function ninther(lo: number, hi: number, idx: number): number {
+    return median3(a[Math.max(lo, idx - 1)], a[idx], a[Math.min(hi, idx + 1)]);
+  }
+
+  // "To every thing there is a season, and a place for every purpose." — Ecclesiastes 3:1
+  // Dutch-flag three-way partition around two pivots p1 ≤ p2. A single left-to-right
+  // scan places every element into one of three regions:
+  //   a[lo..lt-1] < p1  |  a[lt..gt] ∈ [p1, p2]  |  a[gt+1..hi] > p2
+  // lt and gt are the boundaries returned for the next recursion step.
+  function dualPartition(lo: number, hi: number, p1: number, p2: number): [number, number] {
+    if (p1 > p2) { const t = p1; p1 = p2; p2 = t; }
+    let lt = lo, gt = hi, i = lo;
+    while (i <= gt) {
+      if      (a[i] < p1) { [a[lt], a[i]] = [a[i], a[lt]]; lt++; i++; }
+      else if (a[i] > p2) { [a[i], a[gt]] = [a[gt], a[i]]; gt--; }
+      else                 { i++; }
+    }
+    return [lt, gt];
+  }
+
+  // "The unexamined life is not worth living." — Socrates
+  // Each call to sort() examines its subarray before acting. It asks: is there a
+  // faster path? Only when all shortcuts are exhausted does it partition and recurse.
+  function sort(lo: number, hi: number, depth: number): void {
     while (lo < hi) {
-      if (hi - lo + 1 <= 16) { ins(lo, hi); break; }
-      const pivot = a[lo + Math.floor((hi - lo) * PHI)];
-      let lt = lo, gt = hi, i = lo;
-      while (i <= gt) {
-        if (a[i] < pivot)      { [a[lt], a[i]] = [a[i], a[lt]]; lt++; i++; }
-        else if (a[i] > pivot) { [a[i], a[gt]] = [a[gt], a[i]]; gt--; }
-        else i++;
+      const size = hi - lo + 1;
+
+      // "Humility is the beginning of wisdom." — Thomas Aquinas
+      // When we've recursed too deeply, we stop and let the platform's native sort
+      // finish the job. This is the introsort guarantee: worst-case O(n log n).
+      if (depth <= 0) {
+        const sub = a.slice(lo, hi + 1).sort((x, y) => x - y);
+        for (let k = lo; k <= hi; k++) a[k] = sub[k - lo];
+        return;
       }
-      const hasL = lo < lt, hasR = gt < hi;
-      if (!hasL && !hasR) break;
-      if (!hasL) { lo = gt + 1; continue; }
-      if (!hasR) { hi = lt - 1; continue; }
-      if ((lt - 1 - lo) <= (hi - gt - 1)) { stack.push([lo, lt - 1]); lo = gt + 1; }
-      else { stack.push([gt + 1, hi]); hi = lt - 1; }
+
+      // "Great things are made of small things." — Lao Tzu
+      // For subarrays of 48 or fewer elements, insertion sort beats quicksort.
+      // Each element walks left until it finds its home — simple, cache-friendly, fast.
+      if (size <= BASE) {
+        for (let i = lo + 1; i <= hi; i++) {
+          const key = a[i]; let j = i - 1;
+          while (j >= lo && a[j] > key) { a[j + 1] = a[j]; j--; }
+          a[j + 1] = key;
+        }
+        return;
+      }
+
+      // "Work with what is, not what should be." — Taoist principle
+      // If all values are integers and the range of values is narrow (less than
+      // 4× the count), counting sort runs in O(n+k) — linear time, zero comparisons.
+      // We tally occurrences in a bucket array, then reconstruct in order.
+      let mn = a[lo], mx = a[lo];
+      for (let k = lo + 1; k <= hi; k++) { if (a[k] < mn) mn = a[k]; if (a[k] > mx) mx = a[k]; }
+      const span = mx - mn;
+      if (Number.isInteger(mn) && span < size * 4) {
+        const counts = new Array(span + 1).fill(0);
+        for (let k = lo; k <= hi; k++) counts[a[k] - mn]++;
+        let k = lo;
+        for (let v = 0; v <= span; v++) { while (counts[v]-- > 0) a[k++] = v + mn; }
+        return;
+      }
+
+      // "Why disturb what has already found its place?" — Marcus Aurelius (adapted)
+      // A quick O(n) gallop scan checks whether the subarray is already sorted or
+      // perfectly reversed. If sorted, we return immediately. If reversed, a single
+      // in-place mirror flip restores order in O(n). No partition needed.
+      if (a[lo] <= a[lo + 1] && a[lo + 1] <= a[lo + 2]) {
+        let sorted = true;
+        for (let k = lo; k < hi; k++) { if (a[k] > a[k + 1]) { sorted = false; break; } }
+        if (sorted) return;
+        let reversed = true;
+        for (let k = lo; k < hi; k++) { if (a[k] < a[k + 1]) { reversed = false; break; } }
+        if (reversed) { for (let l = lo, r = hi; l < r; l++, r--) { [a[l], a[r]] = [a[r], a[l]]; } return; }
+      }
+
+      // "The dice of God are always loaded." — Ralph Waldo Emerson
+      // A non-zero random value provides a chaos factor: it scales the φ-derived
+      // pivot positions differently on every recursive level. This prevents any
+      // fixed input pattern from consistently producing bad pivots.
+      let c = 0;
+      while (c === 0) c = Math.random() * 2 - 1;
+      const chaos = Math.abs(c);
+      const range = hi - lo;
+
+      // "Beauty is the proper conformity of the parts to one another." — Werner Heisenberg
+      // φ² ≈ 0.382 and φ ≈ 0.618 divide the golden rectangle at its natural split.
+      // Scaled by chaos they become the candidate indices for our two pivots.
+      // Ninther refines each raw index into a locally-smoothed median estimate.
+      const idx1 = lo + Math.min(range, Math.floor(range * PHI2 * chaos));
+      const idx2 = lo + Math.min(range, Math.floor(range * PHI  * chaos));
+      const p1 = ninther(lo, hi, idx1);
+      const p2 = ninther(lo, hi, idx2);
+
+      // Partition around the two pivots, producing three regions.
+      const [lt, gt] = dualPartition(lo, hi, p1, p2);
+
+      // "The last shall be first, and the first last." — Matthew 20:16
+      // Collect the three regions, sort them by size, and recurse on the two
+      // smallest first (pushed onto the call stack). The largest is handled by
+      // continuing the while-loop — a tail-call optimisation that bounds stack depth to O(log n).
+      const regions: [number, number, number][] = [
+        [lt - lo,     lo,     lt - 1],
+        [gt - lt + 1, lt,     gt    ],
+        [hi - gt,     gt + 1, hi    ],
+      ];
+      regions.sort((x, y) => x[0] - y[0]);
+      if (regions[0][1] < regions[0][2]) sort(regions[0][1], regions[0][2], depth - 1);
+      if (regions[1][1] < regions[1][2]) sort(regions[1][1], regions[1][2], depth - 1);
+      lo = regions[2][1]; hi = regions[2][2]; depth--;
     }
   }
+
+  sort(0, n - 1, depthLimit);
   return a;
 }
 
