@@ -14,10 +14,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="h-full antialiased">
-      <body className="h-full flex" style={{ background: "var(--color-bg)", color: "var(--color-text)" }}>
+      <body className="h-full flex flex-col lg:flex-row" style={{ background: "var(--color-bg)", color: "var(--color-text)" }}>
         <Navigation />
-        <main className="flex-1 min-h-dvh overflow-y-auto"
-          style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
+        <main className="flex-1 min-h-0 overflow-y-auto">
           {children}
         </main>
       </body>

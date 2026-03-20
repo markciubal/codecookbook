@@ -102,7 +102,7 @@ export default function SortingVisualizer({ algorithm }: Props) {
 
 
   return (
-    <div className="flex flex-col h-dvh overflow-hidden">
+    <div className="flex flex-col h-full overflow-hidden">
       {/* ── Header ── */}
       <div
         className="flex flex-col gap-1 px-5 pt-6 pb-4"

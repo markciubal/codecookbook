@@ -651,7 +651,7 @@ export default function GraphVisualizer() {
   // ── Render ──────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col h-dvh overflow-hidden" style={{ background: "var(--color-bg)" }}>
+    <div className="flex flex-col h-full overflow-hidden" style={{ background: "var(--color-bg)" }}>
       {/* Header */}
       <div className="shrink-0 px-5 pt-6 pb-4" style={{ borderBottom: "1px solid var(--color-border)" }}>
         <div className="flex flex-wrap items-center gap-2 mb-1">

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback, useRef } from "react";
 import { Play, Square, RotateCcw, Trophy, Zap, X } from "lucide-react";
 import { generateBenchmarkInput, SORT_FNS, type BenchmarkScenario } from "@/lib/benchmark";
 
@@ -255,6 +255,78 @@ function Legend({ algos, data }: { algos: string[]; data: CurveData }) {
   );
 }
 
+// ── Sample proof ──────────────────────────────────────────────────────────────
+
+function SampleProof({
+  proof,
+  revealed,
+}: {
+  proof: { before: number[]; after: number[]; n: number };
+  revealed: boolean;
+}) {
+  const max = Math.max(...proof.before, ...proof.after, 1);
+
+  const tokenStyle = (v: number, forceColor = false): React.CSSProperties => {
+    const base: React.CSSProperties = {
+      display: "inline-block",
+      fontSize: 10,
+      fontFamily: "monospace",
+      padding: "2px 5px",
+      borderRadius: 4,
+      transition: "background-color 0.5s ease, color 0.35s ease, border-color 0.5s ease",
+    };
+    if (!forceColor && !revealed) {
+      return { ...base, background: "var(--color-surface-3)", color: "var(--color-muted)", border: "1px solid var(--color-border)" };
+    }
+    const pct = v / max;
+    const hue = Math.round(220 - pct * 185); // blue(220) → orange(35)
+    return {
+      ...base,
+      background: `hsl(${hue}, 72%, 40%)`,
+      color: "#fff",
+      border: `1px solid hsl(${hue}, 72%, 57%)`,
+    };
+  };
+
+  return (
+    <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--color-border)" }}>
+      <p className="text-xs font-semibold uppercase tracking-wider mb-2.5" style={{ color: "var(--color-muted)" }}>
+        Proof of computation · {proof.before.length} values sampled from n={fmtN(proof.n)}
+      </p>
+
+      {/* Unsorted row — colors reveal once sort completes */}
+      <div className="mb-2 flex items-start gap-2">
+        <span className="text-xs font-mono shrink-0 mt-0.5" style={{ color: "var(--color-muted)", width: 54 }}>
+          unsorted
+        </span>
+        <span className="inline-flex flex-wrap gap-1">
+          {proof.before.map((v, i) => (
+            <span key={i} style={{ ...tokenStyle(v), transitionDelay: `${i * 18}ms` }}>
+              {v.toLocaleString()}
+            </span>
+          ))}
+        </span>
+      </div>
+
+      {/* Sorted row — appears after reveal */}
+      {revealed && (
+        <div className="flex items-start gap-2">
+          <span className="text-xs font-mono shrink-0 mt-0.5" style={{ color: "var(--color-muted)", width: 54 }}>
+            sorted
+          </span>
+          <span className="inline-flex flex-wrap gap-1">
+            {proof.after.map((v, i) => (
+              <span key={i} style={tokenStyle(v, true)}>
+                {v.toLocaleString()}
+              </span>
+            ))}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function BenchmarkVisualizer() {
@@ -449,7 +521,7 @@ export default function BenchmarkVisualizer() {
   const hasCurveData = Object.values(curveData).some(pts => pts.length > 0);
 
   return (
-    <div className="flex flex-col h-dvh overflow-hidden">
+    <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
       <div
         className="flex flex-col gap-0.5 px-5 pt-5 pb-3"
@@ -817,6 +889,11 @@ export default function BenchmarkVisualizer() {
                   </div>
                 )}
 
+                {/* Sample proof — shown directly under chart */}
+                {sampleProof && (
+                  <SampleProof proof={sampleProof} revealed={status === "done"} />
+                )}
+
                 {/* Legend */}
                 {hasCurveData && (
                   <div className="mt-2.5 flex flex-col gap-1.5">
@@ -827,47 +904,6 @@ export default function BenchmarkVisualizer() {
                         {" "}dotted line / ✕ = timed out (&gt;30 s); subsequent sizes skipped
                       </p>
                     )}
-                  </div>
-                )}
-
-                {/* Before / after proof sample */}
-                {sampleProof && (
-                  <div className="mt-4 pt-4" style={{ borderTop: "1px solid var(--color-border)" }}>
-                    <p className="text-xs font-semibold uppercase tracking-wider mb-2.5" style={{ color: "var(--color-muted)" }}>
-                      Proof · 24 values sampled from n={fmtN(sampleProof.n)}
-                    </p>
-                    {(["before", "after"] as const).map(phase => {
-                      const vals = sampleProof[phase];
-                      const max = Math.max(...sampleProof.before);
-                      return (
-                        <div key={phase} className="mb-2">
-                          <span className="text-xs font-mono mr-2" style={{ color: "var(--color-muted)", minWidth: 40, display: "inline-block" }}>
-                            {phase === "before" ? "before" : "after "}
-                          </span>
-                          <span className="inline-flex flex-wrap gap-1">
-                            {vals.map((v, i) => {
-                              const pct = max > 0 ? v / max : 0;
-                              const hue = Math.round(200 - pct * 200); // blue→green: high=green(120), low=blue(200)
-                              const bg = `hsl(${hue}, 80%, 38%)`;
-                              return (
-                                <span key={i} style={{
-                                  display: "inline-block",
-                                  fontSize: 10,
-                                  fontFamily: "monospace",
-                                  padding: "1px 5px",
-                                  borderRadius: 4,
-                                  background: bg,
-                                  color: "#fff",
-                                  border: `1px solid hsl(${hue}, 80%, 52%)`,
-                                }}>
-                                  {v}
-                                </span>
-                              );
-                            })}
-                          </span>
-                        </div>
-                      );
-                    })}
                   </div>
                 )}
 
