@@ -7197,151 +7197,42 @@ func main() {
   // ── LOGOS SORT (ULTRA) ─────────────────────────────────────────────────────
   logos: {
 
-    typescript: `// ═══════════════════════════════════════════════════════════════════════
-// LOGOS ULTRA SORT  —  dual-golden-ratio-pivot adaptive introsort hybrid
-// ───────────────────────────────────────────────────────────────────────
-// "In the beginning was the Logos." — John 1:1
+    typescript: `// ═══════════════════════════════════════════════════════════════════
+// LOGOS ULTRA SORT — "In the beginning was the Logos." — John 1:1
+// λόγος: reason that orders the cosmos. This algorithm reads what is
+// already there and chooses the simplest adequate tool each time.
 //
-// The ancient Greek word λόγος (logos) means both "word" and "reason" —
-// the rational principle that orders the cosmos and makes it intelligible
-// to the mind that can read it. This algorithm embodies that principle: it
-// does not brute-force its way through disorder, but instead reads the
-// natural structure of the data at every level, choosing the simplest tool
-// adequate to each sub-problem. A craftsman selects the right chisel; this
-// algorithm selects the right strategy — insertion for the small, counting
-// for the narrow, scanning for the already-ordered, partitioning for the rest.
-//
-// Nine interlocking decisions are made for every sub-array encountered:
-//
-//   (1) Counting sort shortcut — if values are integers whose range < 4 × count,
-//       sort in O(n + range) with a count array; zero comparisons required.
-//   (2) Gallop pre-scan — if the first three elements ascend, scan the whole
-//       subarray: return immediately if sorted, flip in O(n) if reversed.
-//   (3) Dual φ-pivot indices — place two candidates at the golden-ratio cuts
-//       φ⁻² ≈ 38.2% and φ⁻¹ ≈ 61.8% of the subarray width.
-//   (4) Ninther quality filter — refine each candidate to the median of itself
-//       and its two immediate neighbors, consulting nine data points total.
-//   (5) Per-level chaos factor — multiply the φ-fractions by a fresh random
-//       value each call, defeating any fixed adversarial input pattern.
-//   (6) Dutch-flag dual partition — one left-to-right scan places every element
-//       into one of three regions: < p1, between p1 and p2, > p2.
-//   (7) Smallest-first recursion — sort the two smallest regions recursively,
-//       continue the while-loop on the largest (tail-call elimination).
-//   (8) Introsort depth guard — when depth budget is exhausted, delegate to the
-//       platform's native sort, guaranteeing O(n log n) in every case.
-//   (9) Insertion sort base case — for subarrays of ≤ 48 elements, insertion
-//       sort beats partition overhead due to cache locality and zero call cost.
-// ═══════════════════════════════════════════════════════════════════════
+//   (1) Counting shortcut  — narrow range? tally and reconstruct, no compares.
+//   (2) Gallop pre-scan    — already ordered or reversed? exit in one pass.
+//   (3) Dual φ-pivots      — golden-ratio cuts resist any adversarial input.
+//   (4) Ninther quality    — median of three neighbors, not a blind stab.
+//   (5) Chaos factor       — randomize each level so no fixed input wins.
+//   (6) Dutch-flag split   — one sweep classifies all elements into three bands.
+//   (7) Smallest-first     — recurse the two small pieces; loop the large one.
+//   (8) Depth guard        — too deep? hand off to native sort and walk away.
+//   (9) Insertion base     — ≤ 48 elements: patience beats machinery.
+// ═══════════════════════════════════════════════════════════════════
 
-// ── (0a) Golden ratio constants ─────────────────────────────────────────
-// The golden ratio φ = (1 + √5) / 2 ≈ 1.618 is the unique positive number
-// satisfying x = 1 + 1/x, which means no simple fraction approximates it
-// well — in the language of continued fractions it is [1; 1, 1, 1, 1, ...],
-// the "most irrational" real number, the one that resists rational capture.
-// Its reciprocal φ⁻¹ ≈ 0.618 and its square φ⁻² ≈ 0.382 are the two
-// golden-section cuts: the places where dividing a line segment produces the
-// most aesthetically "natural" proportion, used by architects from the Greeks
-// to Le Corbusier, appearing in sunflower seed spirals, nautilus growth, and
-// the phyllotaxis of leaves around a stem.
-//
-// Why these numbers for pivot selection? Because φ is maximally resistant to
-// periodic input structure. An adversary who knows a fixed pivot fraction p
-// can craft an array where elements near position p·n are extreme outliers,
-// always producing a lopsided partition. With φ this attack is hardest because
-// no sequence of prior approximations converges quickly to φ — there is no
-// "nearby" simple fraction an adversary can use as a proxy. Combined with the
-// per-level chaos factor (step 5), the pivot positions become unpredictable.
-//
-// Technically: PHI and PHI2 are 64-bit IEEE-754 doubles, each with 52 explicit
-// mantissa bits plus one implicit leading bit for 53 bits of significand, giving
-// ≈15.95 significant decimal digits. The identity PHI + PHI2 = 1 − PHI·PHI2
-// holds to within 1 ULP in double arithmetic. Storing both constants avoids a
-// subtraction at the call site and keeps the code self-documenting. When we
-// multiply PHI2 * chaos * range and floor the result, the rounding error is
-// at most 0.5 ULP of the product, bounded by ≈ 2⁻⁴³ × range — negligible.
+// φ⁻¹ and φ⁻² are the most irrational numbers that exist — no simple
+// fraction approximates them, so pivot positions derived from them resist
+// any periodic pattern an adversary might hide in the data.
 const PHI  = 0.6180339887498949; // φ⁻¹  = (√5 − 1) / 2  ≈ 0.618
 const PHI2 = 0.3819660112501051; // φ⁻²  = (3 − √5) / 2  ≈ 0.382
 
 function logosUltraSort(arr: number[]): number[] {
 
-  // ── (0b) Trivial-case guard and working-copy allocation ───────────────
-  // An array of zero or one element is already sorted by definition — there
-  // is nothing to compare, no order to impose, no judgment to render. This
-  // guard embodies the philosophical principle of the base case: recursion
-  // must always ground out in something self-evidently true, just as Euclid's
-  // geometry rests on axioms requiring no proof because they are undeniable.
-  // We return a copy even here, for consistency with the non-trivial path.
-  //
-  // The fresh copy 'a = arr.slice()' separates what is ours to change from
-  // what belongs to the caller. This is the principle of non-destructive action:
-  // we sort in the copy, leave the original untouched, and return what we made.
-  // Purity — returning new data rather than mutating — prevents a whole class
-  // of bugs where the caller relies on the original remaining unchanged.
-  //
-  // Technically: arr.slice() allocates a new Array of the same length and copies
-  // all elements in a single pass, running in strict O(n) time and O(n) space.
-  // In V8 (Node.js / Chrome), this compiles to a single memcpy-class operation
-  // on the engine's internal array storage, making it close to the theoretical
-  // minimum cost for the operation. The guard 'n < 2' ensures all downstream
-  // code can safely assume at least two elements exist, eliminating redundant
-  // bounds checks throughout the sort function.
+  // A single element needs no judgment. We work in a copy so the caller's
+  // data is untouched — sort what is ours to sort, leave the rest alone.
   const n = arr.length;
   if (n < 2) return arr.slice();
   const a = arr.slice();
 
-  // ── (0c) Depth limit — the introsort conscience ───────────────────────
-  // The depth limit is the algorithm's conscience — an inner voice that says
-  // "you have gone deep enough; the recursive strategy has failed this input;
-  // now let a more powerful tool take over." Without it, a sequence of
-  // especially unlucky pivot choices could drive recursion to O(n) depth,
-  // consuming O(n) stack frames and collapsing performance toward O(n²).
-  // David Musser invented introsort in 1997 precisely to solve this: watch
-  // the recursion depth and switch to heapsort when it gets dangerously deep.
-  // We switch to the platform's native sort instead, which is TimSort in V8.
-  //
-  // The bound 2·⌊log₂(n)⌋ + 4 is generous by design. A perfectly balanced
-  // dual-pivot quicksort on n elements reaches depth at most ⌊log₂(n)⌋, so
-  // doubling that gives two full "generations" of bad luck before we intervene.
-  // The +4 provides four levels of slack for small n where log₂(n) is coarse.
-  // Together the limit is tight enough to prevent stack overflow (JavaScript
-  // engines typically allow 10,000–20,000 call frames) while loose enough that
-  // it fires only on genuinely adversarial or astronomically unlucky inputs.
-  //
-  // Technically: Math.floor(Math.log2(n)) uses the native log2 intrinsic, which
-  // maps to a single FLDL2E+FYL2X or equivalent instruction on x86-64 hardware.
-  // For n = 1,000,000: floor(log₂(10⁶)) = floor(19.93) = 19, giving limit = 42.
-  // The expected recursion depth on uniformly random data for dual-pivot
-  // quicksort is approximately 1.5·log₂(n) ≈ 30 for n = 10⁶, well under the
-  // limit. The guard fires only in degenerate cases — roughly when every level
-  // of partitioning produces two regions of size ratio worse than 10:1.
+  // Know when to stop. Two doublings of log₂(n) is generous credit; if we
+  // burn through it we have been unlucky or attacked — time to hand off.
   const depthLimit = 2 * Math.floor(Math.log2(n)) + 4;
 
-  // ── (0d) Median of three — the sorting network ───────────────────────
-  // The median of three values is the middle one — not the largest, not the
-  // smallest, but the one that lies between the other two. Aristotle identified
-  // the mean as the locus of virtue: courage is the mean between cowardice and
-  // recklessness; generosity lies between miserliness and extravagance. A good
-  // pivot is similarly the mean — close to the true median of the subarray,
-  // producing two roughly equal partitions that converge to sorted order quickly.
-  // Median3 finds this middle value using a classical sorting network: three
-  // conditional swaps that sort x, y, z in place, then return y (the middle).
-  //
-  // This network is optimal: no three-element sort can use fewer than three
-  // comparisons in the worst case (proved by information-theoretic arguments —
-  // there are 3! = 6 orderings of three elements, and each comparison can only
-  // halve the uncertainty, so ceil(log₂(6)) = 3 comparisons are always needed).
-  // The three-swap network uses exactly three in all cases, which is simultaneously
-  // the worst-case optimal and the branch-predictor's dream: a fixed, predictable
-  // sequence of operations with no early exits and no data-dependent branches.
-  //
-  // Technically: each swap block uses a temporary variable 't' (register-allocated
-  // by any modern compiler or JIT). The three blocks are: sort(x,y), sort(y,z),
-  // sort(x,y) — a sorting network known since Knuth's TAOCP Vol. 3. After the
-  // three swaps, x ≤ y ≤ z always holds and y is the median. The function is
-  // called twice per recursion level (once for each pivot, via ninther), so its
-  // constant factor matters. Keeping it branchless is intentional: branch
-  // mispredictions on modern CPUs cost 15–20 cycles each; three predictable
-  // comparisons are cheaper than two comparisons with an unpredictable branch.
+  // Virtue is the mean. The best pivot is neither extreme — sort three
+  // values with three swaps and keep the middle one. Optimal by proof.
   function median3(x: number, y: number, z: number): number {
     if (x > y) { const t = x; x = y; y = t; }
     if (y > z) { const t = y; y = z; z = t; }
@@ -7349,61 +7240,15 @@ function logosUltraSort(arr: number[]): number[] {
     return y;
   }
 
-  // ── (0e) Ninther — smoothed pivot estimate ───────────────────────────
-  // A ninther produces a locally-smoothed pivot estimate by consulting not
-  // just the candidate element but its two nearest neighbors, then returning
-  // their median. This dampens the effect of local outliers: a single extreme
-  // value at the candidate position is overruled by its neighbors, producing
-  // an estimate closer to the true local distribution. Robert Sedgewick's
-  // original "ninther" took the median of three medians-of-three; ours is
-  // simpler but embodies the same philosophical insight: trust the local
-  // neighborhood, not any single witness.
-  //
-  // The philosophical parallel is the wisdom of crowds and the practice of
-  // averaging repeated measurements. A physician takes three blood pressure
-  // readings before diagnosing hypertension. A judge discards the highest and
-  // lowest scores in gymnastics and averages the rest. We do the same: consult
-  // the candidate and its two neighbors, discard the extreme, keep the middle.
-  // This reduces pivot variance without adding significant computational cost.
-  //
-  // Technically: Math.max(lo, idx-1) and Math.min(hi, idx+1) clamp neighbor
-  // indices to [lo, hi], making the function safe even when idx is at a
-  // subarray boundary. When idx = lo, indices become (lo, lo, lo+1), so
-  // median3 degenerates to a comparison of a[lo] with a[lo+1] — still better
-  // than a[lo] alone. Total cost per pivot: three array reads, one median3
-  // call (three comparisons). Both pivots together: six reads, six comparisons,
-  // nine distinct elements consulted (with boundary overlap at edges). This
-  // consults 9 data points without a single extra allocation or sort pass.
+  // Don't trust a single witness. Consult the candidate and its neighbors;
+  // the outlier is overruled — the middle of three is closer to the truth.
   function ninther(lo: number, hi: number, idx: number): number {
     return median3(a[Math.max(lo, idx-1)], a[idx], a[Math.min(hi, idx+1)]);
   }
 
-  // ── (0f) Dutch-flag dual partition ──────────────────────────────────
-  // Partitioning is the moment of judgment — where every element is assigned
-  // to its rightful region relative to the two pivot values. With a single
-  // pivot, elements fall into two regions: less-than and greater-than. With
-  // two pivots p1 ≤ p2, three regions emerge: less than p1, between p1 and
-  // p2, and greater than p2. Edsger Dijkstra named this the Dutch National
-  // Flag problem for the flag's three bands of color, and showed that it can
-  // be solved in a single O(n) left-to-right pass using three pointer variables.
-  //
-  // The invariant maintained throughout is the key to understanding the loop:
-  // at every moment, a[lo..lt-1] < p1 (the "less" band is settled left),
-  // a[lt..i-1] ∈ [p1,p2] (the "middle" band is settled), a[i..gt] is the
-  // "unexamined" zone — terra incognita, like the blank spaces on medieval
-  // maps marked "here be dragons." The algorithm systematically collapses
-  // this unknown zone from both ends, assigning each element exactly once.
-  // When i > gt, all elements have been classified and the dragons are gone.
-  //
-  // Technically: the first line normalizes p1 ≤ p2 via a conditional swap,
-  // so the caller need not guarantee pivot ordering. Inside the loop, three
-  // cases apply to a[i]: if a[i] < p1, swap with a[lt], advance both lt and
-  // i (the element is now confirmed in the left band). If a[i] > p2, swap
-  // with a[gt], retreat gt but do NOT advance i — the newly arrived element
-  // at position i is still unexamined. Otherwise a[i] ∈ [p1,p2]: advance i
-  // only (the element stays in the middle band). Total swaps: at most n − 2;
-  // total comparisons: exactly n − 2 (one per non-pivot element). Both are
-  // optimal for the three-way classification problem.
+  // Judgment in one sweep. Three pointers collapse the unknown zone from
+  // both ends: lt marks "confirmed less," gt marks "confirmed greater,"
+  // i is the frontier. When i passes gt, every element has its verdict.
   function dualPartition(lo: number, hi: number, p1: number, p2: number): [number, number] {
     if (p1 > p2) { const t = p1; p1 = p2; p2 = t; }
     let lt = lo, gt = hi, i = lo;
@@ -7415,93 +7260,23 @@ function logosUltraSort(arr: number[]): number[] {
     return [lt, gt];
   }
 
-  // ── Main sort function — iterative with tail-call elimination ────────
-  // This function sorts a[lo..hi] recursively but expresses the recursion on
-  // the largest subproblem as a while-loop continuation rather than a genuine
-  // function call. The while-loop is not merely stylistic — it is a structural
-  // transformation that bounds the call stack to O(log n) depth regardless of
-  // how many partitioning steps are performed. Without this transformation, a
-  // degenerate split where one region is always much larger than the others
-  // could drive call depth to O(n), overflowing the JavaScript engine's stack.
-  //
-  // The Tao Te Ching describes wu wei — "non-action" or "action perfectly
-  // matched to the moment." When the largest subproblem's recursive call would
-  // simply continue the current frame's work anyway, recognizing this and
-  // letting the loop continue is wu wei: we do not spend a stack frame on what
-  // can be done for free. We act with exactly the resources the situation demands.
-  //
-  // Technically: at the bottom of the loop body, lo and hi are updated to the
-  // bounds of the largest region and depth is decremented. The while condition
-  // 'lo < hi' re-evaluates on the next iteration, effectively simulating a
-  // tail-recursive call to sort(largest_lo, largest_hi, depth-1) without a new
-  // activation record. The two smaller regions are handled by genuine recursive
-  // calls (they must be — the loop can only process one region at a time). The
-  // call-stack depth is thus bounded by the depth of the recursion on the two
-  // smaller regions, which is at most O(log n) by the smallest-first invariant.
+  // Wu wei — the loop IS the tail call on the largest region. We spend
+  // no stack frame on what the natural continuation already does for free.
   function sort(lo: number, hi: number, depth: number): void {
     while (lo < hi) {
       const size = hi - lo + 1;
 
-      // ── (8) Introsort depth guard ──────────────────────────────────
-      // When the recursion depth budget is exhausted, we have encountered a
-      // sequence of unlucky pivot choices — a run of bad luck or an adversarial
-      // input deliberately constructed to trigger worst-case behavior. Rather
-      // than continuing deeper into O(n²) territory, we surrender this subarray
-      // to the platform's native sort and return. In V8 (Node.js, Chrome), the
-      // native Array.prototype.sort is TimSort — a sophisticated hybrid of merge
-      // sort and binary insertion sort that guarantees O(n log n) and excels on
-      // nearly-sorted data, which is what this subarray likely is after the
-      // earlier partitioning passes have removed most of the extreme outliers.
-      //
-      // Socrates said "I know that I know nothing" — and this is the algorithm
-      // saying "I have failed to sort this subarray efficiently; I know when I am
-      // beaten, and I delegate to a wiser tool." This is not weakness but the
-      // highest form of practical wisdom: recognizing one's limits and acting
-      // accordingly is the beginning of good judgment in life and in code.
-      //
-      // Technically: a.slice(lo, hi+1) creates a new subarray of length hi-lo+1
-      // in O(n) time. The comparator (x,y) => x-y sorts numerically ascending.
-      // We then copy results back to a[lo..hi] with a for loop — O(n) reads and
-      // writes. The total overhead is roughly 3× the native sort time, but since
-      // this path fires at most once per subarray across the entire algorithm's
-      // run (the guard exits immediately after), and the subarray it receives is
-      // likely nearly sorted (good for TimSort's O(n) best case), the practical
-      // cost is low. The guard is triggered < 0.001% of the time on random data.
+      // (8) "I know that I know nothing." — Socrates. Depth exhausted means
+      // the pivot strategy has failed; a wiser tool takes it from here.
       if (depth <= 0) {
         const sub = a.slice(lo, hi+1).sort((x, y) => x - y);
         for (let k = lo; k <= hi; k++) a[k] = sub[k - lo];
         return;
       }
 
-      // ── (9) Insertion sort base case ─────────────────────────────
-      // For small subarrays, the overhead of selecting pivots, partitioning,
-      // computing region boundaries, and making two recursive calls exceeds
-      // the cost of simply sorting the elements directly. Insertion sort is
-      // the natural choice: it sorts in place without extra memory, is stable,
-      // is optimal for nearly-sorted data (O(n) when inversions are few), and
-      // accesses memory sequentially in both its outer and inner loops — a
-      // pattern that maximizes CPU cache utilization and pipeline efficiency.
-      //
-      // Lao Tzu wrote: "A journey of a thousand miles begins with a single step."
-      // Insertion sort is exactly this: it processes each element once, walking
-      // it leftward until it finds its natural resting place, then moves on.
-      // No element is disturbed before the algorithm is ready for it; each is
-      // placed correctly before the next is considered. This patient, methodical
-      // approach — one element, one step, one comparison at a time — is slower
-      // for large arrays but embodies a kind of thoroughness that larger methods
-      // with their pivots and partitions cannot match for tiny subarrays.
-      //
-      // Technically: the threshold of 48 is empirically derived. Java's
-      // Arrays.sort (a dual-pivot quicksort) uses a threshold of 47. Python's
-      // TimSort uses a minimum run size of 32–64. CPython's sort uses 64.
-      // Experiments on modern x86-64 hardware show the crossover between
-      // insertion sort and partition-based sorts occurs at roughly 24–64 elements
-      // depending on cache line size, branch prediction quality, and element type.
-      // At 48 we stay in the L1 cache (typically 32–64 KB), keeping all array
-      // accesses fast. The inner while loop's backward scan stops early for
-      // nearly-sorted subarrays — after several partitioning passes, elements
-      // are never more than a few positions from their final location, so the
-      // average inner loop length approaches O(1), making this effectively O(n).
+      // (9) "A journey of a thousand miles begins with a single step." — Lao Tzu.
+      // Below 48 elements, patience beats machinery: walk each element left
+      // until it finds its place, then move on. Simple, cache-warm, exact.
       if (size <= 48) {
         for (let i = lo+1; i <= hi; i++) {
           const key = a[i]; let j = i-1;
@@ -7511,38 +7286,9 @@ function logosUltraSort(arr: number[]): number[] {
         return;
       }
 
-      // ── (1) Counting sort shortcut ────────────────────────────────
-      // Before committing to the expensive machinery of dual-pivot partitioning,
-      // we ask a simpler question: are the values in this subarray integers
-      // confined to a narrow range? If the spread of values (max − min) is less
-      // than four times the count of elements, we can sort in O(n + range) time
-      // using a count array — one bucket per possible value, one linear tally
-      // pass, one linear reconstruction pass. No comparisons. No pivots. No
-      // recursion. This is faster than any comparison sort by the information-
-      // theoretic lower bound, which requires Ω(n log n) comparisons for n
-      // distinct elements but imposes no constraint on non-comparison sorting.
-      //
-      // The criterion "span < size × 4" reflects a cost balance. Allocating and
-      // zeroing the count array costs O(span) time. The partition-and-recurse
-      // alternative costs O(n log(n/k)) where k is the number of distinct values.
-      // Setting the crossover at 4n ensures the count array fits in L1/L2 cache
-      // for subarrays up to ~50,000 elements (a 50k-bucket int array is 200 KB,
-      // within L2 on most CPUs). For subarrays where many values repeat — the
-      // "Many Duplicates" benchmark scenario — this shortcut is devastating in
-      // its efficiency: it collapses what would be O(n log n) work to O(n + k)
-      // by bypassing all comparison logic entirely.
-      //
-      // Technically: the min/max scan is a single linear pass requiring 2(n-1)
-      // comparisons (two per element after the first). Number.isInteger(mn)
-      // ensures the values are true integers and not floats like 1.5 that would
-      // produce non-integer bucket indices. The count array has (span + 1) buckets
-      // indexed by (value − mn), so value v maps to counts[v − mn]. The
-      // reconstruction loop is a doubly-nested: outer over values 0..span, inner
-      // 'while (counts[v]-- > 0)' writing each value to the next output position.
-      // Post-decrement means the check and the decrement happen atomically in one
-      // expression. Total work: O(n) min/max + O(n) tally + O(n + span) output
-      // = O(n + span). When span < 4n this is O(n) — strictly faster than any
-      // comparison-based sort on this subarray.
+      // (1) Ask first whether comparison is even necessary. When the value
+      // range is narrow, tally occurrences and reconstruct — no pivots,
+      // no recursion, no comparisons at all. This is the fastest path.
       let mn = a[lo], mx = a[lo];
       for (let k = lo+1; k <= hi; k++) { if (a[k]<mn) mn=a[k]; if (a[k]>mx) mx=a[k]; }
       const span = mx - mn;
@@ -7554,34 +7300,9 @@ function logosUltraSort(arr: number[]): number[] {
         return;
       }
 
-      // ── (2) Gallop pre-scan ──────────────────────────────────────
-      // Before invoking the full partitioning machinery, we take one more
-      // look at the subarray's nature. If the first three elements are in
-      // non-decreasing order, the subarray might already be sorted — a condition
-      // that grows more common as the algorithm recurses deeper and earlier passes
-      // have done most of the work. We scan all elements: if sorted, return with
-      // zero swaps consumed; if fully reversed, flip with a single O(n) pass.
-      // Both paths are free of recursive depth, leaving the depth budget intact.
-      //
-      // The name "gallop" comes from TimSort's galloping merge, where the algorithm
-      // accelerates forward assuming a run will continue. Our pre-scan gallops
-      // optimistically, betting that order has been established. The three-element
-      // pre-check a[lo] ≤ a[lo+1] ≤ a[lo+2] is a cheap O(1) hypothesis test:
-      // if the hypothesis fails (the data is not ascending here), we skip the
-      // O(n) full scan entirely, amortizing its cost to nearly O(1) on random
-      // data. This is the Stoic virtue of prudence — examining the situation
-      // before acting, not assuming the context that would make our default
-      // action the right one.
-      //
-      // Technically: the guard a[lo] ≤ a[lo+1] && a[lo+1] ≤ a[lo+2] uses
-      // short-circuit evaluation — the second comparison is skipped if the first
-      // fails. Since size > 48 at this point, size ≥ 49, so a[lo+2] is always
-      // a valid index. The 'sorted' scan exits on the first inversion found
-      // (O(1) for random data, O(n) for sorted data). The 'reversed' scan exits
-      // on the first ascending pair found. The in-place flip uses two-pointer
-      // swapping in O(n/2) destructive assignments, advancing lo and retreating
-      // hi until they meet. Total work for the happy paths (sorted or reversed):
-      // O(n) — cheaper than any partition-based recursive descent.
+      // (2) Look before you leap — Stoic prudence. If the first three ascend,
+      // check the whole: already sorted means instant return; fully reversed
+      // means a single O(n) flip. Either way, zero depth budget consumed.
       if (a[lo] <= a[lo+1] && a[lo+1] <= a[lo+2]) {
         let sorted = true;
         for (let k = lo; k < hi; k++) { if (a[k] > a[k+1]) { sorted = false; break; } }
@@ -7594,125 +7315,30 @@ function logosUltraSort(arr: number[]): number[] {
         }
       }
 
-      // ── (5) Per-level chaos factor ────────────────────────────────
-      // Every recursive level draws a fresh random value from the uniform
-      // distribution on (−1, +1) \ {0}, then takes its absolute value to
-      // produce a chaos scale in (0, 1). This value multiplies the golden-ratio
-      // pivot fractions, shifting their landing positions unpredictably on every
-      // call. An adversary who knows we use φ⁻² and φ⁻¹ as fractions cannot
-      // construct a fixed array that consistently places both pivots at extremes,
-      // because the positions change on every recursive level and every execution.
-      //
-      // Ralph Waldo Emerson wrote: "The dice of God are always loaded" — meaning
-      // outcomes that appear random are guided by deeper laws. Here we invert this:
-      // our dice are genuinely random, loaded only by the laws of probability. This
-      // controlled unpredictability is not a weakness but a strength. Deterministic
-      // algorithms have deterministic worst cases that a sufficiently informed
-      // adversary can exploit. Randomized algorithms convert deterministic worst
-      // cases into expected worst cases, where the expectation is over all random
-      // choices — and no single input can force the bad outcome consistently.
-      //
-      // Technically: Math.random() in V8 uses xorshift128+, a non-cryptographic
-      // PRNG producing 64-bit outputs with period 2¹²⁸ − 1. Multiplying by 2
-      // and subtracting 1 maps [0, 1) to [−1, 1). The while-loop 'while (c === 0)'
-      // guards against the exact value 0 (probability 1 in 2⁵³ ≈ 9 × 10¹⁵),
-      // which would collapse both pivot positions to index lo — a degenerate case.
-      // Math.abs(c) folds the signed value into (0, 1), ensuring a valid scaling
-      // factor. The loop body executes more than once with probability < 10⁻¹⁵,
-      // so its amortized cost is one call to Math.random() per sort level.
+      // (5) "The dice of God are always loaded." — Emerson. We reverse this:
+      // our dice are genuinely random each level. A deterministic algorithm
+      // has deterministic weak spots; randomness closes every fixed exploit.
       let c = 0;
       while (c === 0) c = Math.random() * 2 - 1;
       const chaos = Math.abs(c);
 
-      // ── (3) Dual φ-pivot indices  (4) Ninther quality ────────────
-      // We compute two pivot candidate positions by scaling the subarray's width
-      // by the golden-ratio fractions, each multiplied by the chaos factor. PHI2
-      // ≈ 0.382 places the first candidate at roughly the 38.2% mark; PHI ≈ 0.618
-      // places the second at the 61.8% mark — the two classical golden-section
-      // cuts, the same proportions used in the golden rectangle, in musical phrase
-      // structure (the "golden climax"), and in the proportions of the Parthenon.
-      // Multiplying by chaos shifts both positions by a shared random factor,
-      // maintaining their relative spacing while defeating adversarial knowledge.
-      //
-      // After computing the raw indices, we call ninther on each to obtain a
-      // locally-smoothed value that is more representative of the local data
-      // distribution than a raw element access. The resulting p1 and p2 are the
-      // two pivots for the Dutch-flag partition in the next step. If p1 = p2
-      // (equal pivots, common for arrays with many duplicates), the partition
-      // still works correctly — all equal elements pile into the middle band and
-      // are excluded from further partitioning, giving O(n) behavior for arrays
-      // with a single repeated value.
-      //
-      // Technically: range = hi − lo is the number of inter-element gaps in the
-      // subarray (one less than the count). Multiplying by PHI2 × chaos and
-      // flooring gives an offset in [0, range], which added to lo gives an index
-      // in [lo, hi]. The Math.min guard clamps against floating-point rounding
-      // that could produce an offset of range+1 (extremely rare but theoretically
-      // possible when chaos is very close to 1.0). With idx1 < idx2 guaranteed by
-      // PHI2 < PHI and the shared chaos factor, the two ninther calls access six
-      // array elements in total. Combined with the two median3 calls (six
-      // comparisons), pivot selection costs 12 comparisons and 6 array reads —
-      // roughly 0.06 comparisons per element for a 200-element subarray.
+      // (3/4) Cut at the golden section, scaled by chaos so the exact position
+      // shifts each call. Then smooth each candidate through its neighbors —
+      // one outlier cannot corrupt a pivot when three voices are consulted.
       const range = hi - lo;
       const idx1 = lo + Math.min(range, Math.floor(range * PHI2 * chaos));
       const idx2 = lo + Math.min(range, Math.floor(range * PHI  * chaos));
       const p1 = ninther(lo, hi, idx1);
       const p2 = ninther(lo, hi, idx2);
 
-      // ── (6) Dual partition → three regions ───────────────────────
-      // With two pivots in hand, we invoke the Dutch-flag partition, which
-      // classifies every element into one of three final regions:
-      //   a[lo .. lt−1]  — all values strictly less than p1
-      //   a[lt .. gt]    — all values in [p1, p2] (the middle band)
-      //   a[gt+1 .. hi]  — all values strictly greater than p2
-      // The middle band is fully settled relative to the outer two — its
-      // elements all lie between p1 and p2 and will never be moved again.
-      // Only the left and right regions require recursive sorting.
-      //
-      // This is the Logos at work — the rational principle that divides the
-      // chaos of the input into three ordered categories with one sweep. The
-      // algorithm has not yet "sorted" the array in the sense of producing a
-      // total order, but it has established something equally profound: it
-      // knows which elements belong in the bottom third, which in the top third,
-      // and which in the middle. The recursive calls that follow merely refine
-      // this classification to finer granularity, like a sculptor removing
-      // progressively thinner layers of marble until the final form emerges.
-      //
-      // Technically: dualPartition returns [lt, gt] where lt is the first index
-      // with value ≥ p1 and gt is the last index with value ≤ p2. The three
-      // sub-problems generated are Left = [lo, lt−1], Middle = [lt, gt],
-      // Right = [gt+1, hi]. Their sizes sum to hi − lo + 1, conserving total
-      // work. The middle region size equals gt − lt + 1; for arrays with many
-      // equal elements, this region grows large and is excluded from recursion,
-      // giving the algorithm its excellent behavior on duplicate-heavy inputs.
+      // (6) The Logos divides chaos into three with one sweep: less than p1,
+      // between p1 and p2, greater than p2. The middle band is done forever.
+      // Like a sculptor, we reveal the form hidden inside the disorder.
       const [lt, gt] = dualPartition(lo, hi, p1, p2);
 
-      // ── (7) Smallest-first recursion with tail-call on the largest ─
-      // We now face three sub-problems. To minimize stack depth and avoid
-      // pathological worst cases, we sort the sub-problems by size ascending
-      // and recurse only on the two smallest — the largest is handled by the
-      // while-loop's next iteration (a simulated tail call, costing no stack
-      // frame). This guarantees that each genuine recursive call handles at
-      // most half of the remaining work, bounding stack depth to O(log n).
-      //
-      // "The last shall be first, and the first last." (Matthew 20:16) — we
-      // deliberately defer the largest sub-problem to last, then handle it not
-      // with a new function call but by continuing the current call's loop.
-      // The two smaller sub-problems are handled "first" with genuine recursion;
-      // the largest is deferred and handled "last" at virtually zero cost. This
-      // reverses the intuitive priority of attacking the biggest challenge first,
-      // in service of a deeper goal: keeping the call stack shallow so the
-      // algorithm can sort arbitrarily large arrays without crashing.
-      //
-      // Technically: regions is an array of three tuples [size, subarray_lo,
-      // subarray_hi]. We sort by size ascending (regions.sort with comparator
-      // x[0] − y[0]), so regions[2] is always the largest. The two recursive
-      // calls guard with 'lo < hi' to skip trivial subarrays (size 0 or 1).
-      // Setting 'lo = regions[2][1]; hi = regions[2][2]; depth--' updates the
-      // loop's working variables, simulating a tail-recursive call without a
-      // new stack frame. The depth decrement is shared — all three sub-problems
-      // draw from the same depth budget, ensuring the total depth remains
-      // bounded by depthLimit regardless of how the three regions are sized.
+      // (7) "The last shall be first." — Matthew 20:16. Sort the two smallest
+      // regions with genuine calls; defer the largest to the loop — it costs
+      // nothing and keeps the call stack bounded to O(log n) depth.
       const regions: [number, number, number][] = [
         [lt - lo,     lo,    lt - 1],
         [gt - lt + 1, lt,    gt    ],
@@ -7728,10 +7354,7 @@ function logosUltraSort(arr: number[]): number[] {
   sort(0, n-1, depthLimit);
   return a;
 }
-// Time:  O(n log n) expected and worst-case (introsort guard guarantees it)
-// Space: O(log n) call stack — tail-call on largest region bounds depth
-// Stable: NO — equal elements may be reordered across partition boundaries
-// Pure:   YES — the original arr is never modified; a sorted copy is returned
+// Time: O(n log n)  Space: O(log n)  Stable: NO  Pure: YES
 
 // ── demo ──
 const data = [64, 34, 25, 12, 22, 11, 90, 42, 5, 77];

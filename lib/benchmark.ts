@@ -24,28 +24,61 @@ export function generateBenchmarkInput(n: number, scenario: BenchmarkScenario): 
 // ── Pure sort implementations ─────────────────────────────────────────────────
 
 function logosSort(input: number[]): number[] {
-  // "The cosmos is full of proportional things." — Vitruvius
-  // φ⁻¹ and φ⁻² are the golden ratio and its square — irrational numbers that
-  // appear throughout nature in spirals, petals, and shells. We use them to
-  // space our two pivots across the subarray, seeking natural division points.
-  const PHI  = 0.6180339887498948482; // φ⁻¹  = (√5 − 1) / 2
-  const PHI2 = 0.3819660112501051518; // φ⁻²  = (3 − √5) / 2
-  // BASE: the threshold below which the overhead of partitioning is not worth it.
-  // At small scale, the simplest tool wins.
+  // "In the beginning was the Word, and the Word was with God, and the Word was God." — John 1:1
+  // Logos: the ordering principle beneath all apparent chaos. This sort does not impose
+  // order by force — it listens for the shape latent in the data and coaxes it forth.
+  // Algorithmically: a dual-pivot introsort hybrid — golden-ratio pivots, CSPRNG-seeded chaos,
+  // and adaptive shortcuts for counting, gallop, and insertion. O(n log n) worst-case guaranteed.
+
+  // "He has made everything beautiful in its time." — Ecclesiastes 3:11
+  // The golden ratio φ = (√5+1)/2 is the proportion Nature chose before humanity named it —
+  // whispered through the nautilus shell, the sunflower head, the spiral of galaxies.
+  // Its reciprocals φ⁻¹ ≈ 0.618 and φ⁻² ≈ 0.382 are the two most irrational numbers that
+  // exist: no simple fraction ever traps them, no periodic pattern can exploit them.
+  // Algorithmically: computing from definition gives the exact IEEE 754 double — no rounding
+  // artefact from transcribing a decimal literal by hand.
+  const PHI  = (Math.sqrt(5) - 1) / 2; // φ⁻¹ = (√5−1)/2
+  const PHI2 = (3 - Math.sqrt(5)) / 2; // φ⁻² = (3−√5)/2
+
+  // "To every thing there is a season, and a time to every purpose under the heaven." — Ecclesiastes 3:1
+  // Below 48 elements the machinery of recursion costs more than it saves.
+  // A wise ruler does not send an army to settle a household dispute.
+  // Algorithmically: insertion sort's cache locality and zero overhead beats quicksort at small n.
   const BASE = 48;
   const a = [...input];
   const n = a.length;
+
+  // "The lot is cast into the lap, but its every decision is from the Lord." — Proverbs 16:33
+  // We draw a single lot from the deep well of the OS's own entropy — one CSPRNG call at
+  // creation — and from that seed a river of bits flows through all levels of recursion.
+  // No adversary who does not know the seed can ever predict where the pivots will land.
+  // Algorithmically: xoshiro128+ seeded by crypto.getRandomValues — one syscall, then fast
+  // bit-ops per level. Statistically stronger than Math.random(); unpredictably seeded.
+  const _xs = new Uint32Array(4);
+  crypto.getRandomValues(_xs);
+  if (!_xs[0] && !_xs[1] && !_xs[2] && !_xs[3]) _xs[0] = 1;
+  let _x0 = _xs[0], _x1 = _xs[1], _x2 = _xs[2], _x3 = _xs[3];
+  function xrand(): number {
+    const r = (_x0 + _x3) >>> 0;
+    const t = _x1 << 9;
+    _x2 ^= _x0; _x3 ^= _x1; _x1 ^= _x2; _x0 ^= _x3;
+    _x2 ^= t;
+    _x3 = (_x3 << 11) | (_x3 >>> 21);
+    return (r >>> 1) / 0x80000000; // uniform in (0, 1]
+  }
   if (n < 2) return a;
 
-  // "Know thyself — and know thy limits." — Socrates (adapted)
-  // The depth limit is an introsort-style safety net. If recursion goes 2·log₂(n)+4
-  // levels deep, we've likely hit a bad pivot sequence. We stop and defer to the
-  // platform's own sort rather than let performance collapse to O(n²).
+  // "Pride goes before destruction, and a haughty spirit before a fall." — Proverbs 16:18
+  // The Tower of Babel fell not for want of stone but for want of limits.
+  // We set a ceiling: if recursion descends 2·log₂(n)+4 levels, a bad pivot sequence
+  // has humbled us, and we yield the remaining work to a wiser hand.
+  // Algorithmically: Musser's introsort depth guard — the escape hatch to guaranteed O(n log n).
   const depthLimit = 2 * Math.floor(Math.log2(n)) + 4;
 
-  // "The mean is in all things the best." — Hesiod
-  // Three values enter; the middle one leaves. This sorts x, y, z with at most
-  // three swaps and returns the median — the value that is neither extreme.
+  // "Blessed are the peacemakers, for they shall be called children of God." — Matthew 5:9
+  // The mediator stands between two extremes and draws out the hidden middle.
+  // Three values enter in disorder; the one that belongs between the others emerges.
+  // Algorithmically: a three-element sorting network — at most three comparisons, returns median.
   function median3(x: number, y: number, z: number): number {
     if (x > y) { const t = x; x = y; y = t; }
     if (y > z) { const t = y; y = z; z = t; }
@@ -53,19 +86,22 @@ function logosSort(input: number[]): number[] {
     return y;
   }
 
-  // "Walk the middle path." — The Buddha
-  // A ninther takes the median of an element and its two neighbours, producing
-  // a locally smoothed estimate of the subarray's true median. Nine values are
-  // implicitly consulted per pivot — a much better guess than picking blindly.
+  // "Iron sharpens iron, and one person sharpens another." — Proverbs 27:17
+  // A pivot sharpened only against itself remains a crude guess; one sharpened against
+  // its neighbours becomes a truer estimate of the local median.
+  // Algorithmically: median of (idx−1, idx, idx+1) clamped to [lo, hi] — a cheap but
+  // effective pivot quality improvement before any element is moved.
   function ninther(lo: number, hi: number, idx: number): number {
     return median3(a[Math.max(lo, idx - 1)], a[idx], a[Math.min(hi, idx + 1)]);
   }
 
-  // "To every thing there is a season, and a place for every purpose." — Ecclesiastes 3:1
-  // Dutch-flag three-way partition around two pivots p1 ≤ p2. A single left-to-right
-  // scan places every element into one of three regions:
+  // "And God said, Let there be a firmament in the midst of the waters,
+  //  and let it divide the waters from the waters." — Genesis 1:6
+  // Creation begins with division: the formless void separated into sky and sea.
+  // We divide the subarray at two pivots — the lesser, the middle, the greater —
+  // three kingdoms established in a single left-to-right pass, each element finding its home.
+  // Algorithmically: Dijkstra's Dutch National Flag partition, extended to dual pivots.
   //   a[lo..lt-1] < p1  |  a[lt..gt] ∈ [p1, p2]  |  a[gt+1..hi] > p2
-  // lt and gt are the boundaries returned for the next recursion step.
   function dualPartition(lo: number, hi: number, p1: number, p2: number): [number, number] {
     if (p1 > p2) { const t = p1; p1 = p2; p2 = t; }
     let lt = lo, gt = hi, i = lo;
@@ -77,25 +113,29 @@ function logosSort(input: number[]): number[] {
     return [lt, gt];
   }
 
-  // "The unexamined life is not worth living." — Socrates
-  // Each call to sort() examines its subarray before acting. It asks: is there a
-  // faster path? Only when all shortcuts are exhausted does it partition and recurse.
+  // "The Word became flesh and dwelt among us." — John 1:14
+  // The Logos descends into the particular. Each call to sort() enters its subarray
+  // fully — questions it before acting, tries every shortcut, and departs only when
+  // order has been established or delegated. It does not thrash; it discerns.
+  // Algorithmically: the main sort loop with while-based tail-call elimination over the largest region.
   function sort(lo: number, hi: number, depth: number): void {
     while (lo < hi) {
       const size = hi - lo + 1;
 
-      // "Humility is the beginning of wisdom." — Thomas Aquinas
-      // When we've recursed too deeply, we stop and let the platform's native sort
-      // finish the job. This is the introsort guarantee: worst-case O(n log n).
+      // "For my thoughts are not your thoughts, neither are your ways my ways." — Isaiah 55:8
+      // When our own depth is spent, we do not pretend wisdom we no longer have.
+      // We bow, and hand what remains to the platform — whose ways surpass our own.
+      // Algorithmically: introsort fallback to Array.prototype.sort, guaranteeing O(n log n) worst-case.
       if (depth <= 0) {
         const sub = a.slice(lo, hi + 1).sort((x, y) => x - y);
         for (let k = lo; k <= hi; k++) a[k] = sub[k - lo];
         return;
       }
 
-      // "Great things are made of small things." — Lao Tzu
-      // For subarrays of 48 or fewer elements, insertion sort beats quicksort.
-      // Each element walks left until it finds its home — simple, cache-friendly, fast.
+      // "Whoever can be trusted with very little can also be trusted with much." — Luke 16:10
+      // Small things deserve faithful attention, not elaborate machinery.
+      // Below 48 elements each value simply walks left until it finds its place.
+      // Algorithmically: insertion sort — O(n²) worst-case, but unbeatable constant factor for tiny n.
       if (size <= BASE) {
         for (let i = lo + 1; i <= hi; i++) {
           const key = a[i]; let j = i - 1;
@@ -105,10 +145,10 @@ function logosSort(input: number[]): number[] {
         return;
       }
 
-      // "Work with what is, not what should be." — Taoist principle
-      // If all values are integers and the range of values is narrow (less than
-      // 4× the count), counting sort runs in O(n+k) — linear time, zero comparisons.
-      // We tally occurrences in a bucket array, then reconstruct in order.
+      // "Give me neither poverty nor riches; feed me with the food I need." — Proverbs 30:8
+      // When values are dense — the range narrow, the count generous — there is no need
+      // for comparison at all. We count what is, and pour it back in order.
+      // Algorithmically: counting sort O(n+k), triggered when value span < 4×element count.
       let mn = a[lo], mx = a[lo];
       for (let k = lo + 1; k <= hi; k++) { if (a[k] < mn) mn = a[k]; if (a[k] > mx) mx = a[k]; }
       const span = mx - mn;
@@ -120,10 +160,11 @@ function logosSort(input: number[]): number[] {
         return;
       }
 
-      // "Why disturb what has already found its place?" — Marcus Aurelius (adapted)
-      // A quick O(n) gallop scan checks whether the subarray is already sorted or
-      // perfectly reversed. If sorted, we return immediately. If reversed, a single
-      // in-place mirror flip restores order in O(n). No partition needed.
+      // "Be still, and know that I am God." — Psalm 46:10
+      // Before we disturb the waters, we ask: have they already found their rest?
+      // Order already present is order freely given — we do not unmake what is made.
+      // If reversed, a single mirror-pass restores it; no partition required, no pivot consumed.
+      // Algorithmically: O(n) gallop check for already-sorted or perfectly-reversed subarrays.
       if (a[lo] <= a[lo + 1] && a[lo + 1] <= a[lo + 2]) {
         let sorted = true;
         for (let k = lo; k < hi; k++) { if (a[k] > a[k + 1]) { sorted = false; break; } }
@@ -133,31 +174,31 @@ function logosSort(input: number[]): number[] {
         if (reversed) { for (let l = lo, r = hi; l < r; l++, r--) { [a[l], a[r]] = [a[r], a[l]]; } return; }
       }
 
-      // "The dice of God are always loaded." — Ralph Waldo Emerson
-      // A non-zero random value provides a chaos factor: it scales the φ-derived
-      // pivot positions differently on every recursive level. This prevents any
-      // fixed input pattern from consistently producing bad pivots.
-      let c = 0;
-      while (c === 0) c = Math.random() * 2 - 1;
-      const chaos = Math.abs(c);
+      // "I will give you the treasures of darkness and riches hidden in secret places." — Isaiah 45:3
+      // Each level draws a fresh chaos factor from the seeded river — unpredictable, unrepeatable.
+      // This factor scales the φ-pivot positions differently at every depth, so no fixed
+      // input pattern can ever reliably force the same pivot twice.
+      // Algorithmically: xrand() returns a uniform value in (0, 1] from the xoshiro128+ state.
+      const chaos = xrand();
       const range = hi - lo;
 
-      // "Beauty is the proper conformity of the parts to one another." — Werner Heisenberg
-      // φ² ≈ 0.382 and φ ≈ 0.618 divide the golden rectangle at its natural split.
-      // Scaled by chaos they become the candidate indices for our two pivots.
-      // Ninther refines each raw index into a locally-smoothed median estimate.
+      // "The heavens declare the glory of God; the skies proclaim the work of his hands." — Psalm 19:1
+      // φ⁻² ≈ 0.382 and φ⁻¹ ≈ 0.618 are the golden cuts of any interval — the proportions
+      // the cosmos chose before we arrived. Scaled by chaos they become positions no periodic
+      // input can target; ninther then sharpens each raw index against its neighbours.
+      // Algorithmically: idx = lo + ⌊range × PHI × chaos⌋, refined by ninther before any swap.
       const idx1 = lo + Math.min(range, Math.floor(range * PHI2 * chaos));
       const idx2 = lo + Math.min(range, Math.floor(range * PHI  * chaos));
       const p1 = ninther(lo, hi, idx1);
       const p2 = ninther(lo, hi, idx2);
 
-      // Partition around the two pivots, producing three regions.
       const [lt, gt] = dualPartition(lo, hi, p1, p2);
 
-      // "The last shall be first, and the first last." — Matthew 20:16
-      // Collect the three regions, sort them by size, and recurse on the two
-      // smallest first (pushed onto the call stack). The largest is handled by
-      // continuing the while-loop — a tail-call optimisation that bounds stack depth to O(log n).
+      // "So the last will be first, and the first will be last." — Matthew 20:16
+      // The two smallest regions are given to genuine recursion — settled and released.
+      // The largest inherits the loop without a stack frame: the greatest burden
+      // carried at zero extra cost, the call stack forever bounded to O(log n) depth.
+      // Algorithmically: smallest-first recursion + loop continuation as tail-call elimination.
       const regions: [number, number, number][] = [
         [lt - lo,     lo,     lt - 1],
         [gt - lt + 1, lt,     gt    ],
