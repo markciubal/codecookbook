@@ -1,9 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { CheckCircle, XCircle, ExternalLink } from "lucide-react";
+import { ExternalLink } from "lucide-react";
+import { stableToken, onlineToken } from "@/lib/badge-tokens";
 
 interface Props {
+  kind: "stable" | "online";
   value: boolean;
   trueLabel: string;
   falseLabel: string;
@@ -12,11 +14,19 @@ interface Props {
   learnMoreUrl: string;
 }
 
-export default function InfoBadge({ value, trueLabel, falseLabel, title, description, learnMoreUrl }: Props) {
+export default function InfoBadge({
+  kind,
+  value,
+  trueLabel,
+  falseLabel,
+  title,
+  description,
+  learnMoreUrl,
+}: Props) {
   const [open, setOpen] = useState(false);
 
-  const bg    = value ? "rgba(78,124,82,0.12)"  : "rgba(176,48,32,0.12)";
-  const color = value ? "var(--color-state-sorted)" : "var(--color-state-swap)";
+  const token = kind === "stable" ? stableToken(value) : onlineToken(value);
+  const Icon = token.icon;
 
   return (
     <span
@@ -29,11 +39,11 @@ export default function InfoBadge({ value, trueLabel, falseLabel, title, descrip
       {/* Badge */}
       <span
         className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full cursor-default select-none"
-        style={{ background: bg, color }}
+        style={{ background: token.bg, color: token.color }}
         tabIndex={0}
         aria-describedby={open ? "infobadge-popover" : undefined}
       >
-        {value ? <CheckCircle size={11} strokeWidth={2} /> : <XCircle size={11} strokeWidth={2} />}
+        <Icon size={11} strokeWidth={2} />
         {value ? trueLabel : falseLabel}
       </span>
 
@@ -56,26 +66,10 @@ export default function InfoBadge({ value, trueLabel, falseLabel, title, descrip
             pointerEvents: "none",
           }}
         >
-          <span
-            style={{
-              display: "block",
-              fontSize: 12,
-              fontWeight: 600,
-              color: color,
-              marginBottom: 4,
-            }}
-          >
+          <span style={{ display: "block", fontSize: 12, fontWeight: 600, color: token.color, marginBottom: 4 }}>
             {title}
           </span>
-          <span
-            style={{
-              display: "block",
-              fontSize: 11,
-              lineHeight: 1.5,
-              color: "var(--color-muted)",
-              marginBottom: 8,
-            }}
-          >
+          <span style={{ display: "block", fontSize: 11, lineHeight: 1.5, color: "var(--color-muted)", marginBottom: 8 }}>
             {description}
           </span>
           <a

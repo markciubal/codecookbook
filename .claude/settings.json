@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(npm run:*)",
-      "Bash(find c:/Users/markc/OneDrive/Coding/codecookbook/node_modules/next/dist/docs/01-app/02-guides/upgrading -name *.md)"
+      "Bash(find c:/Users/markc/OneDrive/Coding/codecookbook/node_modules/next/dist/docs/01-app/02-guides/upgrading -name *.md)",
+      "Bash(grep -E \"\\\\.\\(tsx?|json\\)$\")",
+      "Bash(node scripts/trinity-bench.mjs)"
     ]
   }
 }

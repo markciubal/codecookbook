@@ -172,11 +172,11 @@ export const MNEMONICS: Record<string, Mnemonic[]> = {
   logos: [
     {
       headline: "Two golden pivots, not one",
-      body: "Where classical quicksort picks a single pivot, Logos Ultra Sort picks two: one at position φ² ≈ 0.382 and one at φ ≈ 0.618 of the range. These irrational offsets are scaled by a per-level chaos factor so no adversarial input can predict both pivot positions simultaneously. The result is three partitions — left, middle, right — settled in one Dutch National Flag pass, dramatically reducing the work on duplicate-heavy data.",
+      body: "Where classical quicksort picks a single pivot, Logos Sort picks two: one at position φ² ≈ 0.382 and one at φ ≈ 0.618 of the range. These irrational offsets are scaled by a per-level chaos factor so no adversarial input can predict both pivot positions simultaneously. The result is three partitions — left, middle, right — settled in one Dutch National Flag pass, dramatically reducing the work on duplicate-heavy data.",
     },
     {
       headline: "Ninther: take the median of three medians",
-      body: "A single median-of-3 can still be fooled. Logos Ultra Sort uses a ninther: for each candidate pivot index it takes the median of that index and its two neighbours. This costs three comparisons but raises pivot quality substantially — even in nearly-sorted or adversarial inputs the pivot lands close to the true median, shrinking both partition regions toward equal halves.",
+      body: "A single median-of-3 can still be fooled. Logos Sort uses a ninther: for each candidate pivot index it takes the median of that index and its two neighbours. This costs three comparisons but raises pivot quality substantially — even in nearly-sorted or adversarial inputs the pivot lands close to the true median, shrinking both partition regions toward equal halves.",
     },
     {
       headline: "Smallest region first, introsort as a safety net",

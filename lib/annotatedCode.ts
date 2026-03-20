@@ -7198,7 +7198,7 @@ func main() {
   logos: {
 
     typescript: `// ═══════════════════════════════════════════════════════════════════
-// LOGOS ULTRA SORT — λόγος: the reason that orders the cosmos.
+// LOGOS SORT — λόγος: the reason that orders the cosmos.
 //
 // Nine gifts, given only when the moment calls:
 //   (1) tally before you touch    — count, do not compare, when the range permits
@@ -7218,7 +7218,7 @@ func main() {
 const PHI  = 0.6180339887498949; // the most irrational of numbers
 const PHI2 = 0.3819660112501051; // its lesser twin
 
-function logosUltraSort(arr: number[]): number[] {
+function logosSort(arr: number[]): number[] {
 
   // One element needs no ordering. We begin with a copy — one copy — the caller's order untouched.
   const n = arr.length;
@@ -7351,14 +7351,14 @@ function logosUltraSort(arr: number[]): number[] {
 // ── demo ──
 const data = [64, 34, 25, 12, 22, 11, 90, 42, 5, 77];
 console.log("Before:", [...data]);
-console.log("After: ", logosUltraSort(data));
+console.log("After: ", logosSort(data));
 // Run: npx ts-node solution.ts`,
 
-    javascript: `// Logos Ultra Sort — λόγος: the reason that orders the cosmos
+    javascript: `// Logos Sort — λόγος: the reason that orders the cosmos
 const PHI  = 0.6180339887498949; // the most irrational of numbers
 const PHI2 = 0.3819660112501051; // its lesser twin
 
-function logosUltraSort(arr) {
+function logosSort(arr) {
   const n = arr.length;
   if (n < 2) return arr.slice(); // one copy — the caller's order untouched
   const a = arr.slice();
@@ -7429,7 +7429,7 @@ function logosUltraSort(arr) {
 // ── demo ──
 const data = [64, 34, 25, 12, 22, 11, 90, 42, 5, 77];
 console.log("Before:", [...data]);
-console.log("After: ", logosUltraSort(data));
+console.log("After: ", logosSort(data));
 // Run: node solution.js`,
 
     python: `import random
@@ -7552,14 +7552,14 @@ print("After: ", logos_ultra_sort(data))
 
     java: `import java.util.*;
 
-// Logos Ultra Sort — λόγος: the reason that orders the cosmos
+// Logos Sort — λόγος: the reason that orders the cosmos
 public class Solution {
     private static final double PHI  = 0.6180339887498949; // the most irrational of numbers
     private static final double PHI2 = 0.3819660112501051; // its lesser twin
     private static final int    BASE = 48;
     private static final Random RNG  = new Random();
 
-    public static int[] logosUltraSort(int[] input) {
+    public static int[] logosSort(int[] input) {
         int[] a = Arrays.copyOf(input, input.length);
         if (a.length < 2) return a;
         int depth = 2 * (int)(Math.log(a.length) / Math.log(2)) + 4; // patience, not infinite
@@ -7626,7 +7626,7 @@ public class Solution {
     public static void main(String[] args) {
         int[] data={64,34,25,12,22,11,90,42,5,77};
         System.out.println("Before: "+Arrays.toString(data));
-        System.out.println("After:  "+Arrays.toString(logosUltraSort(data)));
+        System.out.println("After:  "+Arrays.toString(logosSort(data)));
     }
 }
 // n log n time · log n space · unstable
@@ -7637,7 +7637,7 @@ public class Solution {
 #include <math.h>
 #include <time.h>
 
-/* Logos Ultra Sort — λόγος: the reason that orders the cosmos */
+/* Logos Sort — λόγος: the reason that orders the cosmos */
 #define PHI  0.6180339887498949 /* the most irrational of numbers */
 #define PHI2 0.3819660112501051 /* its lesser twin */
 #define BASE 48
@@ -7724,7 +7724,7 @@ int main(void){
 #include <cmath>
 #include <random>
 
-// Logos Ultra Sort — λόγος: the reason that orders the cosmos
+// Logos Sort — λόγος: the reason that orders the cosmos
 constexpr double PHI  = 0.6180339887498949; // the most irrational of numbers
 constexpr double PHI2 = 0.3819660112501051; // its lesser twin
 constexpr int    BASE = 48;
@@ -7788,7 +7788,7 @@ void sort_rec(std::vector<int>&a,int lo,int hi,int depth){
 }
 }
 
-std::vector<int> logosUltraSort(std::vector<int> arr){
+std::vector<int> logosSort(std::vector<int> arr){
     if((int)arr.size()<2)return arr;
     int depth=(int)(2*std::log2(arr.size()))+4;
     sort_rec(arr,0,(int)arr.size()-1,depth);
@@ -7798,14 +7798,14 @@ std::vector<int> logosUltraSort(std::vector<int> arr){
 int main(){
     std::vector<int>data={64,34,25,12,22,11,90,42,5,77};
     std::cout<<"Before:"; for(int x:data)std::cout<<" "<<x;
-    auto s=logosUltraSort(data);
+    auto s=logosSort(data);
     std::cout<<"\nAfter: "; for(int x:s)std::cout<<" "<<x;
     std::cout<<"\n"; return 0;
 }
 // n log n time · log n space · unstable
 // Run: g++ -std=c++20 -O2 -o solution solution.cpp && ./solution`,
 
-    rust: `// Logos Ultra Sort — λόγος: the reason that orders the cosmos
+    rust: `// Logos Sort — λόγος: the reason that orders the cosmos
 const PHI:  f64 = 0.618_033_988_749_894_9; // the most irrational of numbers
 const PHI2: f64 = 0.381_966_011_250_105_1; // its lesser twin
 const BASE: usize = 48;
@@ -7911,7 +7911,7 @@ import (
 	"sort"
 )
 
-// Logos Ultra Sort — λόγος: the reason that orders the cosmos
+// Logos Sort — λόγος: the reason that orders the cosmos
 const (
 	phi  = 0.6180339887498949 // the most irrational of numbers
 	phi2 = 0.3819660112501051 // its lesser twin
@@ -7994,7 +7994,7 @@ func logosRec(a []int, lo, hi, depth int) {
 	}
 }
 
-func logosUltraSort(arr []int) {
+func logosSort(arr []int) {
 	n := len(arr)
 	if n < 2 { return }
 	logosRec(arr, 0, n-1, int(2*math.Log2(float64(n)))+4)
@@ -8003,7 +8003,7 @@ func logosUltraSort(arr []int) {
 func main() {
 	arr := []int{64, 34, 25, 12, 22, 11, 90, 42, 5, 77}
 	fmt.Println("Before:", arr)
-	logosUltraSort(arr)
+	logosSort(arr)
 	fmt.Println("After: ", arr)
 }
 

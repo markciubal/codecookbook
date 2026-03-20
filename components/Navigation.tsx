@@ -11,44 +11,38 @@ import {
   Menu,
   X,
 } from "lucide-react";
+import { BENCHMARK, SORTING_ALGORITHMS, DATA_STRUCTURES } from "@/lib/catalog";
+import AlgoBadge from "@/components/AlgoBadge";
 
 const NAV_ITEMS = [
   {
     group: "Sorting Algorithms",
     icon: <BarChart2 size={14} />,
     items: [
-      { name: "Bubble Sort",    path: "/sorting/bubble",    badge: "O(n²)",       stable: true,  online: false },
-      { name: "Selection Sort", path: "/sorting/selection", badge: "O(n²)",       stable: false, online: false },
-      { name: "Insertion Sort", path: "/sorting/insertion", badge: "O(n²)",       stable: true,  online: true  },
-      { name: "Merge Sort",     path: "/sorting/merge",     badge: "O(n log n)",  stable: true,  online: false },
-      { name: "Quick Sort",     path: "/sorting/quick",     badge: "O(n log n)",  stable: false, online: false },
-      { name: "Heap Sort",      path: "/sorting/heap",      badge: "O(n log n)",  stable: false, online: false },
-      { name: "Shell Sort",     path: "/sorting/shell",     badge: "O(n log² n)", stable: false, online: false },
-      { name: "Counting Sort",  path: "/sorting/counting",  badge: "O(n+k)",      stable: true,  online: false },
-      { name: "Radix Sort",     path: "/sorting/radix",     badge: "O(nk)",       stable: true,  online: false },
-      { name: "Bucket Sort",    path: "/sorting/bucket",    badge: "O(n+k)",      stable: true,  online: false },
-      { name: "Tim Sort",       path: "/sorting/timsort",   badge: "O(n log n)",  stable: true,  online: false },
-      { name: "Logos Sort",     path: "/sorting/logos",     badge: "O(n log n)",  stable: false, online: false },
-      { name: "Benchmark",      path: "/sorting/benchmark", badge: "race" },
+      { name: BENCHMARK.name, path: BENCHMARK.path, badge: "race" },
+      ...SORTING_ALGORITHMS.map((a) => ({
+        name: a.name,
+        path: a.path,
+        badge: a.time,
+        time: a.time,
+        space: a.space,
+        stable: a.stable,
+        online: a.online,
+      })),
     ],
   },
   {
     group: "Data Structures",
     icon: <Layers size={14} />,
-    items: [
-      { name: "Stack",       path: "/ds/stack",       badge: "LIFO" },
-      { name: "Queue",       path: "/ds/queue",       badge: "FIFO" },
-      { name: "Deque",       path: "/ds/deque",       badge: "O(1)" },
-      { name: "Linked List", path: "/ds/linked-list", badge: "O(n)" },
-      { name: "Binary Heap", path: "/ds/binary-heap", badge: "O(log n)" },
-      { name: "Hash Table",  path: "/ds/hash-table",  badge: "O(1) avg" },
-      { name: "BST",         path: "/ds/bst",         badge: "O(log n)" },
-      { name: "Graph",       path: "/ds/graph",       badge: "O(V+E)" },
-    ],
+    items: DATA_STRUCTURES.map((d) => ({
+      name: d.name,
+      path: d.path,
+      badge: d.time,
+    })),
   },
-] as const;
+];
 
-type SortItem = typeof NAV_ITEMS[0]["items"][number] & { stable?: boolean; online?: boolean };
+type NavItem = { name: string; path: string; badge: string; time?: string; space?: string; stable?: boolean; online?: boolean };
 
 function NavItems({
   pathname,
@@ -72,10 +66,9 @@ function NavItems({
           </div>
 
           {/* Items */}
-          {group.items.map((item) => {
+          {group.items.map((item: NavItem) => {
             const active = pathname === item.path;
-            const si = item as SortItem;
-            const hasMeta = "stable" in si;
+            const hasMeta = "stable" in item;
             return (
               <Link
                 key={item.path}
@@ -89,40 +82,26 @@ function NavItems({
                   fontWeight: active ? 600 : 400,
                 }}
               >
-                {/* Row 1: name + complexity badge */}
+                {/* Row 1: name + badge (non-sorting items only) */}
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-sm truncate">{item.name}</span>
-                  <span
-                    className="text-[10px] font-mono px-1.5 py-0.5 rounded shrink-0"
-                    style={{
-                      background: "var(--color-surface-3)",
-                      color: "var(--color-muted)",
-                    }}
-                  >
-                    {item.badge}
-                  </span>
+                  {!hasMeta && (
+                    <span
+                      className="text-[10px] font-mono px-1.5 py-0.5 rounded shrink-0"
+                      style={{ background: "var(--color-surface-3)", color: "var(--color-muted)" }}
+                    >
+                      {item.badge}
+                    </span>
+                  )}
                 </div>
 
-                {/* Row 2: stable / online badges (sorting only) */}
+                {/* Row 2: time · space · stable · online (sorting only) */}
                 {hasMeta && (
-                  <div className="flex gap-1 mt-1">
-                    <span
-                      className="text-[9px] px-1.5 py-px rounded leading-tight"
-                      style={{
-                        background: si.stable ? "rgba(78,124,82,0.15)" : "rgba(176,48,32,0.10)",
-                        color: si.stable ? "#4e7c52" : "#b03020",
-                      }}
-                    >
-                      {si.stable ? "stable" : "unstable"}
-                    </span>
-                    {si.online && (
-                      <span
-                        className="text-[9px] px-1.5 py-px rounded leading-tight"
-                        style={{ background: "rgba(42,128,128,0.15)", color: "#2a8080" }}
-                      >
-                        online
-                      </span>
-                    )}
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    <AlgoBadge kind="time"   value={item.time!} />
+                    <AlgoBadge kind="space"  value={item.space!} />
+                    <AlgoBadge kind="stable" value={item.stable!} />
+                    <AlgoBadge kind="online" value={item.online!} />
                   </div>
                 )}
               </Link>
