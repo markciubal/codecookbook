@@ -7198,41 +7198,38 @@ func main() {
   logos: {
 
     typescript: `// ═══════════════════════════════════════════════════════════════════
-// LOGOS ULTRA SORT — "In the beginning was the Logos." — John 1:1
-// λόγος: reason that orders the cosmos. This algorithm reads what is
-// already there and chooses the simplest adequate tool each time.
+// LOGOS ULTRA SORT — λόγος: the reason that orders the cosmos.
 //
-//   (1) Counting shortcut  — narrow range? tally and reconstruct, no compares.
-//   (2) Gallop pre-scan    — already ordered or reversed? exit in one pass.
-//   (3) Dual φ-pivots      — golden-ratio cuts resist any adversarial input.
-//   (4) Ninther quality    — median of three neighbors, not a blind stab.
-//   (5) Chaos factor       — randomize each level so no fixed input wins.
-//   (6) Dutch-flag split   — one sweep classifies all elements into three bands.
-//   (7) Smallest-first     — recurse the two small pieces; loop the large one.
-//   (8) Depth guard        — too deep? hand off to native sort and walk away.
-//   (9) Insertion base     — ≤ 48 elements: patience beats machinery.
+// Nine gifts, given only when the moment calls:
+//   (1) tally before you touch    — count, do not compare, when the range permits
+//   (2) read before you act       — already in order? already reversed? then rest
+//   (3) cut at the golden section — the ratio no adversary can predict
+//   (4) hear three voices         — one witness lies; the middle of three is truth
+//   (5) roll the die each level   — randomness closes every door that pattern opens
+//   (6) divide into three bands   — less · between · greater, each named in one pass
+//   (7) spend the least first     — recurse the small; the large carries itself
+//   (8) know when to yield        — depth gone? grace has limits; pass the torch
+//   (9) walk the small ones home  — under 48, patience outruns cleverness
 // ═══════════════════════════════════════════════════════════════════
 
-// φ⁻¹ and φ⁻² are the most irrational numbers that exist — no simple
-// fraction approximates them, so pivot positions derived from them resist
-// any periodic pattern an adversary might hide in the data.
-const PHI  = 0.6180339887498949; // φ⁻¹  = (√5 − 1) / 2  ≈ 0.618
-const PHI2 = 0.3819660112501051; // φ⁻²  = (3 − √5) / 2  ≈ 0.382
+// φ⁻¹ and φ⁻² — the most irrational of numbers. No simple fraction
+// can name them, so pivot positions born of them elude every adversary
+// who would arrange the data against us.
+const PHI  = 0.6180339887498949; // the most irrational of numbers
+const PHI2 = 0.3819660112501051; // its lesser twin
 
 function logosUltraSort(arr: number[]): number[] {
 
-  // A single element needs no judgment. We work in a copy so the caller's
-  // data is untouched — sort what is ours to sort, leave the rest alone.
+  // One element needs no ordering. We begin with a copy — one copy — the caller's order untouched.
   const n = arr.length;
-  if (n < 2) return arr.slice();
+  if (n < 2) return arr.slice(); // one copy — the caller's order untouched
   const a = arr.slice();
 
-  // Know when to stop. Two doublings of log₂(n) is generous credit; if we
-  // burn through it we have been unlucky or attacked — time to hand off.
-  const depthLimit = 2 * Math.floor(Math.log2(n)) + 4;
+  // patience, not infinite — two doublings of log₂(n) is generous credit.
+  const depthLimit = 2 * Math.floor(Math.log2(n)) + 4; // patience, not infinite
 
-  // Virtue is the mean. The best pivot is neither extreme — sort three
-  // values with three swaps and keep the middle one. Optimal by proof.
+  // Three candidates enter. They are sorted in three swaps.
+  // The middle one alone carries the truth of the trio.
   function median3(x: number, y: number, z: number): number {
     if (x > y) { const t = x; x = y; y = t; }
     if (y > z) { const t = y; y = z; z = t; }
@@ -7240,15 +7237,15 @@ function logosUltraSort(arr: number[]): number[] {
     return y;
   }
 
-  // Don't trust a single witness. Consult the candidate and its neighbors;
-  // the outlier is overruled — the middle of three is closer to the truth.
+  // A single voice can be swayed. Consult the neighbors —
+  // the outlier is overruled; the center of three is closer to the truth.
   function ninther(lo: number, hi: number, idx: number): number {
     return median3(a[Math.max(lo, idx-1)], a[idx], a[Math.min(hi, idx+1)]);
   }
 
-  // Judgment in one sweep. Three pointers collapse the unknown zone from
-  // both ends: lt marks "confirmed less," gt marks "confirmed greater,"
-  // i is the frontier. When i passes gt, every element has its verdict.
+  // Two thresholds cleave the world into three.
+  // Three pointers meet in the middle — when the frontier passes the far wall,
+  // every element has been named and placed. The middle band rests forever.
   function dualPartition(lo: number, hi: number, p1: number, p2: number): [number, number] {
     if (p1 > p2) { const t = p1; p1 = p2; p2 = t; }
     let lt = lo, gt = hi, i = lo;
@@ -7260,23 +7257,22 @@ function logosUltraSort(arr: number[]): number[] {
     return [lt, gt];
   }
 
-  // Wu wei — the loop IS the tail call on the largest region. We spend
-  // no stack frame on what the natural continuation already does for free.
+  // The great descent — a loop where the tail recurses on the largest piece for free.
+  // No stack frame spent on what the natural continuation already carries.
   function sort(lo: number, hi: number, depth: number): void {
     while (lo < hi) {
       const size = hi - lo + 1;
 
-      // (8) "I know that I know nothing." — Socrates. Depth exhausted means
-      // the pivot strategy has failed; a wiser tool takes it from here.
+      // Wisdom knows its limits. The pivots have failed here —
+      // a steadier hand takes the rest without shame.
       if (depth <= 0) {
         const sub = a.slice(lo, hi+1).sort((x, y) => x - y);
         for (let k = lo; k <= hi; k++) a[k] = sub[k - lo];
         return;
       }
 
-      // (9) "A journey of a thousand miles begins with a single step." — Lao Tzu.
-      // Below 48 elements, patience beats machinery: walk each element left
-      // until it finds its place, then move on. Simple, cache-warm, exact.
+      // A hundred miles begins with a single step.
+      // Under 48 elements patience walks each one leftward to its home.
       if (size <= 48) {
         for (let i = lo+1; i <= hi; i++) {
           const key = a[i]; let j = i-1;
@@ -7286,9 +7282,9 @@ function logosUltraSort(arr: number[]): number[] {
         return;
       }
 
-      // (1) Ask first whether comparison is even necessary. When the value
-      // range is narrow, tally occurrences and reconstruct — no pivots,
-      // no recursion, no comparisons at all. This is the fastest path.
+      // Before the first comparison — ask if comparison is even needed.
+      // When the range is narrow, tally occurrences and rebuild.
+      // No pivots. No recursion. No comparisons at all.
       let mn = a[lo], mx = a[lo];
       for (let k = lo+1; k <= hi; k++) { if (a[k]<mn) mn=a[k]; if (a[k]>mx) mx=a[k]; }
       const span = mx - mn;
@@ -7300,9 +7296,9 @@ function logosUltraSort(arr: number[]): number[] {
         return;
       }
 
-      // (2) Look before you leap — Stoic prudence. If the first three ascend,
-      // check the whole: already sorted means instant return; fully reversed
-      // means a single O(n) flip. Either way, zero depth budget consumed.
+      // Read what is already written. Three ascending — check the whole.
+      // Already ordered: a quiet return. Already reversed: one clean O(n) flip.
+      // Either way, not a breath of depth budget spent.
       if (a[lo] <= a[lo+1] && a[lo+1] <= a[lo+2]) {
         let sorted = true;
         for (let k = lo; k < hi; k++) { if (a[k] > a[k+1]) { sorted = false; break; } }
@@ -7315,36 +7311,32 @@ function logosUltraSort(arr: number[]): number[] {
         }
       }
 
-      // (5) "The dice of God are always loaded." — Emerson. We reverse this:
-      // our dice are genuinely random each level. A deterministic algorithm
-      // has deterministic weak spots; randomness closes every fixed exploit.
+      // Fixed patterns breed fixed weaknesses. We dissolve them:
+      // each level draws a fresh number and no adversary can predict the cut.
       let c = 0;
       while (c === 0) c = Math.random() * 2 - 1;
-      const chaos = Math.abs(c);
+      const chaos = Math.abs(c); // the die is cast
 
-      // (3/4) Cut at the golden section, scaled by chaos so the exact position
-      // shifts each call. Then smooth each candidate through its neighbors —
-      // one outlier cannot corrupt a pivot when three voices are consulted.
+      // The golden cut, scaled by chaos so the exact position shifts each call.
+      // Then smoothed through three neighbors — no single outlier corrupts the pivot.
       const range = hi - lo;
-      const idx1 = lo + Math.min(range, Math.floor(range * PHI2 * chaos));
+      const idx1 = lo + Math.min(range, Math.floor(range * PHI2 * chaos)); // the golden cut
       const idx2 = lo + Math.min(range, Math.floor(range * PHI  * chaos));
-      const p1 = ninther(lo, hi, idx1);
+      const p1 = ninther(lo, hi, idx1); // three voices, one truth
       const p2 = ninther(lo, hi, idx2);
 
-      // (6) The Logos divides chaos into three with one sweep: less than p1,
-      // between p1 and p2, greater than p2. The middle band is done forever.
-      // Like a sculptor, we reveal the form hidden inside the disorder.
+      // The great division — less, between, greater, named in one sweep.
+      // Like a sculptor removing what does not belong: the form was always there.
       const [lt, gt] = dualPartition(lo, hi, p1, p2);
 
-      // (7) "The last shall be first." — Matthew 20:16. Sort the two smallest
-      // regions with genuine calls; defer the largest to the loop — it costs
-      // nothing and keeps the call stack bounded to O(log n) depth.
+      // The small pieces earn genuine calls.
+      // The largest piece becomes the loop — it costs no stack and asks no return.
       const regions: [number, number, number][] = [
         [lt - lo,     lo,    lt - 1],
         [gt - lt + 1, lt,    gt    ],
         [hi - gt,     gt+1,  hi    ],
       ];
-      regions.sort((x, y) => x[0] - y[0]);
+      regions.sort((x, y) => x[0] - y[0]); // the small earn calls; the large becomes the loop
       if (regions[0][1] < regions[0][2]) sort(regions[0][1], regions[0][2], depth-1);
       if (regions[1][1] < regions[1][2]) sort(regions[1][1], regions[1][2], depth-1);
       lo = regions[2][1]; hi = regions[2][2]; depth--;
@@ -7354,7 +7346,7 @@ function logosUltraSort(arr: number[]): number[] {
   sort(0, n-1, depthLimit);
   return a;
 }
-// Time: O(n log n)  Space: O(log n)  Stable: NO  Pure: YES
+// n log n time · log n space · unstable · pure
 
 // ── demo ──
 const data = [64, 34, 25, 12, 22, 11, 90, 42, 5, 77];
@@ -7362,15 +7354,15 @@ console.log("Before:", [...data]);
 console.log("After: ", logosUltraSort(data));
 // Run: npx ts-node solution.ts`,
 
-    javascript: `// Logos Ultra Sort — dual-φ-pivot introsort hybrid
-const PHI  = 0.6180339887498949;
-const PHI2 = 0.3819660112501051;
+    javascript: `// Logos Ultra Sort — λόγος: the reason that orders the cosmos
+const PHI  = 0.6180339887498949; // the most irrational of numbers
+const PHI2 = 0.3819660112501051; // its lesser twin
 
 function logosUltraSort(arr) {
   const n = arr.length;
-  if (n < 2) return arr.slice();
+  if (n < 2) return arr.slice(); // one copy — the caller's order untouched
   const a = arr.slice();
-  const depthLimit = 2 * Math.floor(Math.log2(n)) + 4;
+  const depthLimit = 2 * Math.floor(Math.log2(n)) + 4; // patience, not infinite
 
   function median3(x, y, z) {
     if (x>y){const t=x;x=y;y=t;} if(y>z){const t=y;y=z;z=t;} if(x>y){const t=x;x=y;y=t;}
@@ -7393,15 +7385,15 @@ function logosUltraSort(arr) {
   function sort(lo, hi, depth) {
     while (lo < hi) {
       const size = hi - lo + 1;
-      if (depth<=0) {                                              // (8) guard
+      if (depth<=0) {                                              // wisdom yields
         const sub=a.slice(lo,hi+1).sort((x,y)=>x-y);
         for (let k=lo;k<=hi;k++) a[k]=sub[k-lo]; return;
       }
-      if (size<=48) {                                             // (9) base
+      if (size<=48) {                                             // patience walks the small ones home
         for (let i=lo+1;i<=hi;i++){const key=a[i];let j=i-1;while(j>=lo&&a[j]>key){a[j+1]=a[j];j--;}a[j+1]=key;}
         return;
       }
-      let mn=a[lo],mx=a[lo];                                     // (1) counting
+      let mn=a[lo],mx=a[lo];                                     // tally, do not compare
       for (let k=lo+1;k<=hi;k++){if(a[k]<mn)mn=a[k];if(a[k]>mx)mx=a[k];}
       const span=mx-mn;
       if (Number.isInteger(mn)&&span<size*4) {
@@ -7409,19 +7401,19 @@ function logosUltraSort(arr) {
         for (let k=lo;k<=hi;k++) counts[a[k]-mn]++;
         let k=lo; for(let v=0;v<=span;v++){while(counts[v]-->0)a[k++]=v+mn;} return;
       }
-      if (a[lo]<=a[lo+1]&&a[lo+1]<=a[lo+2]) {                   // (2) gallop
+      if (a[lo]<=a[lo+1]&&a[lo+1]<=a[lo+2]) {                   // read what is already written
         let ok=true; for(let k=lo;k<hi;k++){if(a[k]>a[k+1]){ok=false;break;}}
         if (ok) return;
         let rev=true; for(let k=lo;k<hi;k++){if(a[k]<a[k+1]){rev=false;break;}}
         if (rev){for(let l=lo,r=hi;l<r;l++,r--){[a[l],a[r]]=[a[r],a[l]];}return;}
       }
-      let c=0; while(c===0) c=Math.random()*2-1;                // (5) chaos
+      let c=0; while(c===0) c=Math.random()*2-1;                // the die is cast
       const chaos=Math.abs(c), range=hi-lo;
-      const idx1=lo+Math.min(range,Math.floor(range*PHI2*chaos)); // (3) pivots
+      const idx1=lo+Math.min(range,Math.floor(range*PHI2*chaos)); // the golden cut
       const idx2=lo+Math.min(range,Math.floor(range*PHI *chaos));
-      const p1=ninther(lo,hi,idx1), p2=ninther(lo,hi,idx2);     // (4) ninther
-      const [lt,gt]=dualPartition(lo,hi,p1,p2);                 // (6) partition
-      const regions=[                                             // (7) smallest-first
+      const p1=ninther(lo,hi,idx1), p2=ninther(lo,hi,idx2);     // three voices, one truth
+      const [lt,gt]=dualPartition(lo,hi,p1,p2);                 // the great division
+      const regions=[                                             // the small earn calls; the large becomes the loop
         [lt-lo,lo,lt-1],[gt-lt+1,lt,gt],[hi-gt,gt+1,hi]
       ].sort((x,y)=>x[0]-y[0]);
       if(regions[0][1]<regions[0][2]) sort(regions[0][1],regions[0][2],depth-1);
@@ -7432,7 +7424,7 @@ function logosUltraSort(arr) {
   sort(0, n-1, depthLimit);
   return a;
 }
-// Time: O(n log n)  Space: O(log n)  Stable: NO
+// n log n time · log n space · unstable
 
 // ── demo ──
 const data = [64, 34, 25, 12, 22, 11, 90, 42, 5, 77];
@@ -7443,10 +7435,10 @@ console.log("After: ", logosUltraSort(data));
     python: `import random
 import math
 
-# Fixed-point φ constants (integer arithmetic for exact pivot positioning)
+# φ constants — the most irrational of numbers, fixed-point for exact positioning
 PHI_SHIFT = 61
-PHI_NUM   = round(0.6180339887498949 * (1 << PHI_SHIFT))  # φ⁻¹ × 2^61
-PHI2_NUM  = round(0.3819660112501051 * (1 << PHI_SHIFT))  # φ⁻² × 2^61
+PHI_NUM   = round(0.6180339887498949 * (1 << PHI_SHIFT))  # the most irrational of numbers
+PHI2_NUM  = round(0.3819660112501051 * (1 << PHI_SHIFT))  # its lesser twin
 
 
 def logos_ultra_sort(arr):
@@ -7454,9 +7446,9 @@ def logos_ultra_sort(arr):
 
     n = len(arr)
     if n < 2:
-        return arr[:]
+        return arr[:]  # one copy — the caller's order untouched
 
-    depth_limit = 2 * int(_math.log2(n)) + 4
+    depth_limit = 2 * int(_math.log2(n)) + 4  # patience, not infinite
 
     def _ninther(a, lo, hi, idx):
         i0, i2 = max(lo, idx - 1), min(hi, idx + 1)
@@ -7464,7 +7456,7 @@ def logos_ultra_sort(arr):
         if x > y: x, y = y, x
         if y > z: y, z = z, y
         if x > y: x, y = y, x
-        return y  # median
+        return y  # three voices, one truth
 
     def _dual_partition(a, lo, hi, p1, p2):
         if p1 > p2:
@@ -7486,15 +7478,15 @@ def logos_ultra_sort(arr):
         while lo < hi:
             size = hi - lo + 1
 
-            if depth <= 0:                          # (8) introsort guard
+            if depth <= 0:                          # wisdom yields
                 a[lo:hi + 1] = sorted(a[lo:hi + 1])
                 return
 
-            if size <= 48:                          # (9) base case
+            if size <= 48:                          # patience walks the small ones home
                 a[lo:hi + 1] = sorted(a[lo:hi + 1])
                 break
 
-            if isinstance(a[lo], int):              # (1) counting sort shortcut
+            if isinstance(a[lo], int):              # tally, do not compare
                 mn = min(a[lo:hi + 1])
                 mx = max(a[lo:hi + 1])
                 span = mx - mn
@@ -7509,7 +7501,7 @@ def logos_ultra_sort(arr):
                             k += cnt
                     break
 
-            if a[lo] <= a[lo+1] <= a[lo+2]:        # (2) gallop pre-scan
+            if a[lo] <= a[lo+1] <= a[lo+2]:        # read what is already written
                 if all(a[i] <= a[i+1] for i in range(lo, hi)):
                     break
                 if all(a[i] >= a[i+1] for i in range(lo, hi)):
@@ -7519,25 +7511,25 @@ def logos_ultra_sort(arr):
             c = 0.0
             while c == 0.0:
                 c = random.uniform(-1.0, 1.0)
-            chaos_int = int(abs(c) * (1 << 53))    # (5) per-level chaos
+            chaos_int = int(abs(c) * (1 << 53))    # the die is cast
 
-            pn1 = PHI2_NUM * chaos_int              # (3) dual φ-pivot indices
+            pn1 = PHI2_NUM * chaos_int              # the golden cut
             pn2 = PHI_NUM  * chaos_int
             ps  = PHI_SHIFT + 53
             span = hi - lo
             idx1 = lo + (span * pn1 >> ps)
             idx2 = lo + (span * pn2 >> ps)
 
-            p1 = _ninther(a, lo, hi, idx1)          # (4) ninther quality
+            p1 = _ninther(a, lo, hi, idx1)          # three voices, one truth
             p2 = _ninther(a, lo, hi, idx2)
 
-            lt, gt = _dual_partition(a, lo, hi, p1, p2)  # (6) 3-region partition
+            lt, gt = _dual_partition(a, lo, hi, p1, p2)  # the great division
 
             left_n  = lt - lo
             mid_n   = gt - lt + 1
             right_n = hi - gt
 
-            regions = sorted(                       # (7) smallest-first recursion
+            regions = sorted(                       # the small earn calls; the large becomes the loop
                 [(left_n, lo, lt-1), (mid_n, lt, gt), (right_n, gt+1, hi)],
                 key=lambda r: r[0]
             )
@@ -7550,7 +7542,7 @@ def logos_ultra_sort(arr):
     a = arr[:]
     _sort(a, 0, n - 1, depth_limit)
     return a
-# Time: O(n log n)  Space: O(log n)  Stable: NO
+# n log n time · log n space · unstable
 
 # ── demo ──
 data = [64, 34, 25, 12, 22, 11, 90, 42, 5, 77]
@@ -7560,17 +7552,17 @@ print("After: ", logos_ultra_sort(data))
 
     java: `import java.util.*;
 
-// Logos Ultra Sort — dual-φ-pivot introsort hybrid
+// Logos Ultra Sort — λόγος: the reason that orders the cosmos
 public class Solution {
-    private static final double PHI  = 0.6180339887498949;
-    private static final double PHI2 = 0.3819660112501051;
+    private static final double PHI  = 0.6180339887498949; // the most irrational of numbers
+    private static final double PHI2 = 0.3819660112501051; // its lesser twin
     private static final int    BASE = 48;
     private static final Random RNG  = new Random();
 
     public static int[] logosUltraSort(int[] input) {
         int[] a = Arrays.copyOf(input, input.length);
         if (a.length < 2) return a;
-        int depth = 2 * (int)(Math.log(a.length) / Math.log(2)) + 4;
+        int depth = 2 * (int)(Math.log(a.length) / Math.log(2)) + 4; // patience, not infinite
         sort(a, 0, a.length - 1, depth);
         return a;
     }
@@ -7599,32 +7591,32 @@ public class Solution {
     private static void sort(int[] a, int lo, int hi, int depth) {
         while (lo < hi) {
             int size = hi - lo + 1;
-            if (depth<=0){Arrays.sort(a,lo,hi+1);return;}          // (8) guard
-            if (size<=BASE){ins(a,lo,hi);return;}                    // (9) base
+            if (depth<=0){Arrays.sort(a,lo,hi+1);return;}          // wisdom yields
+            if (size<=BASE){ins(a,lo,hi);return;}                    // patience walks the small ones home
             int mn=a[lo],mx=a[lo];
             for(int k=lo+1;k<=hi;k++){if(a[k]<mn)mn=a[k];if(a[k]>mx)mx=a[k];}
             int span=mx-mn;
-            if((long)span<(long)size*4){                             // (1) counting
+            if((long)span<(long)size*4){                             // tally, do not compare
                 int[] c=new int[span+1];
                 for(int k=lo;k<=hi;k++)c[a[k]-mn]++;
                 int k=lo;for(int v=0;v<=span;v++)while(c[v]-->0)a[k++]=v+mn;
                 return;
             }
-            if(a[lo]<=a[lo+1]&&a[lo+1]<=a[lo+2]){                  // (2) gallop
+            if(a[lo]<=a[lo+1]&&a[lo+1]<=a[lo+2]){                  // read what is already written
                 boolean ok=true;for(int k=lo;k<hi;k++)if(a[k]>a[k+1]){ok=false;break;}
                 if(ok)return;
                 boolean rev=true;for(int k=lo;k<hi;k++)if(a[k]<a[k+1]){rev=false;break;}
                 if(rev){for(int l=lo,r=hi;l<r;l++,r--){int t=a[l];a[l]=a[r];a[r]=t;}return;}
             }
-            double ch=0;while(ch==0)ch=Math.abs(RNG.nextDouble()*2-1); // (5) chaos
+            double ch=0;while(ch==0)ch=Math.abs(RNG.nextDouble()*2-1); // the die is cast
             int range=hi-lo;
-            int idx1=lo+(int)Math.min(range,range*PHI2*ch);           // (3) pivots
+            int idx1=lo+(int)Math.min(range,range*PHI2*ch);           // the golden cut
             int idx2=lo+(int)Math.min(range,range*PHI *ch);
-            int p1=ninther(a,lo,hi,idx1),p2=ninther(a,lo,hi,idx2);   // (4) ninther
-            int[] b=dualPartition(a,lo,hi,p1,p2);                     // (6) partition
+            int p1=ninther(a,lo,hi,idx1),p2=ninther(a,lo,hi,idx2);   // three voices, one truth
+            int[] b=dualPartition(a,lo,hi,p1,p2);                     // the great division
             int lt=b[0],gt=b[1];
             int[][] regions={{lt-lo,lo,lt-1},{gt-lt+1,lt,gt},{hi-gt,gt+1,hi}};
-            Arrays.sort(regions,(x,y)->x[0]-y[0]);                    // (7) smallest-first
+            Arrays.sort(regions,(x,y)->x[0]-y[0]);                    // the small earn calls; the large becomes the loop
             if(regions[0][1]<regions[0][2])sort(a,regions[0][1],regions[0][2],depth-1);
             if(regions[1][1]<regions[1][2])sort(a,regions[1][1],regions[1][2],depth-1);
             lo=regions[2][1];hi=regions[2][2];depth--;
@@ -7637,7 +7629,7 @@ public class Solution {
         System.out.println("After:  "+Arrays.toString(logosUltraSort(data)));
     }
 }
-// Time: O(n log n)  Space: O(log n)  Stable: NO
+// n log n time · log n space · unstable
 // Run: javac Solution.java && java Solution`,
 
     c: `#include <stdio.h>
@@ -7645,9 +7637,9 @@ public class Solution {
 #include <math.h>
 #include <time.h>
 
-/* Logos Ultra Sort — dual-φ-pivot introsort hybrid */
-#define PHI  0.6180339887498949
-#define PHI2 0.3819660112501051
+/* Logos Ultra Sort — λόγος: the reason that orders the cosmos */
+#define PHI  0.6180339887498949 /* the most irrational of numbers */
+#define PHI2 0.3819660112501051 /* its lesser twin */
 #define BASE 48
 
 static int cmp_int(const void *x, const void *y){return *(int*)x-*(int*)y;}
@@ -7668,34 +7660,34 @@ static void ins(int *a,int lo,int hi){
 static void logos_rec(int *a,int lo,int hi,int depth){
     while(lo<hi){
         int size=hi-lo+1;
-        if(depth<=0){qsort(a+lo,size,sizeof(int),cmp_int);return;} /* (8) guard */
-        if(size<=BASE){ins(a,lo,hi);return;}                          /* (9) base  */
+        if(depth<=0){qsort(a+lo,size,sizeof(int),cmp_int);return;} /* wisdom yields */
+        if(size<=BASE){ins(a,lo,hi);return;}                          /* patience walks the small ones home */
         int mn=a[lo],mx=a[lo];
         for(int k=lo+1;k<=hi;k++){if(a[k]<mn)mn=a[k];if(a[k]>mx)mx=a[k];}
         int span=mx-mn;
-        if((long long)span<(long long)size*4){                        /* (1) count */
+        if((long long)span<(long long)size*4){                        /* tally, do not compare */
             int *c=(int*)calloc(span+1,sizeof(int));
             for(int k=lo;k<=hi;k++)c[a[k]-mn]++;
             int k=lo;for(int v=0;v<=span;v++)while(c[v]-->0)a[k++]=v+mn;
             free(c);return;
         }
-        if(a[lo]<=a[lo+1]&&a[lo+1]<=a[lo+2]){                       /* (2) gallop*/
+        if(a[lo]<=a[lo+1]&&a[lo+1]<=a[lo+2]){                       /* read what is already written */
             int ok=1;for(int k=lo;k<hi;k++)if(a[k]>a[k+1]){ok=0;break;}
             if(ok)return;
             int rev=1;for(int k=lo;k<hi;k++)if(a[k]<a[k+1]){rev=0;break;}
             if(rev){for(int l=lo,r=hi;l<r;l++,r--)sw(a,l,r);return;}
         }
-        double ch=(double)rand()/RAND_MAX; if(ch==0.0)ch=0.5;        /* (5) chaos */
+        double ch=(double)rand()/RAND_MAX; if(ch==0.0)ch=0.5;        /* the die is cast */
         int range=hi-lo;
-        int idx1=lo+(int)(range*PHI2*ch); if(idx1>hi)idx1=hi;        /* (3) pivots*/
+        int idx1=lo+(int)(range*PHI2*ch); if(idx1>hi)idx1=hi;        /* the golden cut */
         int idx2=lo+(int)(range*PHI *ch); if(idx2>hi)idx2=hi;
-        int p1=ninther(a,lo,hi,idx1),p2=ninther(a,lo,hi,idx2);       /* (4) ninther*/
+        int p1=ninther(a,lo,hi,idx1),p2=ninther(a,lo,hi,idx2);       /* three voices, one truth */
         if(p1>p2){int t=p1;p1=p2;p2=t;}
-        int lt=lo,gt=hi,i=lo;                                         /* (6) partition*/
+        int lt=lo,gt=hi,i=lo;                                         /* the great division */
         while(i<=gt){
             if(a[i]<p1)sw(a,lt++,i++); else if(a[i]>p2)sw(a,i,gt--); else i++;
         }
-        /* (7) smallest-first: sort 3 regions by size */
+        /* the small earn calls; the large becomes the loop */
         int sz[3]={lt-lo,gt-lt+1,hi-gt};
         int rlo[3]={lo,lt,gt+1},rhi[3]={lt-1,gt,hi};
         for(int x=0;x<2;x++)for(int y=0;y<2;y++)if(sz[y]>sz[y+1]){
@@ -7723,7 +7715,7 @@ int main(void){
     printf("\nAfter: "); for(int i=0;i<n;i++)printf(" %d",data[i]);
     printf("\n"); return 0;
 }
-/* Time: O(n log n)  Space: O(log n)  Stable: NO */
+/* n log n time · log n space · unstable */
 /* Run: gcc -O2 -lm -o solution solution.c && ./solution */`,
 
     cpp: `#include <iostream>
@@ -7732,9 +7724,9 @@ int main(void){
 #include <cmath>
 #include <random>
 
-// Logos Ultra Sort — dual-φ-pivot introsort hybrid
-constexpr double PHI  = 0.6180339887498949;
-constexpr double PHI2 = 0.3819660112501051;
+// Logos Ultra Sort — λόγος: the reason that orders the cosmos
+constexpr double PHI  = 0.6180339887498949; // the most irrational of numbers
+constexpr double PHI2 = 0.3819660112501051; // its lesser twin
 constexpr int    BASE = 48;
 
 namespace {
@@ -7765,30 +7757,30 @@ void ins(std::vector<int>&a,int lo,int hi){
 void sort_rec(std::vector<int>&a,int lo,int hi,int depth){
     while(lo<hi){
         int size=hi-lo+1;
-        if(depth<=0){std::sort(a.begin()+lo,a.begin()+hi+1);return;}     // (8)
-        if(size<=BASE){ins(a,lo,hi);return;}                               // (9)
+        if(depth<=0){std::sort(a.begin()+lo,a.begin()+hi+1);return;}     // wisdom yields
+        if(size<=BASE){ins(a,lo,hi);return;}                               // patience walks the small ones home
         auto [mn,mx]=std::minmax_element(a.begin()+lo,a.begin()+hi+1);
         int span=*mx-*mn;
-        if((long long)span<(long long)size*4){                             // (1)
+        if((long long)span<(long long)size*4){                             // tally, do not compare
             std::vector<int>c(span+1,0);
             int base=*mn;
             for(int k=lo;k<=hi;k++)c[a[k]-base]++;
             int k=lo;for(int v=0;v<=span;v++)while(c[v]-->0)a[k++]=v+base;
             return;
         }
-        if(a[lo]<=a[lo+1]&&a[lo+1]<=a[lo+2]){                            // (2)
+        if(a[lo]<=a[lo+1]&&a[lo+1]<=a[lo+2]){                            // read what is already written
             if(std::is_sorted(a.begin()+lo,a.begin()+hi+1))return;
             if(std::is_sorted(a.begin()+lo,a.begin()+hi+1,std::greater<int>())){
                 std::reverse(a.begin()+lo,a.begin()+hi+1);return;
             }
         }
-        double ch=chaos(); int range=hi-lo;                                // (5)
-        int idx1=lo+(int)std::min((double)range,range*PHI2*ch);            // (3)
+        double ch=chaos(); int range=hi-lo;                                // the die is cast
+        int idx1=lo+(int)std::min((double)range,range*PHI2*ch);            // the golden cut
         int idx2=lo+(int)std::min((double)range,range*PHI *ch);
-        int p1=ninther(a,lo,hi,idx1),p2=ninther(a,lo,hi,idx2);            // (4)
-        auto[lt,gt]=dualPart(a,lo,hi,p1,p2);                              // (6)
+        int p1=ninther(a,lo,hi,idx1),p2=ninther(a,lo,hi,idx2);            // three voices, one truth
+        auto[lt,gt]=dualPart(a,lo,hi,p1,p2);                              // the great division
         std::array<std::array<int,3>,3> regions{{{lt-lo,lo,lt-1},{gt-lt+1,lt,gt},{hi-gt,gt+1,hi}}};
-        std::sort(regions.begin(),regions.end(),[](auto&x,auto&y){return x[0]<y[0];}); // (7)
+        std::sort(regions.begin(),regions.end(),[](auto&x,auto&y){return x[0]<y[0];}); // the small earn calls; the large becomes the loop
         if(regions[0][1]<regions[0][2])sort_rec(a,regions[0][1],regions[0][2],depth-1);
         if(regions[1][1]<regions[1][2])sort_rec(a,regions[1][1],regions[1][2],depth-1);
         lo=regions[2][1];hi=regions[2][2];depth--;
@@ -7810,12 +7802,12 @@ int main(){
     std::cout<<"\nAfter: "; for(int x:s)std::cout<<" "<<x;
     std::cout<<"\n"; return 0;
 }
-// Time: O(n log n)  Space: O(log n)  Stable: NO
+// n log n time · log n space · unstable
 // Run: g++ -std=c++20 -O2 -o solution solution.cpp && ./solution`,
 
-    rust: `// Logos Ultra Sort — dual-φ-pivot introsort hybrid
-const PHI:  f64 = 0.618_033_988_749_894_9;
-const PHI2: f64 = 0.381_966_011_250_105_1;
+    rust: `// Logos Ultra Sort — λόγος: the reason that orders the cosmos
+const PHI:  f64 = 0.618_033_988_749_894_9; // the most irrational of numbers
+const PHI2: f64 = 0.381_966_011_250_105_1; // its lesser twin
 const BASE: usize = 48;
 
 fn median3(x: i32, y: i32, z: i32) -> i32 {
@@ -7845,7 +7837,7 @@ fn ins(a: &mut [i32], lo: usize, hi: usize) {
         a[j] = key;
     }
 }
-// Simple deterministic chaos using a global counter + time seed
+// each call draws a fresh number — no adversary can predict the cut
 fn chaos_val() -> f64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static CTR: AtomicU64 = AtomicU64::new(0x9e3779b97f4a7c15);
@@ -7860,29 +7852,29 @@ fn logos_rec(a: &mut [i32], lo: usize, hi: usize, depth: i32) {
     let (mut lo, mut hi, mut depth) = (lo, hi, depth);
     while lo < hi {
         let size = hi - lo + 1;
-        if depth <= 0 { a[lo..=hi].sort_unstable(); return; }         // (8)
-        if size <= BASE { ins(a, lo, hi); return; }                    // (9)
+        if depth <= 0 { a[lo..=hi].sort_unstable(); return; }         // wisdom yields
+        if size <= BASE { ins(a, lo, hi); return; }                    // patience walks the small ones home
         let mn = *a[lo..=hi].iter().min().unwrap();
         let mx = *a[lo..=hi].iter().max().unwrap();
         let span = (mx - mn) as usize;
-        if span < size * 4 {                                           // (1) counting
+        if span < size * 4 {                                           // tally, do not compare
             let mut c = vec![0usize; span + 1];
             for k in lo..=hi { c[(a[k]-mn) as usize] += 1; }
             let mut k = lo;
             for v in 0..=span { while c[v]>0 { a[k]=(v as i32)+mn; k+=1; c[v]-=1; } }
             return;
         }
-        if a[lo]<=a[lo+1] && a[lo+1]<=a[lo+2] {                      // (2) gallop
+        if a[lo]<=a[lo+1] && a[lo+1]<=a[lo+2] {                      // read what is already written
             if a[lo..=hi].windows(2).all(|w|w[0]<=w[1]) { return; }
             if a[lo..=hi].windows(2).all(|w|w[0]>=w[1]) { a[lo..=hi].reverse(); return; }
         }
-        let ch = chaos_val(); let range = hi - lo;                     // (5) chaos
-        let idx1 = lo + ((range as f64*PHI2*ch) as usize).min(range); // (3) pivots
+        let ch = chaos_val(); let range = hi - lo;                     // the die is cast
+        let idx1 = lo + ((range as f64*PHI2*ch) as usize).min(range); // the golden cut
         let idx2 = lo + ((range as f64*PHI *ch) as usize).min(range);
-        let p1 = ninther(a, lo, hi, idx1);                             // (4) ninther
+        let p1 = ninther(a, lo, hi, idx1);                             // three voices, one truth
         let p2 = ninther(a, lo, hi, idx2);
-        let (lt, gt) = dual_partition(a, lo, hi, p1, p2);             // (6) partition
-        let mut regions = [                                             // (7) smallest-first
+        let (lt, gt) = dual_partition(a, lo, hi, p1, p2);             // the great division
+        let mut regions = [                                             // the small earn calls; the large becomes the loop
             (lt.saturating_sub(lo), lo,   lt.saturating_sub(1)),
             (gt - lt + 1,           lt,   gt),
             (if hi>gt{hi-gt}else{0},gt+1, hi),
@@ -7907,7 +7899,7 @@ fn main() {
     logos_ultra_sort(&mut data);
     println!("After:  {:?}", data);
 }
-// Time: O(n log n)  Space: O(log n)  Stable: NO
+// n log n time · log n space · unstable
 // Run: rustc solution.rs && ./solution`,
 
     go: `package main
@@ -7919,10 +7911,10 @@ import (
 	"sort"
 )
 
-// Logos Ultra Sort — dual-φ-pivot introsort hybrid
+// Logos Ultra Sort — λόγος: the reason that orders the cosmos
 const (
-	phi  = 0.6180339887498949
-	phi2 = 0.3819660112501051
+	phi  = 0.6180339887498949 // the most irrational of numbers
+	phi2 = 0.3819660112501051 // its lesser twin
 	base = 48
 )
 
@@ -7960,21 +7952,21 @@ func insSort(a []int, lo, hi int) {
 func logosRec(a []int, lo, hi, depth int) {
 	for lo < hi {
 		size := hi - lo + 1
-		if depth <= 0 { sort.Ints(a[lo:hi+1]); return }     // (8)
-		if size <= base { insSort(a, lo, hi); return }        // (9)
+		if depth <= 0 { sort.Ints(a[lo:hi+1]); return }     // wisdom yields
+		if size <= base { insSort(a, lo, hi); return }        // patience walks the small ones home
 		mn, mx := a[lo], a[lo]
 		for k := lo+1; k <= hi; k++ {
 			if a[k]<mn { mn=a[k] } else if a[k]>mx { mx=a[k] }
 		}
 		span := mx - mn
-		if span < size*4 {                                    // (1) counting
+		if span < size*4 {                                    // tally, do not compare
 			counts := make([]int, span+1)
 			for k := lo; k <= hi; k++ { counts[a[k]-mn]++ }
 			k := lo
 			for v, c := range counts { for ; c>0; c-- { a[k]=v+mn; k++ } }
 			return
 		}
-		if a[lo]<=a[lo+1] && a[lo+1]<=a[lo+2] {             // (2) gallop
+		if a[lo]<=a[lo+1] && a[lo+1]<=a[lo+2] {             // read what is already written
 			sorted := true
 			for k := lo; k < hi; k++ { if a[k]>a[k+1] { sorted=false; break } }
 			if sorted { return }
@@ -7982,15 +7974,15 @@ func logosRec(a []int, lo, hi, depth int) {
 			for k := lo; k < hi; k++ { if a[k]<a[k+1] { rev=false; break } }
 			if rev { for l,r:=lo,hi;l<r;l,r=l+1,r-1{a[l],a[r]=a[r],a[l]}; return }
 		}
-		ch := rand.Float64(); if ch==0 { ch=0.5 }            // (5) chaos
+		ch := rand.Float64(); if ch==0 { ch=0.5 }            // the die is cast
 		rng := hi - lo
-		idx1 := lo + int(math.Min(float64(rng), float64(rng)*phi2*ch)) // (3)
+		idx1 := lo + int(math.Min(float64(rng), float64(rng)*phi2*ch)) // the golden cut
 		idx2 := lo + int(math.Min(float64(rng), float64(rng)*phi *ch))
-		p1 := ninther(a, lo, hi, idx1)                        // (4) ninther
+		p1 := ninther(a, lo, hi, idx1)                        // three voices, one truth
 		p2 := ninther(a, lo, hi, idx2)
-		lt, gt := dualPartition(a, lo, hi, p1, p2)            // (6) partition
+		lt, gt := dualPartition(a, lo, hi, p1, p2)            // the great division
 		type reg struct{ sz, lo, hi int }
-		regions := []reg{                                      // (7) smallest-first
+		regions := []reg{                                      // the small earn calls; the large becomes the loop
 			{lt - lo,     lo,   lt - 1},
 			{gt - lt + 1, lt,   gt},
 			{hi - gt,     gt+1, hi},
@@ -8015,7 +8007,7 @@ func main() {
 	fmt.Println("After: ", arr)
 }
 
-// Time: O(n log n)  Space: O(log n)  Stable: NO`,
+// n log n time · log n space · unstable`,
 
   },
 };

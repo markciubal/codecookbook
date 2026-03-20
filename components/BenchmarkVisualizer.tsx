@@ -1,13 +1,16 @@
 "use client";
 
 import React, { useState, useCallback, useRef } from "react";
-import { Play, Square, RotateCcw, Trophy, Zap, X } from "lucide-react";
+import { Play, Square, RotateCcw, Trophy, Zap, ChevronRight } from "lucide-react";
 import { generateBenchmarkInput, SORT_FNS, type BenchmarkScenario } from "@/lib/benchmark";
 
 // ── Static config ─────────────────────────────────────────────────────────────
 
 const SLOW_IDS = new Set(["insertion", "selection", "bubble"]);
 const SLOW_THRESHOLD = 5_000;
+// Only Logos Sort and Tim Sort are allowed above 5 M elements
+const UNLIMITED_IDS = new Set(["logos", "timsort"]);
+const LARGE_THRESHOLD = 5_000_000;
 const TIMEOUT_MS = 30_000;
 
 const ALGO_GROUPS = [
@@ -63,16 +66,23 @@ const ALGO_COLORS: Record<string, string> = {
   bubble:    "#ec407a",
 };
 
-// Standard sizes shown as chips
-const CHIP_SIZES = [
-  500, 1_000, 2_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000,
-  1_000_000, 2_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000,
+const SIZE_BUTTONS: { n: number; word: string }[] = [
+  { n: 1,           word: "One" },
+  { n: 10,          word: "Ten" },
+  { n: 100,         word: "One Hundred" },
+  { n: 1_000,       word: "One Thousand" },
+  { n: 10_000,      word: "Ten Thousand" },
+  { n: 100_000,     word: "One Hundred Thousand" },
+  { n: 1_000_000,   word: "One Million" },
+  { n: 10_000_000,  word: "Ten Million" },
+  { n: 100_000_000, word: "One Hundred Million" },
 ];
 
-const SIZE_PRESETS = [
-  { label: "Quick",      sizes: [1_000, 5_000, 10_000, 50_000] },
-  { label: "Full curve", sizes: [1_000, 2_000, 5_000, 10_000, 25_000, 50_000, 100_000] },
-  { label: "Large",      sizes: [100_000, 500_000, 1_000_000, 5_000_000, 10_000_000] },
+const SCENARIO_OPTIONS: { id: BenchmarkScenario; label: string; desc: string }[] = [
+  { id: "random",       label: "Random",         desc: "average case" },
+  { id: "nearlySorted", label: "Nearly sorted",  desc: "Timsort's home turf" },
+  { id: "reversed",     label: "Reversed",       desc: "worst case for naive quicksort" },
+  { id: "duplicates",   label: "Many duplicates", desc: "stress-tests three-way partition" },
 ];
 
 const RANK_COLORS = ["#c9961a", "#888", "#b06830"];
@@ -96,6 +106,34 @@ function fmtTime(ms: number): string {
   return `${(ms / 1_000).toFixed(2)} s`;
 }
 
+// ── Spinner ───────────────────────────────────────────────────────────────────
+
+function Spinner({ value, onChange, min, max, label }: {
+  value: number; onChange: (v: number) => void; min: number; max: number; label: string;
+}) {
+  const dec = () => onChange(Math.max(min, value - 1));
+  const inc = () => onChange(Math.min(max, value + 1));
+  const btnStyle = (disabled: boolean): React.CSSProperties => ({
+    width: 26, height: 28, display: "flex", alignItems: "center", justifyContent: "center",
+    background: "none", border: "none", cursor: disabled ? "not-allowed" : "pointer",
+    color: disabled ? "var(--color-border)" : "var(--color-muted)", fontSize: 15, lineHeight: 1,
+    flexShrink: 0, userSelect: "none",
+  });
+  return (
+    <div style={{
+      display: "inline-flex", alignItems: "center",
+      border: "1px solid var(--color-border)", borderRadius: 6,
+      background: "var(--color-surface-1)", overflow: "hidden",
+    }} aria-label={label}>
+      <button onClick={dec} disabled={value <= min} style={btnStyle(value <= min)}>−</button>
+      <span style={{ minWidth: 32, textAlign: "center", fontSize: 12, fontFamily: "monospace", color: "var(--color-text)", padding: "0 2px" }}>
+        {value}
+      </span>
+      <button onClick={inc} disabled={value >= max} style={btnStyle(value >= max)}>+</button>
+    </div>
+  );
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type Status = "idle" | "running" | "done";
@@ -116,10 +154,16 @@ function CurveChart({
   data,
   sizes,
   algos,
+  highlight,
+  activeN,
+  onNChange,
 }: {
   data: CurveData;
-  sizes: number[];  // all sizes in run (sorted)
-  algos: string[];  // algo ids to render
+  sizes: number[];
+  algos: string[];
+  highlight?: string | null;
+  activeN?: number | null;
+  onNChange?: (n: number | null) => void;
 }) {
   const VW = 560;
   const VH = 230;
@@ -127,25 +171,42 @@ function CurveChart({
   const iW = VW - pL - pR;
   const iH = VH - pT - pB;
 
-  // x: evenly-spaced ordinal positions keyed by size index
   const xAt = (n: number): number => {
     const idx = sizes.indexOf(n);
     if (idx < 0) return pL;
     return sizes.length === 1 ? pL + iW / 2 : pL + (idx / (sizes.length - 1)) * iW;
   };
 
-  // y: linear scale 0 → maxY
   const allTimes = algos.flatMap(id => (data[id] ?? []).map(p => p.timeMs));
   const maxY = Math.max(...allTimes, 0.001);
   const yAt = (v: number) => pT + iH - (v / maxY) * iH;
 
   const yTicks = [0.25, 0.5, 0.75, 1].map(f => ({ v: maxY * f, y: yAt(maxY * f) }));
 
+  const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (!onNChange || !sizes.length) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * VW;
+    let best = sizes[0], bestDist = Infinity;
+    sizes.forEach(n => { const d = Math.abs(xAt(n) - x); if (d < bestDist) { bestDist = d; best = n; } });
+    onNChange(best);
+  };
+
+  // Build sorted bubble data for activeN column
+  const bubbles = activeN != null
+    ? algos
+        .map(id => ({ id, pt: data[id]?.find(p => p.n === activeN) }))
+        .filter((x): x is { id: string; pt: CurvePoint } => !!x.pt && !x.pt.timedOut)
+        .sort((a, b) => a.pt.timeMs - b.pt.timeMs)
+    : [];
+
   return (
     <svg
       viewBox={`0 0 ${VW} ${VH}`}
-      style={{ width: "100%", height: VH, display: "block" }}
+      style={{ width: "100%", height: VH, display: "block", cursor: onNChange ? "crosshair" : "default" }}
       aria-label="Performance curve: time vs input size per algorithm"
+      onMouseMove={handleMouseMove}
+      onMouseLeave={() => onNChange?.(null)}
     >
       {/* horizontal grid + y labels */}
       {yTicks.map(({ v, y }) => (
@@ -178,14 +239,26 @@ function CurveChart({
       <text x={pL + iW / 2} y={VH - 3} textAnchor="middle" fontSize={9}
         fill="var(--color-muted)" fontStyle="italic">input size (n)</text>
 
-      {/* one polyline + dots per algorithm */}
+      {/* hover crosshair */}
+      {activeN != null && (() => {
+        const x = xAt(activeN);
+        return (
+          <g style={{ pointerEvents: "none" }}>
+            <line x1={x} y1={pT} x2={x} y2={pT + iH}
+              stroke="var(--color-text)" strokeWidth={1} strokeDasharray="3 3" opacity={0.3} />
+          </g>
+        );
+      })()}
+
+      {/* curves + dots */}
       {algos.map(id => {
         const pts = [...(data[id] ?? [])].sort((a, b) => a.n - b.n);
         if (!pts.length) return null;
         const color = ALGO_COLORS[id] ?? "#888";
+        const isHl = !highlight || highlight === id;
+        const sw = isHl && highlight ? 2.5 : 1.75;
         return (
-          <g key={id}>
-            {/* segments — dashed when either endpoint timed out */}
+          <g key={id} opacity={isHl ? 1 : 0.12} style={{ transition: "opacity 0.2s ease" }}>
             {pts.slice(1).map((p, i) => {
               const prev = pts[i];
               const dashed = prev.timedOut || p.timedOut;
@@ -193,16 +266,15 @@ function CurveChart({
                 <line key={p.n}
                   x1={xAt(prev.n)} y1={yAt(prev.timeMs)}
                   x2={xAt(p.n)}   y2={yAt(p.timeMs)}
-                  stroke={color} strokeWidth={1.75}
+                  stroke={color} strokeWidth={sw}
                   strokeDasharray={dashed ? "5 3" : undefined}
                   strokeLinecap="round"
                 />
               );
             })}
-            {/* dots */}
             {pts.map(p => {
               const cx = xAt(p.n), cy = yAt(p.timeMs);
-              const label = `${ALGO_NAMES[id]}: ${p.timedOut ? "timeout (>" : ""}${fmtTime(p.timeMs)}${p.timedOut ? ")" : ""} at n=${p.n.toLocaleString()}`;
+              const isActive = activeN != null && p.n === activeN;
               if (p.timedOut) {
                 const r = 4;
                 return (
@@ -213,20 +285,56 @@ function CurveChart({
                       stroke={color} strokeWidth={1.5} strokeLinecap="round" />
                     <line x1={cx + r - 1} y1={cy - r + 1} x2={cx - r + 1} y2={cy + r - 1}
                       stroke={color} strokeWidth={1.5} strokeLinecap="round" />
-                    <title>{label}</title>
                   </g>
                 );
               }
               return (
-                <circle key={p.n} cx={cx} cy={cy} r={3.5}
-                  fill={color} stroke="var(--color-surface-2)" strokeWidth={1.5}>
-                  <title>{label}</title>
-                </circle>
+                <circle key={p.n} cx={cx} cy={cy}
+                  r={isActive ? 5 : 3.5}
+                  fill={color}
+                  stroke="var(--color-surface-2)"
+                  strokeWidth={isActive ? 2 : 1.5}
+                  style={{ transition: "r 0.1s ease" }}
+                />
               );
             })}
           </g>
         );
       })}
+
+      {/* data bubbles — rendered last so they float above curves */}
+      {bubbles.length > 0 && activeN != null && (() => {
+        const cx = xAt(activeN);
+        const flipRight = cx > VW * 0.6;
+        return (
+          <g style={{ pointerEvents: "none" }}>
+            {bubbles.map(({ id, pt }, i) => {
+              const cy = yAt(pt.timeMs);
+              const color = ALGO_COLORS[id] ?? "#888";
+              const label = `${ALGO_NAMES[id]}  ${fmtTime(pt.timeMs)}`;
+              const bw = label.length * 5.6 + 10;
+              const bh = 16;
+              const bx = flipRight ? cx - bw - 10 : cx + 10;
+              const by = cy - bh / 2;
+              // nudge bubbles that would overlap
+              const nudge = i * 0;
+              return (
+                <g key={id} transform={`translate(0,${nudge})`}>
+                  <rect x={bx} y={by} width={bw} height={bh} rx={4}
+                    fill={color} opacity={0.93} />
+                  <text x={bx + 5} y={by + 11} fontSize={9.5} fontWeight={700}
+                    fill="#fff" style={{ letterSpacing: "0.01em" }}>
+                    {label}
+                  </text>
+                  {/* connector dot */}
+                  <circle cx={cx} cy={cy} r={5} fill={color}
+                    stroke="var(--color-surface-2)" strokeWidth={2} />
+                </g>
+              );
+            })}
+          </g>
+        );
+      })()}
     </svg>
   );
 }
@@ -255,77 +363,119 @@ function Legend({ algos, data }: { algos: string[]; data: CurveData }) {
   );
 }
 
-// ── Sample proof ──────────────────────────────────────────────────────────────
+// ── Proof slider ──────────────────────────────────────────────────────────────
 
-function SampleProof({
-  proof,
-  revealed,
+function ProofSlider({
+  proofs, algos, activeAlgo, onSelect, revealed, curveData,
 }: {
-  proof: { before: number[]; after: number[]; n: number };
+  proofs: Record<string, { before: number[]; after: number[]; n: number }>;
+  algos: string[];
+  activeAlgo: string;
+  onSelect: (id: string) => void;
   revealed: boolean;
+  curveData: CurveData;
 }) {
-  const max = Math.max(...proof.before, ...proof.after, 1);
+  const available = algos.filter(id => proofs[id]);
+  if (!available.length) return null;
+
+  const proof = proofs[activeAlgo] ?? proofs[available[0]];
+  const currentId = proofs[activeAlgo] ? activeAlgo : available[0];
+  const idx = available.indexOf(currentId);
+  const color = ALGO_COLORS[currentId] ?? "#888";
+  const max = proof ? Math.max(...proof.before, ...proof.after, 1) : 1;
+  const points = curveData[currentId] ?? [];
+
+  const nav = (delta: number) => {
+    const next = available[Math.max(0, Math.min(available.length - 1, idx + delta))];
+    if (next) onSelect(next);
+  };
+
+  const btnStyle = (disabled: boolean): React.CSSProperties => ({
+    width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center",
+    background: "none", border: "1px solid var(--color-border)", borderRadius: 4,
+    cursor: disabled ? "not-allowed" : "pointer", fontSize: 12, lineHeight: 1,
+    color: disabled ? "var(--color-border)" : "var(--color-muted)", flexShrink: 0,
+  });
 
   const tokenStyle = (v: number, forceColor = false): React.CSSProperties => {
     const base: React.CSSProperties = {
-      display: "inline-block",
-      fontSize: 10,
-      fontFamily: "monospace",
-      padding: "2px 5px",
-      borderRadius: 4,
+      display: "inline-block", fontSize: 10, fontFamily: "monospace",
+      padding: "2px 5px", borderRadius: 4,
       transition: "background-color 0.5s ease, color 0.35s ease, border-color 0.5s ease",
     };
     if (!forceColor && !revealed) {
       return { ...base, background: "var(--color-surface-3)", color: "var(--color-muted)", border: "1px solid var(--color-border)" };
     }
-    const pct = v / max;
-    const hue = Math.round(220 - pct * 185); // blue(220) → orange(35)
-    return {
-      ...base,
-      background: `hsl(${hue}, 72%, 40%)`,
-      color: "#fff",
-      border: `1px solid hsl(${hue}, 72%, 57%)`,
-    };
+    const hue = Math.round(220 - (v / max) * 185);
+    return { ...base, background: `hsl(${hue},72%,40%)`, color: "#fff", border: `1px solid hsl(${hue},72%,57%)` };
   };
 
   return (
     <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--color-border)" }}>
-      <p className="text-xs font-semibold uppercase tracking-wider mb-2.5" style={{ color: "var(--color-muted)" }}>
-        Proof of computation · {proof.before.length} values sampled from n={fmtN(proof.n)}
-      </p>
-
-      {/* Unsorted row — colors reveal once sort completes */}
-      <div className="mb-2 flex items-start gap-2">
-        <span className="text-xs font-mono shrink-0 mt-0.5" style={{ color: "var(--color-muted)", width: 54 }}>
-          unsorted
+      {/* Header: nav + algo name + dot indicators */}
+      <div className="flex items-center gap-2 mb-2">
+        <button onClick={() => nav(-1)} disabled={idx <= 0} style={btnStyle(idx <= 0)}>‹</button>
+        <span style={{ fontSize: 12, fontWeight: 700, color }}>
+          {ALGO_NAMES[currentId] ?? currentId}
         </span>
-        <span className="inline-flex flex-wrap gap-1">
-          {proof.before.map((v, i) => (
-            <span key={i} style={{ ...tokenStyle(v), transitionDelay: `${i * 18}ms` }}>
-              {v.toLocaleString()}
-            </span>
+        <div className="flex gap-1 items-center">
+          {available.map(id => (
+            <button key={id} onClick={() => onSelect(id)}
+              title={ALGO_NAMES[id]}
+              style={{
+                width: 8, height: 8, borderRadius: "50%", padding: 0, border: "none",
+                background: ALGO_COLORS[id] ?? "#888",
+                opacity: id === currentId ? 1 : 0.3,
+                cursor: "pointer", transition: "opacity 0.15s",
+              }} />
           ))}
+        </div>
+        <button onClick={() => nav(1)} disabled={idx >= available.length - 1} style={btnStyle(idx >= available.length - 1)}>›</button>
+        <span className="ml-auto text-xs font-mono" style={{ color: "var(--color-muted)" }}>
+          proof from n={proof ? fmtN(proof.n) : "—"}
         </span>
       </div>
 
-      {/* Sorted row — appears after reveal */}
-      {revealed && (
-        <div className="flex items-start gap-2">
-          <span className="text-xs font-mono shrink-0 mt-0.5" style={{ color: "var(--color-muted)", width: 54 }}>
-            sorted
-          </span>
-          <span className="inline-flex flex-wrap gap-1">
-            {proof.after.map((v, i) => (
-              <span key={i} style={tokenStyle(v, true)}>
-                {v.toLocaleString()}
-              </span>
-            ))}
-          </span>
+      {/* Stats: all measured (n, timeMs) for this algo */}
+      {points.length > 0 && (
+        <div className="mb-2.5 flex flex-wrap gap-1.5">
+          {points.map(p => (
+            <span key={p.n} className="text-xs font-mono px-2 py-0.5 rounded"
+              style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color }}>
+              n={fmtN(p.n)} · {p.timedOut ? ">30 s" : fmtTime(p.timeMs)}
+            </span>
+          ))}
         </div>
+      )}
+
+      {/* Token rows */}
+      {proof && (
+        <>
+          <div className="mb-2 flex items-start gap-2">
+            <span className="text-xs font-mono shrink-0 mt-0.5" style={{ color: "var(--color-muted)", width: 54 }}>unsorted</span>
+            <span className="inline-flex flex-wrap gap-1">
+              {proof.before.map((v, i) => (
+                <span key={i} style={{ ...tokenStyle(v), transitionDelay: `${i * 18}ms` }}>{v.toLocaleString()}</span>
+              ))}
+            </span>
+          </div>
+          {revealed && (
+            <div className="flex items-start gap-2">
+              <span className="text-xs font-mono shrink-0 mt-0.5" style={{ color: "var(--color-muted)", width: 54 }}>sorted</span>
+              <span className="inline-flex flex-wrap gap-1">
+                {proof.after.map((v, i) => (
+                  <span key={i} style={tokenStyle(v, true)}>{v.toLocaleString()}</span>
+                ))}
+              </span>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
 }
+
+// ── Playback strip ─────────────────────────────────────────────────────────────
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
@@ -333,9 +483,11 @@ export default function BenchmarkVisualizer() {
   const [selectedSizes, setSelectedSizes] = useState<Set<number>>(
     new Set([100_000, 500_000, 1_000_000])
   );
-  const [sizeInput, setSizeInput] = useState("");
-  const [scenario, setScenario] = useState<BenchmarkScenario>("random");
-  const [trials, setTrials] = useState(1);
+  const [scenarios, setScenarios] = useState<Set<BenchmarkScenario>>(
+    new Set(["random", "nearlySorted", "reversed", "duplicates"] as BenchmarkScenario[])
+  );
+  const [rounds, setRounds] = useState(5);
+  const [warmup, setWarmup] = useState(2);
   const [selected, setSelected] = useState<Set<string>>(
     new Set(["logos", "timsort"])
   );
@@ -346,16 +498,19 @@ export default function BenchmarkVisualizer() {
   const [currentAlgo, setCurrentAlgo] = useState<string | null>(null);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [runConfig, setRunConfig] = useState<{
-    sizes: number[]; scenario: string; trials: number; algos: string[];
+    sizes: number[]; scenarios: BenchmarkScenario[]; rounds: number; warmup: number; algos: string[];
   } | null>(null);
-  const [sampleProof, setSampleProof] = useState<{
-    before: number[]; after: number[]; n: number;
-  } | null>(null);
+  const [sampleProofs, setSampleProofs] = useState<Record<string, { before: number[]; after: number[]; n: number }>>({});
+  const [activeProofAlgo, setActiveProofAlgo] = useState<string | null>(null);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [hoverN, setHoverN] = useState<number | null>(null);
   const stopRef = useRef(false);
 
   // Slow algos are disabled if the largest selected size exceeds the threshold
   const maxSelectedSize = selectedSizes.size > 0 ? Math.max(...selectedSizes) : 0;
-  const slowDisabled = (id: string) => SLOW_IDS.has(id) && maxSelectedSize > SLOW_THRESHOLD;
+  const slowDisabled = (id: string) =>
+    (SLOW_IDS.has(id) && maxSelectedSize > SLOW_THRESHOLD) ||
+    (!UNLIMITED_IDS.has(id) && maxSelectedSize > LARGE_THRESHOLD);
 
   const toggleAlgo = (id: string) => {
     if (slowDisabled(id)) return;
@@ -391,24 +546,16 @@ export default function BenchmarkVisualizer() {
     setSelectedSizes(prev => new Set([...prev, n]));
   };
 
-  const addCustomSize = () => {
-    const v = parseInt(sizeInput);
-    if (!isNaN(v) && v >= 1) {
-      addSize(v);
-      setSizeInput("");
-    }
-  };
-
-  const applyPreset = (sizes: number[]) => setSelectedSizes(new Set(sizes));
 
   const sortedSizes = [...selectedSizes].sort((a, b) => a - b);
   const activeAlgos = [...selected].filter(id => !slowDisabled(id));
-  const canRun = activeAlgos.length > 0 && selectedSizes.size > 0 && status !== "running";
+  const canRun = activeAlgos.length > 0 && selectedSizes.size > 0 && scenarios.size > 0 && status !== "running";
 
   const run = useCallback(async () => {
     const maxSz = selectedSizes.size > 0 ? Math.max(...selectedSizes) : 0;
     const algos = [...selected].filter(id => !(SLOW_IDS.has(id) && maxSz > SLOW_THRESHOLD));
-    if (!algos.length || !selectedSizes.size) return;
+    const scenarioList = [...scenarios] as BenchmarkScenario[];
+    if (!algos.length || !selectedSizes.size || !scenarioList.length) return;
 
     const sizes = [...selectedSizes].sort((a, b) => a - b);
     const total = sizes.length * algos.length;
@@ -416,20 +563,20 @@ export default function BenchmarkVisualizer() {
     stopRef.current = false;
     setStatus("running");
     setCurveData({});
-    setSampleProof(null);
+    setSampleProofs({});
+    setActiveProofAlgo(null);
+    setHoverN(null);
     setProgress({ done: 0, total });
-    setRunConfig({ sizes, scenario, trials, algos });
+    setRunConfig({ sizes, scenarios: scenarioList, rounds, warmup, algos });
 
     let done = 0;
-    // Use a plain object accumulated locally, push to state after each measurement
     const acc: CurveData = {};
     const timedOutAlgos = new Set<string>();
-    let sampleCaptured = false;
+    const capturedAlgos = new Set<string>();
 
     for (const sz of sizes) {
       if (stopRef.current) break;
       setCurrentN(sz);
-      const input = generateBenchmarkInput(sz, scenario);
 
       for (const id of algos) {
         if (stopRef.current) break;
@@ -440,34 +587,36 @@ export default function BenchmarkVisualizer() {
         const fn = SORT_FNS[id];
         let best = Infinity;
         let didTimeout = false;
+        let lastElapsed = 0;
 
-        // Capture a before/after proof sample from the very first sort run
-        if (!sampleCaptured) {
-          const SAMPLE = 24;
-          const step = Math.max(1, Math.floor(input.length / SAMPLE));
-          const before = Array.from({ length: SAMPLE }, (_, i) => input[i * step]);
-          const sorted = fn([...input]);
-          const after = Array.from({ length: SAMPLE }, (_, i) => sorted[i * step]);
-          setSampleProof({ before, after, n: sz });
-          sampleCaptured = true;
-          // Time this first run separately so it still counts
+        for (let r = 0; r < rounds && !didTimeout; r++) {
+          // Pick a random scenario from the wheel each round
+          const sc = scenarioList[Math.floor(Math.random() * scenarioList.length)];
+          const input = generateBenchmarkInput(sz, sc);
+
+          // Capture per-algo proof on first encounter
+          if (!capturedAlgos.has(id)) {
+            const SAMPLE = 20;
+            const step = Math.max(1, Math.floor(input.length / SAMPLE));
+            const before = Array.from({ length: SAMPLE }, (_, i) => input[i * step]);
+            const sorted = fn([...input]);
+            const after = Array.from({ length: SAMPLE }, (_, i) => sorted[i * step]);
+            setSampleProofs(prev => prev[id] ? prev : { ...prev, [id]: { before, after, n: sz } });
+            setActiveProofAlgo(prev => prev ?? id);
+            capturedAlgos.add(id);
+          }
+
           const copy = [...input];
           const t0 = performance.now();
           fn(copy);
-          best = performance.now() - t0;
-          if (best >= TIMEOUT_MS) didTimeout = true;
+          lastElapsed = performance.now() - t0;
+
+          if (lastElapsed >= TIMEOUT_MS) { didTimeout = true; best = lastElapsed; break; }
+          if (r >= warmup) best = Math.min(best, lastElapsed);
         }
 
-        if (!didTimeout) {
-          for (let t = sampleCaptured && done === 0 ? 1 : 0; t < trials; t++) {
-            const copy = [...input];
-            const t0 = performance.now();
-            fn(copy);
-            const elapsed = performance.now() - t0;
-            best = Math.min(best, elapsed);
-            if (elapsed >= TIMEOUT_MS) { didTimeout = true; best = elapsed; break; }
-          }
-        }
+        // Edge case: all rounds were warmup — use the last timing
+        if (best === Infinity && !didTimeout) best = lastElapsed;
 
         if (!acc[id]) acc[id] = [];
         acc[id].push({ n: sz, timeMs: best, timedOut: didTimeout || undefined });
@@ -483,7 +632,7 @@ export default function BenchmarkVisualizer() {
     setCurrentN(null);
     setCurrentAlgo(null);
     setStatus("done");
-  }, [selected, selectedSizes, scenario, trials]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selected, selectedSizes, scenarios, rounds, warmup]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const stop = () => { stopRef.current = true; };
 
@@ -491,7 +640,9 @@ export default function BenchmarkVisualizer() {
     stopRef.current = true;
     setStatus("idle");
     setCurveData({});
-    setSampleProof(null);
+    setSampleProofs({});
+    setActiveProofAlgo(null);
+    setHoverN(null);
     setCurrentN(null);
     setCurrentAlgo(null);
     setRunConfig(null);
@@ -551,153 +702,47 @@ export default function BenchmarkVisualizer() {
             >
               {/* Input sizes */}
               <div className="mb-4">
-                <div className="flex items-center gap-3 mb-2">
-                  <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
-                    Input sizes (n)
-                  </span>
-                  <div className="flex gap-1.5">
-                    {SIZE_PRESETS.map(p => (
-                      <button
-                        key={p.label}
-                        onClick={() => applyPreset(p.sizes)}
-                        className="px-2 py-0.5 rounded text-xs"
-                        style={{
-                          background: "var(--color-surface-3)",
-                          border: "1px solid var(--color-border)",
-                          color: "var(--color-muted)",
-                          cursor: "pointer",
-                        }}
-                      >
-                        {p.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
+                  Input sizes (n)
+                  {sortedSizes.length > 0 && (
+                    <span className="ml-1.5 font-normal normal-case" style={{ color: "var(--color-text)" }}>
+                      · {sortedSizes.length} selected
+                    </span>
+                  )}
+                </span>
 
-                {/* Chip grid */}
-                <div className="flex flex-wrap gap-1.5 mb-2">
-                  {CHIP_SIZES.map(sz => {
-                    const on = selectedSizes.has(sz);
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {SIZE_BUTTONS.map(({ n, word }) => {
+                    const on = selectedSizes.has(n);
+                    const disabled = !UNLIMITED_IDS.has([...selected][0] ?? "") && n > LARGE_THRESHOLD && selected.size > 0 && [...selected].every(id => !UNLIMITED_IDS.has(id));
                     return (
                       <button
-                        key={sz}
-                        onClick={() => on ? removeSize(sz) : addSize(sz)}
-                        className="flex items-center gap-1 px-2.5 py-0.5 rounded text-xs font-mono"
+                        key={n}
+                        onClick={() => on ? removeSize(n) : addSize(n)}
+                        disabled={disabled}
                         style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          alignItems: "center",
+                          padding: "6px 10px",
+                          borderRadius: 6,
                           background: on ? "rgba(139,58,42,0.12)" : "var(--color-surface-1)",
                           border: `1px solid ${on ? "var(--color-accent)" : "var(--color-border)"}`,
                           color: on ? "var(--color-accent)" : "var(--color-muted)",
-                          fontWeight: on ? 600 : 400,
-                          cursor: "pointer",
+                          cursor: disabled ? "not-allowed" : "pointer",
+                          opacity: disabled ? 0.35 : 1,
+                          minWidth: 72,
                         }}
                       >
-                        {fmtN(sz)}
-                        {on && <X size={8} />}
+                        <span style={{ fontSize: 11, fontFamily: "monospace", fontWeight: on ? 700 : 500, lineHeight: 1.2 }}>
+                          {n.toLocaleString()}
+                        </span>
+                        <span style={{ fontSize: 7.5, opacity: 0.65, marginTop: 2, lineHeight: 1.2, textAlign: "center" }}>
+                          {word}
+                        </span>
                       </button>
                     );
                   })}
-                  {/* Non-preset custom sizes */}
-                  {[...selectedSizes]
-                    .filter(sz => !CHIP_SIZES.includes(sz))
-                    .sort((a, b) => a - b)
-                    .map(sz => (
-                      <button
-                        key={sz}
-                        onClick={() => removeSize(sz)}
-                        className="flex items-center gap-1 px-2.5 py-0.5 rounded text-xs font-mono"
-                        style={{
-                          background: "rgba(139,58,42,0.12)",
-                          border: "1px solid var(--color-accent)",
-                          color: "var(--color-accent)",
-                          fontWeight: 600,
-                          cursor: "pointer",
-                        }}
-                      >
-                        {sz.toLocaleString()} <X size={8} />
-                      </button>
-                    ))}
-                </div>
-
-                {/* Custom size entry */}
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min={1}
-                    placeholder="Custom…"
-                    value={sizeInput}
-                    onChange={e => setSizeInput(e.target.value)}
-                    onKeyDown={e => e.key === "Enter" && addCustomSize()}
-                    className="rounded px-2.5 py-1 text-xs font-mono w-28"
-                    style={{
-                      background: "var(--color-surface-1)",
-                      border: "1px solid var(--color-border)",
-                      color: "var(--color-text)",
-                    }}
-                  />
-                  <button
-                    onClick={addCustomSize}
-                    className="px-2.5 py-1 rounded text-xs"
-                    style={{
-                      background: "var(--color-surface-3)",
-                      border: "1px solid var(--color-border)",
-                      color: "var(--color-muted)",
-                      cursor: "pointer",
-                    }}
-                  >
-                    Add
-                  </button>
-                  <span className="text-xs" style={{ color: "var(--color-muted)" }}>
-                    {sortedSizes.length} size{sortedSizes.length !== 1 ? "s" : ""}
-                    {sortedSizes.length > 1 && (
-                      <span className="ml-1 font-mono">
-                        ({fmtN(sortedSizes[0])}–{fmtN(sortedSizes.at(-1)!)})
-                      </span>
-                    )}
-                  </span>
-                </div>
-              </div>
-
-              {/* Scenario + Trials */}
-              <div className="flex flex-wrap gap-4 mb-4">
-                <div className="flex flex-col gap-1">
-                  <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
-                    Scenario
-                  </span>
-                  <select
-                    value={scenario}
-                    onChange={e => setScenario(e.target.value as BenchmarkScenario)}
-                    className="rounded px-2.5 py-1 text-xs"
-                    style={{
-                      background: "var(--color-surface-1)",
-                      border: "1px solid var(--color-border)",
-                      color: "var(--color-text)",
-                    }}
-                  >
-                    <option value="random">Random</option>
-                    <option value="nearlySorted">Nearly Sorted</option>
-                    <option value="reversed">Reversed</option>
-                    <option value="duplicates">Many Duplicates</option>
-                  </select>
-                </div>
-
-                <div className="flex flex-col gap-1">
-                  <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
-                    Trials (best of)
-                  </span>
-                  <select
-                    value={trials}
-                    onChange={e => setTrials(Number(e.target.value))}
-                    className="rounded px-2.5 py-1 text-xs"
-                    style={{
-                      background: "var(--color-surface-1)",
-                      border: "1px solid var(--color-border)",
-                      color: "var(--color-text)",
-                    }}
-                  >
-                    <option value={1}>1</option>
-                    <option value={3}>3</option>
-                    <option value={5}>5</option>
-                  </select>
                 </div>
               </div>
 
@@ -782,8 +827,80 @@ export default function BenchmarkVisualizer() {
 
                 {maxSelectedSize > SLOW_THRESHOLD && (
                   <p className="mt-2.5 text-xs" style={{ color: "var(--color-state-swap)" }}>
-                    ⚠ O(n²) algorithms are disabled for n &gt; {SLOW_THRESHOLD.toLocaleString()}.
+                    ⚠ O(n²) algorithms disabled above n={SLOW_THRESHOLD.toLocaleString()}.
+                    {maxSelectedSize > LARGE_THRESHOLD && (
+                      <> Only Logos Sort and Tim Sort run above n={fmtN(LARGE_THRESHOLD)}.</>
+                    )}
                   </p>
+                )}
+              </div>
+
+              {/* Advanced */}
+              <div className="mb-4">
+                <button
+                  onClick={() => setAdvancedOpen(o => !o)}
+                  className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wider"
+                  style={{ background: "none", border: "none", cursor: "pointer", color: "var(--color-muted)", padding: 0 }}
+                >
+                  <ChevronRight size={12} style={{ transform: advancedOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s ease" }} />
+                  Advanced
+                </button>
+
+                {advancedOpen && (
+                  <div className="mt-3 flex flex-col gap-4">
+                    {/* Scenario wheel */}
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wider mb-1.5" style={{ color: "var(--color-muted)" }}>
+                        Scenarios <span className="font-normal normal-case" style={{ color: "var(--color-muted)" }}>— one drawn at random per round</span>
+                      </p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {SCENARIO_OPTIONS.map(s => {
+                          const on = scenarios.has(s.id);
+                          return (
+                            <label
+                              key={s.id}
+                              className="flex items-center gap-1.5 rounded text-xs select-none"
+                              style={{
+                                padding: "2px 8px",
+                                background: on ? "rgba(139,58,42,0.08)" : "var(--color-surface-1)",
+                                border: `1px solid ${on ? "var(--color-accent)" : "var(--color-border)"}`,
+                                color: on ? "var(--color-text)" : "var(--color-muted)",
+                                cursor: "pointer",
+                              }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={on}
+                                onChange={() => setScenarios(prev => {
+                                  const next = new Set(prev);
+                                  on ? next.delete(s.id) : next.add(s.id);
+                                  return next;
+                                })}
+                                style={{ accentColor: "var(--color-accent)" }}
+                              />
+                              {s.label}
+                              <span style={{ color: "var(--color-muted)", fontSize: 10 }}>— {s.desc}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Rounds + Warmup */}
+                    <div className="flex flex-wrap items-end gap-5">
+                      <div className="flex flex-col gap-1">
+                        <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>Rounds</span>
+                        <Spinner value={rounds} onChange={setRounds} min={1} max={50} label="Rounds" />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>Warmup (discard first)</span>
+                        <Spinner value={warmup} onChange={v => setWarmup(Math.min(v, rounds - 1))} min={0} max={Math.max(0, rounds - 1)} label="Warmup" />
+                      </div>
+                      <span className="text-xs pb-0.5" style={{ color: "var(--color-muted)" }}>
+                        {Math.max(0, rounds - warmup)} rounds recorded · best kept
+                      </span>
+                    </div>
+                  </div>
                 )}
               </div>
 
@@ -855,7 +972,7 @@ export default function BenchmarkVisualizer() {
                       Performance curve
                       {runConfig && (
                         <span className="ml-2 font-mono font-normal text-xs" style={{ color: "var(--color-muted)" }}>
-                          {runConfig.scenario} · best of {runConfig.trials}
+                          {runConfig.scenarios.join(", ")} · {runConfig.rounds} rounds, {runConfig.warmup} discarded
                         </span>
                       )}
                     </p>
@@ -878,7 +995,12 @@ export default function BenchmarkVisualizer() {
 
                 {/* Curve chart */}
                 {hasCurveData && (
-                  <CurveChart data={curveData} sizes={chartSizes} algos={chartAlgos} />
+                  <CurveChart
+                    data={curveData} sizes={chartSizes} algos={chartAlgos}
+                    highlight={activeProofAlgo}
+                    activeN={hoverN}
+                    onNChange={setHoverN}
+                  />
                 )}
 
                 {/* Placeholder while first result loads */}
@@ -889,9 +1011,15 @@ export default function BenchmarkVisualizer() {
                   </div>
                 )}
 
-                {/* Sample proof — shown directly under chart */}
-                {sampleProof && (
-                  <SampleProof proof={sampleProof} revealed={status === "done"} />
+                {/* Proof slider */}
+                {Object.keys(sampleProofs).length > 0 && (
+                  <ProofSlider
+                    proofs={sampleProofs} algos={chartAlgos}
+                    activeAlgo={activeProofAlgo ?? chartAlgos[0] ?? ""}
+                    onSelect={setActiveProofAlgo}
+                    revealed={status === "done"}
+                    curveData={curveData}
+                  />
                 )}
 
                 {/* Legend */}
