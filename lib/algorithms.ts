@@ -1339,7 +1339,7 @@ export function getLogosSortSteps(arr: number[]): SortStep[] {
       const key = a[i]; let j = i - 1;
       while (j >= lo && a[j] > key) {
         comparisons++;
-        step(`Insertion: ${a[j]} > ${key}, shift right`, 0, { [j]: "comparing", [j + 1]: "current" });
+        step(`${a[j]} > ${key} — shift a[${j}] right to open a slot; key ${key} still searching for its home`, 0, { [j]: "comparing", [j + 1]: "current" });
         a[j + 1] = a[j]; swaps++; j--;
       }
       a[j + 1] = key;
