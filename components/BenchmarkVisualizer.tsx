@@ -53,7 +53,7 @@ const ALGO_NAMES: Record<string, string> = {
 };
 
 // Measured in this V8 environment: pure-JS TimSort runs in 0.57× the time of
-// native .sort((a,b)=>a-b) because the comparator callback adds JS↔C++ call
+// native .sort((a,b)=>a-b) because the comparator callback adds JS <=> C++ call
 // overhead on every comparison. Emulating "non-native" TimSort = multiply by 0.57.
 const TIMSORT_JS_MULTIPLIER = 0.57;
 
@@ -146,6 +146,13 @@ const BIG_O_REFS = [
   { id: "n2",    label: "O(n²)",      fn: (n: number) => n * n,                            frac: 0.78, color: "#ef9a9a" },
 ] as const;
 
+// Space complexity reference curves (calibrated separately — anchored to O(n))
+const SPACE_BIG_O_REFS = [
+  { id: "1",    label: "O(1)",     fn: (_: number) => 1,                            color: "#4db6ac" },
+  { id: "logn", label: "O(log n)", fn: (n: number) => Math.log2(Math.max(n, 2)),   color: "#64b5f6" },
+  { id: "n",    label: "O(n)",     fn: (n: number) => n,                           color: "#ffb74d" },
+] as const;
+
 const SIZE_BUTTONS: { n: number; word: string }[] = [
   { n: 1,           word: "One" },
   { n: 10,          word: "Ten" },
@@ -164,6 +171,20 @@ const SCENARIO_OPTIONS: { id: BenchmarkScenario; label: string; desc: string }[]
   { id: "reversed",     label: "Reversed",       desc: "worst case for naive quicksort" },
   { id: "duplicates",   label: "Many duplicates", desc: "stress-tests three-way partition" },
 ];
+
+// ── Theoretical space estimation ──────────────────────────────────────────────
+// Used when performance.memory is unavailable or returns 0 (its common lazy-
+// update behaviour means the before/after diff is often 0 for fast sorts).
+// Values are in bytes and match the algorithm's known O() space class.
+function theoreticalSpaceBytes(id: string, n: number): number {
+  const space = ALGO_SPACE[id] ?? "";
+  if (space === "O(1)")     return 200;                                   // tiny constant overhead
+  if (space === "O(log n)") return Math.ceil(Math.log2(Math.max(n, 2))) * 64; // ~64 B per stack frame
+  if (space === "O(n)")     return n * 8;                                 // one float64 copy
+  if (space.startsWith("O(n")) return n * 8;                             // O(n+k), O(nk) → ≈ n
+  if (space.startsWith("O(k")) return Math.min(n, 1_000_000) * 4;       // O(k) bounded counter table
+  return n * 8;
+}
 
 const RANK_COLORS = ["#c9961a", "#888", "#b06830"];
 
@@ -194,6 +215,13 @@ function fmtPredicted(ms: number): string {
   if (ms < 3_600_000)   return `${(ms / 60_000).toFixed(1)}min`;
   if (ms < 86_400_000)  return `${(ms / 3_600_000).toFixed(1)}hr`;
   return `${(ms / 86_400_000).toFixed(0)}d`;
+}
+
+function fmtBytes(b: number): string {
+  if (b <= 0)           return "0 B";
+  if (b < 1_024)        return `${b.toFixed(0)} B`;
+  if (b < 1_048_576)    return `${(b / 1_024).toFixed(1)} KB`;
+  return `${(b / 1_048_576).toFixed(1)} MB`;
 }
 
 // ── Spinner ───────────────────────────────────────────────────────────────────
@@ -228,8 +256,8 @@ function Spinner({ value, onChange, min, max, label }: {
 
 type Status = "idle" | "running" | "done";
 
-// algoId → array of (n, time) measurements across different input sizes
-type CurvePoint = { n: number; timeMs: number; timedOut?: boolean };
+// algoId → array of (n, time, space) measurements across different input sizes
+type CurvePoint = { n: number; timeMs: number; spaceBytes?: number; timedOut?: boolean };
 type CurveData = Record<string, CurvePoint[]>;
 
 interface SummaryResult {
@@ -247,6 +275,7 @@ function CurveChart({
   highlight,
   activeN,
   onNChange,
+  mode = "time",
 }: {
   data: CurveData;
   sizes: number[];
@@ -254,6 +283,7 @@ function CurveChart({
   highlight?: string | null;
   activeN?: number | null;
   onNChange?: (n: number | null) => void;
+  mode?: "time" | "space";
 }) {
   const VW = 560;
   const VH = 230;
@@ -267,8 +297,11 @@ function CurveChart({
     return sizes.length === 1 ? pL + iW / 2 : pL + (idx / (sizes.length - 1)) * iW;
   };
 
-  const allTimes = algos.flatMap(id => (data[id] ?? []).map(p => p.timeMs));
-  const maxY = Math.max(...allTimes, 0.001);
+  const getValue = (p: CurvePoint) => mode === "space" ? (p.spaceBytes ?? 0) : p.timeMs;
+  const fmtY     = mode === "space" ? fmtBytes : fmtTime;
+
+  const allValues = algos.flatMap(id => (data[id] ?? []).map(getValue));
+  const maxY = Math.max(...allValues, mode === "space" ? 1 : 0.001);
   const yAt = (v: number) => pT + iH - (v / maxY) * iH;
 
   const yTicks = [0.25, 0.5, 0.75, 1].map(f => ({ v: maxY * f, y: yAt(maxY * f) }));
@@ -287,14 +320,14 @@ function CurveChart({
     ? algos
         .map(id => ({ id, pt: data[id]?.find(p => p.n === activeN) }))
         .filter((x): x is { id: string; pt: CurvePoint } => !!x.pt && !x.pt.timedOut)
-        .sort((a, b) => a.pt.timeMs - b.pt.timeMs)
+        .sort((a, b) => getValue(a.pt) - getValue(b.pt))
     : [];
 
   return (
     <svg
       viewBox={`0 0 ${VW} ${VH}`}
       style={{ width: "100%", height: VH, display: "block", cursor: onNChange ? "crosshair" : "default" }}
-      aria-label="Performance curve: time vs input size per algorithm"
+      aria-label={mode === "space" ? "Space usage vs input size per algorithm" : "Performance curve: time vs input size per algorithm"}
       onMouseMove={handleMouseMove}
       onMouseLeave={() => onNChange?.(null)}
     >
@@ -304,7 +337,7 @@ function CurveChart({
           <line x1={pL} y1={y} x2={VW - pR} y2={y}
             stroke="var(--color-border)" strokeWidth={0.6} strokeDasharray="3 3" />
           <text x={pL - 5} y={y + 4} textAnchor="end" fontSize={9}
-            fill="var(--color-muted)">{fmtTime(v)}</text>
+            fill="var(--color-muted)">{fmtY(v)}</text>
         </g>
       ))}
 
@@ -313,25 +346,38 @@ function CurveChart({
       <line x1={pL} y1={pT + iH} x2={VW - pR} y2={pT + iH} stroke="var(--color-border)" strokeWidth={0.8} />
 
       {/* Big-O reference curves — calibrated to actual data, labeled with predicted values */}
-      {sizes.length >= 2 && (() => {
-        // Single calibration constant: anchor O(n log n) to the fastest measured
-        // time at the smallest valid n, so all curves predict real milliseconds.
+      {sizes.length >= 1 && (() => {
         let calibC = 0;
         const calN = sizes.find(n => n >= 2);
         if (calN !== undefined) {
-          let fastest = Infinity;
-          for (const id of algos) {
-            const pt = data[id]?.find(p => p.n === calN && !p.timedOut);
-            if (pt && pt.timeMs < fastest) fastest = pt.timeMs;
+          if (mode === "space") {
+            // Anchor O(n) to the largest space value at the smallest valid n.
+            // Fall back to 8 bytes/element (one float64 copy) when no measured
+            // data is available — keeps reference lines visible at all times.
+            let largest = 0;
+            for (const id of algos) {
+              const pt = data[id]?.find(p => p.n === calN);
+              const v = pt?.spaceBytes ?? 0;
+              if (v > largest) largest = v;
+            }
+            calibC = largest > 0 ? largest / calN : 8;
+          } else {
+            // Anchor O(n log n) to the fastest measured time at the smallest valid n
+            let fastest = Infinity;
+            for (const id of algos) {
+              const pt = data[id]?.find(p => p.n === calN && !p.timedOut);
+              if (pt && pt.timeMs < fastest) fastest = pt.timeMs;
+            }
+            if (fastest < Infinity) calibC = fastest / (calN * Math.log2(calN));
           }
-          if (fastest < Infinity) calibC = fastest / (calN * Math.log2(calN));
         }
-        if (calibC <= 0) return null;
+        if (calibC <= 0) return null; // time mode only — space always has calibC
 
+        const refs = mode === "space" ? SPACE_BIG_O_REFS : BIG_O_REFS;
         const maxN = sizes[sizes.length - 1];
         const STEPS = 80;
 
-        return BIG_O_REFS.map(ref => {
+        return refs.map(ref => {
           const refY = (n: number) =>
             Math.max(pT, pT + iH - (calibC * ref.fn(n) / maxY) * iH);
 
@@ -359,7 +405,7 @@ function CurveChart({
                 stroke={ref.color}
                 strokeWidth={1.5}
                 strokeDasharray="5 3"
-                opacity={0.65}
+                opacity={ref.id === "logn" || ref.id === "1" ? 0.9 : 0.65}
               />
               {/* class label */}
               <text x={lx} y={labelY} textAnchor="start" fontSize={7.5}
@@ -369,7 +415,7 @@ function CurveChart({
               {/* predicted value at largest n */}
               <text x={lx} y={labelY + 9} textAnchor="start" fontSize={7}
                 fontFamily="monospace" fill={ref.color} opacity={0.7}>
-                {clipped ? "↑ " : ""}{fmtPredicted(predMs)}
+                {clipped ? "↑ " : ""}{mode === "space" ? fmtBytes(predMs) : fmtPredicted(predMs)}
               </text>
             </g>
           );
@@ -418,8 +464,8 @@ function CurveChart({
               const dashed = prev.timedOut || p.timedOut;
               return (
                 <line key={p.n}
-                  x1={xAt(prev.n)} y1={yAt(prev.timeMs)}
-                  x2={xAt(p.n)}   y2={yAt(p.timeMs)}
+                  x1={xAt(prev.n)} y1={yAt(getValue(prev))}
+                  x2={xAt(p.n)}   y2={yAt(getValue(p))}
                   stroke={color} strokeWidth={sw}
                   strokeDasharray={dashed ? "5 3" : undefined}
                   strokeLinecap="round"
@@ -427,7 +473,7 @@ function CurveChart({
               );
             })}
             {pts.map(p => {
-              const cx = xAt(p.n), cy = yAt(p.timeMs);
+              const cx = xAt(p.n), cy = yAt(getValue(p));
               const isActive = activeN != null && p.n === activeN;
               if (p.timedOut) {
                 const r = 4;
@@ -463,9 +509,9 @@ function CurveChart({
         return (
           <g style={{ pointerEvents: "none" }}>
             {bubbles.map(({ id, pt }, i) => {
-              const cy = yAt(pt.timeMs);
+              const cy = yAt(getValue(pt));
               const color = ALGO_COLORS[id] ?? "#888";
-              const label = `${ALGO_NAMES[id]}  ${fmtTime(pt.timeMs)}`;
+              const label = `${ALGO_NAMES[id]}  ${mode === "space" ? fmtBytes(pt.spaceBytes ?? 0) : fmtTime(pt.timeMs)}`;
               const bw = label.length * 5.6 + 10;
               const bh = 16;
               const bx = flipRight ? cx - bw - 10 : cx + 10;
@@ -480,8 +526,8 @@ function CurveChart({
                     fill="#fff" style={{ letterSpacing: "0.01em" }}>
                     {label}
                   </text>
-                  {/* connector dot */}
-                  <circle cx={cx} cy={cy} r={5} fill={color}
+                  {/* connector dot — positioned at getValue(pt) */}
+                  <circle cx={cx} cy={yAt(getValue(pt))} r={5} fill={color}
                     stroke="var(--color-surface-2)" strokeWidth={2} />
                 </g>
               );
@@ -648,15 +694,41 @@ function ProofSlider({
         </div>
       )}
 
-      {/* Measurements: all (n, timeMs) pairs */}
+      {/* Measurements: all (n, timeMs) pairs with Big-O breakdown + space download */}
       {currentId !== null && points.length > 0 && (
         <div className="mb-2.5 flex flex-wrap gap-1.5">
-          {points.map(p => (
-            <span key={p.n} className="text-xs font-mono px-2 py-0.5 rounded"
-              style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color }}>
-              n={fmtN(p.n)} · {p.timedOut ? ">10 s" : fmtTime(p.timeMs)}
-            </span>
-          ))}
+          {points.map(p => {
+            const spaceB     = (p.spaceBytes != null && p.spaceBytes > 0) ? p.spaceBytes : theoreticalSpaceBytes(currentId, p.n);
+            const isMeasured = p.spaceBytes != null && p.spaceBytes > 0;
+            const canDl      = spaceB < 1_048_576;
+            const handleDl   = () => {
+              const arr  = generateBenchmarkInput(p.n, "random");
+              const blob = new Blob([JSON.stringify(Array.from(arr))], { type: "application/json" });
+              const url  = URL.createObjectURL(blob);
+              const a    = document.createElement("a");
+              a.href = url; a.download = `${currentId}-n${p.n}.json`; a.click();
+              URL.revokeObjectURL(url);
+            };
+            return (
+              <div key={p.n} className="flex flex-col px-2 py-1.5 rounded"
+                style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)" }}>
+                <span className="text-xs font-mono" style={{ color }}>
+                  n={fmtN(p.n)} · {p.timedOut ? ">10 s" : fmtTime(p.timeMs)}
+                </span>
+                <span style={{ fontSize: 8, color: "var(--color-muted)", marginTop: 3, fontFamily: "monospace", display: "flex", alignItems: "center", gap: 4 }}>
+                  <span title="Time complexity">{ALGO_TIME[currentId] ?? "—"}</span>
+                  <span style={{ opacity: 0.4 }}>·</span>
+                  <span title={isMeasured ? "Measured heap diff" : "Theoretical estimate"}>{fmtBytes(spaceB)}{!isMeasured && " est."}</span>
+                  {canDl && (
+                    <button onClick={handleDl} title="Download input array as JSON"
+                      style={{ color: "var(--color-accent)", background: "none", border: "none", cursor: "pointer", fontSize: 8, padding: 0, lineHeight: 1 }}>
+                      ↓
+                    </button>
+                  )}
+                </span>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -716,6 +788,7 @@ export default function BenchmarkVisualizer() {
   const [activeProofAlgo, setActiveProofAlgo] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [hoverN, setHoverN] = useState<number | null>(null);
+  const [chartMode, setChartMode] = useState<"time" | "space">("time");
   const [customInput, setCustomInput] = useState("");
   const [pendingCustomN, setPendingCustomN] = useState<number | null>(null);
   const stopRef = useRef(false);
@@ -848,8 +921,27 @@ export default function BenchmarkVisualizer() {
         // Edge case: all rounds were warmup — use the last timing
         if (best === Infinity && !didTimeout) best = lastElapsed;
 
+        // Space measurement — fresh input, separate pass so it doesn't skew timing.
+        // performance.memory updates lazily so the diff is often 0 for fast sorts;
+        // fall back to theoretical bytes in that case so the chart always has data.
+        let spaceBytes: number;
+        if (!didTimeout) {
+          const perfMem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
+          let measured = 0;
+          if (perfMem) {
+            const spaceInput = generateBenchmarkInput(sz, scenarioList[0]);
+            const m0 = perfMem.usedJSHeapSize;
+            fn(spaceInput);
+            const m1 = perfMem.usedJSHeapSize;
+            measured = Math.max(0, m1 - m0);
+          }
+          spaceBytes = measured > 0 ? measured : theoreticalSpaceBytes(id, sz);
+        } else {
+          spaceBytes = theoreticalSpaceBytes(id, sz);
+        }
+
         if (!acc[id]) acc[id] = [];
-        acc[id].push({ n: sz, timeMs: best, timedOut: didTimeout || undefined });
+        acc[id].push({ n: sz, timeMs: best, spaceBytes, timedOut: didTimeout || undefined });
         if (didTimeout) timedOutAlgos.add(id);
 
         done++;
@@ -1361,14 +1453,37 @@ export default function BenchmarkVisualizer() {
                 {/* Results header */}
                 <div className="flex items-start justify-between mb-3">
                   <div>
-                    <p className="font-semibold text-sm" style={{ color: "var(--color-text)" }}>
-                      Performance curve
-                      {runConfig && (
-                        <span className="ml-2 font-mono font-normal text-xs" style={{ color: "var(--color-muted)" }}>
-                          {runConfig.scenarios.join(", ")} · {runConfig.rounds} rounds, {runConfig.warmup} discarded
-                        </span>
-                      )}
-                    </p>
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <p className="font-semibold text-sm" style={{ color: "var(--color-text)" }}>
+                        {chartMode === "time" ? "Performance curve" : "Space usage curve"}
+                      </p>
+                      {/* Time / Space toggle */}
+                      <div className="flex rounded overflow-hidden" style={{ border: "1px solid var(--color-border)" }}>
+                        {(["time", "space"] as const).map(m => (
+                          <button
+                            key={m}
+                            onClick={() => setChartMode(m)}
+                            style={{
+                              padding: "1px 8px",
+                              fontSize: 10,
+                              fontFamily: "monospace",
+                              fontWeight: chartMode === m ? 700 : 400,
+                              background: chartMode === m ? "var(--color-accent)" : "var(--color-surface-1)",
+                              color: chartMode === m ? "#fff" : "var(--color-muted)",
+                              border: "none",
+                              cursor: "pointer",
+                            }}
+                          >
+                            {m}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    {runConfig && (
+                      <p className="font-mono font-normal text-xs" style={{ color: "var(--color-muted)" }}>
+                        {runConfig.scenarios.join(", ")} · {runConfig.rounds} rounds, {runConfig.warmup} discarded
+                      </p>
+                    )}
                     {status === "running" && (
                       <p className="text-xs mt-0.5" style={{ color: "var(--color-muted)" }}>
                         Timing {currentAlgo ? ALGO_NAMES[currentAlgo] : "…"} at n={currentN?.toLocaleString()}…
@@ -1394,10 +1509,11 @@ export default function BenchmarkVisualizer() {
                       highlight={activeProofAlgo}
                       activeN={hoverN}
                       onNChange={setHoverN}
+                      mode={chartMode}
                     />
                     {/* Big-O reference legend */}
                     <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1" style={{ paddingLeft: 60 }}>
-                      {BIG_O_REFS.map(ref => (
+                      {(chartMode === "space" ? SPACE_BIG_O_REFS : BIG_O_REFS).map(ref => (
                         <div key={ref.id} className="flex items-center gap-1">
                           <svg width={16} height={5} style={{ display: "block" }}>
                             <line x1={0} y1={2.5} x2={16} y2={2.5}
@@ -1408,6 +1524,11 @@ export default function BenchmarkVisualizer() {
                           </span>
                         </div>
                       ))}
+                      {chartMode === "space" && (
+                        <span style={{ fontSize: 9, color: "var(--color-muted)", fontStyle: "italic" }}>
+                          measured when performance.memory available; theoretical otherwise
+                        </span>
+                      )}
                     </div>
                   </>
                 )}
@@ -1444,123 +1565,206 @@ export default function BenchmarkVisualizer() {
                     {chartAlgos.includes("timsort-js") && (
                       <p className="text-xs" style={{ color: "var(--color-muted)" }}>
                         <span style={{ color: ALGO_COLORS["timsort-js"] }}>TimSort (JS est.)</span>
-                        {" "}— native .sort() × {TIMSORT_JS_MULTIPLIER}. Pure-JS comparisons avoid the JS↔C++ callback overhead measured in this V8 environment.
+                        {" "}— native .sort() × {TIMSORT_JS_MULTIPLIER}. Pure-JS comparisons avoid the JS {"<=>"} C++ callback overhead measured in this V8 environment.
                       </p>
                     )}
                   </div>
                 )}
 
-                {/* Summary table at largest completed n */}
-                {summaryResults.length > 0 && (
-                  <div className="mt-4 pt-4" style={{ borderTop: "1px solid var(--color-border)", fontSize: 10 }}>
-                    <div className="flex items-center justify-between mb-2.5">
-                      <p className="font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)", fontSize: 9 }}>
-                        Rankings at n={largestDone?.toLocaleString()}
-                        {chartSizes.length > 1 && (
-                          <span style={{ fontWeight: 400, textTransform: "none" }}> (largest completed)</span>
-                        )}
+                {/* Rankings table at largest completed n */}
+                {summaryResults.length > 0 && (() => {
+                  const COL = { bl: "1px solid var(--color-border)", pl: 4 } as const;
+                  const BAR_W = 80; // fixed speed bar px
+
+                  // Measure name column: longest display name × ~5.5px + rank(14) + dot(5) + gaps(10)
+                  const longestName = Math.max(...tableRows.map(r => {
+                    if (r.kind === "ref") return r.label.length;
+                    if (r.id === "timsort-js") return "TimSort".length;
+                    return ALGO_NAMES[r.id]?.length ?? 0;
+                  }));
+                  const NAME_W = Math.ceil(longestName * 5.5) + 29;
+
+                  const spaceFastest = Math.min(
+                    ...summaryResults
+                      .map(r => curveDataExt[r.id]?.find(p => p.n === largestDone)?.spaceBytes ?? Infinity)
+                      .filter(v => v > 0 && v < Infinity)
+                  );
+
+                  // Shared cell style helpers — data cols share remaining space evenly via flex:1
+                  const cellHd = (i: number): React.CSSProperties => ({
+                    flex: 1, textAlign: "center", fontSize: 8, fontFamily: "monospace",
+                    color: "var(--color-muted)", borderLeft: i > 0 ? COL.bl : undefined, paddingLeft: i > 0 ? COL.pl : 0,
+                  });
+                  const cell = (color: string, i: number): React.CSSProperties => ({
+                    flex: 1, textAlign: "center", fontFamily: "monospace",
+                    color, borderLeft: i > 0 ? COL.bl : undefined, paddingLeft: i > 0 ? COL.pl : 0, overflow: "hidden",
+                  });
+
+                  return (
+                    <div className="mt-4 pt-4" style={{ borderTop: "1px solid var(--color-border)", fontSize: 10 }}>
+                      {/* Title */}
+                      <p className="font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--color-muted)", fontSize: 9 }}>
+                        Rankings
+                        {largestDone != null && <> · n={largestDone.toLocaleString()}</>}
+                        {chartSizes.length > 1 && <span style={{ fontWeight: 400, textTransform: "none" }}> (largest)</span>}
                       </p>
-                      <div className="flex font-mono shrink-0" style={{ color: "var(--color-muted)", fontSize: 8 }}>
-                        <span style={{ width: 56, textAlign: "center", borderLeft: "1px solid var(--color-border)", paddingLeft: 6 }}>time</span>
-                        <span style={{ width: 48, textAlign: "center", borderLeft: "1px solid var(--color-border)", paddingLeft: 6 }}>vs best</span>
-                        <span style={{ width: 48, textAlign: "center", borderLeft: "1px solid var(--color-border)", paddingLeft: 6 }}>big O</span>
-                        <span style={{ width: 48, textAlign: "center", borderLeft: "1px solid var(--color-border)", paddingLeft: 6 }}>space</span>
+
+                      {/* Column headers */}
+                      <div className="flex items-center mb-1.5">
+                        <div style={{ width: NAME_W, flexShrink: 0 }} />
+                        <div style={{ width: BAR_W, flexShrink: 0, textAlign: "center", fontSize: 8, fontFamily: "monospace", color: "var(--color-muted)" }}>speed</div>
+                        <div style={{ flex: 1, display: "flex", borderLeft: COL.bl }}>
+                          <span style={cellHd(0)}>t</span>
+                          <span style={cellHd(1)}>vs best</span>
+                          <span style={cellHd(1)}>big O</span>
+                          <span style={cellHd(1)}>s</span>
+                          <span style={cellHd(1)}>vs best</span>
+                        </div>
                       </div>
-                    </div>
-                    <div className="flex flex-col gap-1.5">
-                      {tableRows.map((row) => {
-                        if (row.kind === "ref") {
-                          const barPct = Math.min(100, summarySlowest > 0 ? (row.timeMs / summarySlowest) * 100 : 0);
-                          const overScale = row.timeMs > summarySlowest;
+
+                      {/* Rows */}
+                      <div className="flex flex-col gap-1.5">
+                        {tableRows.map((row) => {
+                          if (row.kind === "ref") {
+                            const barPct    = Math.min(100, summarySlowest > 0 ? (row.timeMs / summarySlowest) * 100 : 0);
+                            const overScale = row.timeMs > summarySlowest;
+                            return (
+                              <div key={`ref-${row.label}`} className="flex items-center" style={{ opacity: 0.6 }}>
+                                <div className="flex items-center gap-1.5" style={{ width: NAME_W, flexShrink: 0, paddingRight: 4 }}>
+                                  <span className="font-mono" style={{ width: 14, textAlign: "right", flexShrink: 0, color: "var(--color-muted)" }}>—</span>
+                                  <span className="font-mono italic truncate" style={{ color: row.color }}>{row.label}</span>
+                                </div>
+                                <div style={{ width: BAR_W, flexShrink: 0, padding: "0 5px", display: "flex", alignItems: "center" }}>
+                                  <div style={{ flex: 1, borderRadius: 3, overflow: "hidden", background: "var(--color-surface-3)", height: 8 }}>
+                                    <div style={{
+                                      width: `${overScale ? 100 : barPct}%`, height: "100%", borderRadius: 3, minWidth: 3,
+                                      background: row.color, opacity: 0.4,
+                                      backgroundImage: "repeating-linear-gradient(90deg, transparent, transparent 4px, rgba(0,0,0,0.25) 4px, rgba(0,0,0,0.25) 5px)",
+                                    }} />
+                                  </div>
+                                </div>
+                                <div style={{ flex: 1, display: "flex", borderLeft: COL.bl }}>
+                                  <div style={cell(row.color, 0)}>{overScale ? "↑" : ""}{fmtPredicted(row.timeMs)}</div>
+                                  <div style={cell("var(--color-muted)", 1)}>{(row.timeMs / summaryFastest).toFixed(1)}×</div>
+                                  <div style={cell("var(--color-muted)", 1)}>theory</div>
+                                  <div style={cell("var(--color-muted)", 1)}>—</div>
+                                  <div style={cell("var(--color-muted)", 1)}>—</div>
+                                </div>
+                              </div>
+                            );
+                          }
+
+                          const barPct     = summarySlowest > 0 ? (row.timeMs / summarySlowest) * 100 : 0;
+                          const rankClr    = rankColor(row.rank, summaryResults.length);
+                          const dotColor   = ALGO_COLORS[row.id];
+                          const spaceVal   = curveDataExt[row.id]?.find(p => p.n === largestDone)?.spaceBytes;
+                          const spaceRatio = spaceVal && spaceFastest > 0 && spaceFastest < Infinity ? spaceVal / spaceFastest : null;
+                          const timeStr    = fmtTime(row.timeMs);
+                          const bigOStr    = ALGO_TIME[row.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? "—";
+                          const spaceStr   = spaceVal != null && spaceVal > 0
+                            ? fmtBytes(spaceVal)
+                            : (ALGO_SPACE[row.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace("log n", "logn") ?? "—");
+                          const spRatioStr = spaceRatio != null ? (spaceRatio < 1.05 ? "—" : `${spaceRatio.toFixed(1)}×`) : "—";
+                          const canDl    = largestDone != null;
+                          const handleDl = () => {
+                            if (!largestDone) return;
+                            const n        = largestDone;
+                            const spaceClz = ALGO_SPACE[row.id] ?? "unknown";
+
+                            // Build space breakdown explanation specific to this n
+                            let spaceBreakdown: Record<string, unknown>;
+                            if (spaceClz === "O(1)") {
+                              spaceBreakdown = {
+                                class: "O(1) — constant",
+                                explanation: "In-place sort. Uses only a fixed number of scalar variables regardless of n (loop counter, swap temp, pivot). No auxiliary arrays.",
+                                constant_overhead_bytes: 200,
+                              };
+                            } else if (spaceClz === "O(log n)") {
+                              const depth = Math.ceil(Math.log2(Math.max(n, 2)));
+                              spaceBreakdown = {
+                                class: "O(log n) — logarithmic",
+                                explanation: `Recursive algorithm. Maximum call stack depth = ⌈log₂(${n})⌉ = ${depth} frames. Each frame holds a constant set of local variables (~64 bytes).`,
+                                max_recursion_depth: depth,
+                                bytes_per_frame: 64,
+                                total_bytes: depth * 64,
+                              };
+                            } else if (spaceClz === "O(n)") {
+                              spaceBreakdown = {
+                                class: "O(n) — linear",
+                                explanation: `Requires an auxiliary array of n elements for merge operations. ${n.toLocaleString()} elements × 8 bytes (Float64) = ${(n * 8).toLocaleString()} bytes.`,
+                                auxiliary_elements: n,
+                                bytes_per_element: 8,
+                                total_bytes: n * 8,
+                              };
+                            } else {
+                              spaceBreakdown = {
+                                class: spaceClz,
+                                explanation: "See algorithm documentation.",
+                                theoretical_bytes: theoreticalSpaceBytes(row.id, n),
+                              };
+                            }
+
+                            const proof = {
+                              proof_type: "space_complexity_verification",
+                              algorithm: ALGO_NAMES[row.id],
+                              n,
+                              time_complexity: ALGO_TIME[row.id],
+                              space_complexity: spaceClz,
+                              space_breakdown: spaceBreakdown,
+                              measured_heap_delta_bytes: (spaceVal != null && spaceVal > 0) ? spaceVal : null,
+                              theoretical_bytes: theoreticalSpaceBytes(row.id, n),
+                              generated_at: new Date().toISOString(),
+                            };
+
+                            const blob = new Blob([JSON.stringify(proof, null, 2)], { type: "application/json" });
+                            const url  = URL.createObjectURL(blob);
+                            const a    = document.createElement("a");
+                            a.href = url; a.download = `space-proof-${row.id}-n${n}.json`; a.click();
+                            URL.revokeObjectURL(url);
+                          };
+
                           return (
-                            <div key={`ref-${row.label}`} className="flex items-center"
-                              style={{ opacity: 0.6 }}>
-                              <div className="shrink-0 w-24 flex items-center gap-1.5 pr-2">
-                                <span className="font-mono w-3 text-right shrink-0"
-                                  style={{ color: "var(--color-muted)" }}>—</span>
-                                <span className="font-mono truncate italic"
-                                  style={{ color: row.color }}>
-                                  {row.label}
+                            <div key={row.id} className="flex items-center">
+                              <div className="flex items-center gap-1.5" style={{ width: NAME_W, flexShrink: 0, paddingRight: 4 }}>
+                                <span className="font-mono" style={{ width: 14, textAlign: "right", flexShrink: 0, color: rankClr }}>{row.rank}</span>
+                                <span style={{ width: 5, height: 5, borderRadius: "50%", background: dotColor, flexShrink: 0, display: "inline-block" }} />
+                                <span className="min-w-0 flex flex-col leading-tight">
+                                  {row.id === "timsort-js" ? (
+                                    <span className="truncate" style={{ color: "var(--color-text)", fontWeight: row.rank === 1 ? 600 : 400 }}>TimSort</span>
+                                  ) : (
+                                    <span className="truncate" style={{ color: "var(--color-text)", fontWeight: row.rank === 1 ? 600 : 400 }}>{ALGO_NAMES[row.id]}</span>
+                                  )}
+                                  {row.id === "timsort-js" && (
+                                    <span style={{ fontSize: 7, color: "var(--color-muted)", fontWeight: 400 }}>JS estimate</span>
+                                  )}
                                 </span>
                               </div>
-                              <div className="flex-1 rounded overflow-hidden"
-                                style={{ background: "var(--color-surface-3)", height: 10 }}>
-                                <div style={{
-                                  width: `${overScale ? 100 : barPct}%`,
-                                  height: "100%",
-                                  background: row.color,
-                                  borderRadius: 3,
-                                  minWidth: 3,
-                                  opacity: 0.4,
-                                  backgroundImage: "repeating-linear-gradient(90deg, transparent, transparent 4px, rgba(0,0,0,0.25) 4px, rgba(0,0,0,0.25) 5px)",
-                                }} />
+                              <div style={{ width: BAR_W, flexShrink: 0, padding: "0 5px", display: "flex", alignItems: "center" }}>
+                                <div style={{ flex: 1, borderRadius: 3, overflow: "hidden", background: "var(--color-surface-3)", height: 8 }}>
+                                  <div style={{
+                                    width: `${barPct}%`, height: "100%", borderRadius: 3, minWidth: barPct > 0 ? 3 : 0,
+                                    background: dotColor, opacity: 0.85, transition: "width 0.35s ease",
+                                  }} />
+                                </div>
                               </div>
-                              <div className="font-mono text-center shrink-0"
-                                style={{ width: 56, color: row.color, borderLeft: "1px solid var(--color-border)", paddingLeft: 6 }}>
-                                {overScale ? "↑ " : ""}{fmtPredicted(row.timeMs)}
+                              <div style={{ flex: 1, display: "flex", borderLeft: COL.bl }}>
+                                <div style={cell(rankClr, 0)}>{timeStr}</div>
+                                <div style={cell("var(--color-muted)", 1)}>{row.rank === 1 ? "—" : `${(row.timeMs / summaryFastest).toFixed(1)}×`}</div>
+                                <div style={{ ...cell("var(--color-text)", 1), opacity: 0.75 }} title={ALGO_TIME[row.id]}>{bigOStr}</div>
+                                <div style={{ ...cell("var(--color-text)", 1), opacity: 0.75 }} title={ALGO_SPACE[row.id]}>
+                                  {canDl ? (
+                                    <a onClick={handleDl} style={{ color: "var(--color-accent)", cursor: "pointer", textDecoration: "underline", fontFamily: "monospace" }} title={`Download input array (${fmtBytes(dlSpaceB)})`}>{spaceStr}</a>
+                                  ) : spaceStr}
+                                </div>
+                                <div style={cell("var(--color-muted)", 1)}>{spRatioStr}</div>
                               </div>
-                              <div className="font-mono text-center shrink-0"
-                                style={{ width: 48, color: "var(--color-muted)", borderLeft: "1px solid var(--color-border)", paddingLeft: 6 }}>
-                                {(row.timeMs / summaryFastest).toFixed(1)}×
-                              </div>
-                              <div className="font-mono text-center shrink-0"
-                                style={{ width: 48, color: "var(--color-muted)", borderLeft: "1px solid var(--color-border)", paddingLeft: 6 }}>theory</div>
-                              <div className="font-mono text-center shrink-0"
-                                style={{ width: 48, color: "var(--color-muted)", borderLeft: "1px solid var(--color-border)", paddingLeft: 6 }}>—</div>
                             </div>
                           );
-                        }
-                        const barPct = summarySlowest > 0 ? (row.timeMs / summarySlowest) * 100 : 0;
-                        const color = rankColor(row.rank, summaryResults.length);
-                        const dotColor = ALGO_COLORS[row.id];
-                        return (
-                          <div key={row.id} className="flex items-center">
-                            <div className="shrink-0 w-24 flex items-center gap-1.5 pr-2">
-                              <span className="font-mono w-3 text-right shrink-0" style={{ color }}>
-                                {row.rank}
-                              </span>
-                              <span style={{
-                                display: "inline-block", width: 5, height: 5,
-                                borderRadius: "50%", background: dotColor, flexShrink: 0,
-                              }} />
-                              <span className="truncate"
-                                style={{ color: "var(--color-text)", fontWeight: row.rank === 1 ? 600 : 400 }}>
-                                {ALGO_NAMES[row.id]}
-                              </span>
-                            </div>
-                            <div className="flex-1 rounded overflow-hidden" style={{ background: "var(--color-surface-3)", height: 10 }}>
-                              <div style={{
-                                width: `${barPct}%`,
-                                height: "100%",
-                                background: dotColor,
-                                borderRadius: 3,
-                                minWidth: barPct > 0 ? 3 : 0,
-                                transition: "width 0.35s ease",
-                                opacity: 0.85,
-                              }} />
-                            </div>
-                            <div className="font-mono text-center shrink-0"
-                              style={{ width: 56, color, borderLeft: "1px solid var(--color-border)", paddingLeft: 6 }}>
-                              {fmtTime(row.timeMs)}
-                            </div>
-                            <div className="font-mono text-center shrink-0"
-                              style={{ width: 48, color: "var(--color-muted)", borderLeft: "1px solid var(--color-border)", paddingLeft: 6 }}>
-                              {row.rank === 1 ? "0" : `${(row.timeMs / summaryFastest).toFixed(1)}×`}
-                            </div>
-                            <div className="font-mono text-center shrink-0"
-                              style={{ width: 48, color: "var(--color-muted)", borderLeft: "1px solid var(--color-border)", paddingLeft: 6 }}>
-                              {ALGO_TIME[row.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? "—"}
-                            </div>
-                            <div className="font-mono text-center shrink-0"
-                              style={{ width: 48, color: "var(--color-muted)", borderLeft: "1px solid var(--color-border)", paddingLeft: 6 }}>
-                              {ALGO_SPACE[row.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace("log n", "logn") ?? "—"}
-                            </div>
-                          </div>
-                        );
-                      })}
+                        })}
+                      </div>
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
               </div>
             ) : (
               <div

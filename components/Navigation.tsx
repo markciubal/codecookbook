@@ -19,7 +19,7 @@ const NAV_ITEMS = [
     group: "Sorting Algorithms",
     icon: <BarChart2 size={14} />,
     items: [
-      { name: BENCHMARK.name, path: BENCHMARK.path, badge: "race" },
+      { name: BENCHMARK.name, path: BENCHMARK.path },
       ...SORTING_ALGORITHMS.map((a) => ({
         name: a.name,
         path: a.path,
