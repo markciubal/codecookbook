@@ -1120,6 +1120,12 @@ export default function BenchmarkVisualizer() {
       if (stopRef.current) break;
       setCurrentN(sz);
 
+      // Generate inputs once per size so every algorithm sorts the exact same data each round
+      const roundInputs = Array.from({ length: rounds }, () => {
+        const sc = scenarioList[Math.floor(Math.random() * scenarioList.length)];
+        return generateBenchmarkInput(sz, sc);
+      });
+
       for (const id of algos) {
         if (stopRef.current) break;
         if (timedOutAlgos.has(id)) { done++; setProgress({ done, total }); continue; }
@@ -1132,9 +1138,7 @@ export default function BenchmarkVisualizer() {
         let lastElapsed = 0;
 
         for (let r = 0; r < rounds && !didTimeout; r++) {
-          // Pick a random scenario from the wheel each round
-          const sc = scenarioList[Math.floor(Math.random() * scenarioList.length)];
-          const input = generateBenchmarkInput(sz, sc);
+          const input = roundInputs[r];
 
           // Capture per-algo proof on first encounter
           if (!capturedAlgos.has(id)) {
