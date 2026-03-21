@@ -2221,6 +2221,7 @@ export default function BenchmarkVisualizer() {
 
                             const sampleCount = Math.min(Math.ceil(n * 0.05), 25);
                             const inputSample = generateBenchmarkInput(sampleCount, "random");
+                            const sortedSample = SORT_FNS[row.id]?.([...inputSample]) ?? [...inputSample].sort((a, b) => a - b);
 
                             const proof = {
                               proof_type: "space_complexity_verification",
@@ -2235,6 +2236,7 @@ export default function BenchmarkVisualizer() {
                                 note: `${sampleCount} of ${n.toLocaleString()} elements (${sampleCount === 25 ? "capped at 25" : "5%"}). Same distribution as benchmark inputs: uniform integers in [0, 10 000).`,
                                 count: sampleCount,
                                 values: inputSample,
+                                sorted: sortedSample,
                               },
                               generated_at: new Date().toISOString(),
                             };
