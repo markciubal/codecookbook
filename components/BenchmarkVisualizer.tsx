@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useState, useCallback, useRef } from "react";
-import { Play, Square, RotateCcw, Trophy, Zap, ChevronRight } from "lucide-react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
+import { Play, Square, RotateCcw, Trophy, LineChart, ChevronRight, Lock, Unlock } from "lucide-react";
 import { generateBenchmarkInput, SORT_FNS, type BenchmarkScenario } from "@/lib/benchmark";
 
 // ── Static config ─────────────────────────────────────────────────────────────
@@ -153,6 +153,57 @@ const SPACE_BIG_O_REFS = [
   { id: "n",    label: "O(n)",     fn: (n: number) => n,                           color: "#ffb74d" },
 ] as const;
 
+// ── Big-O curve fitting ───────────────────────────────────────────────────────
+
+const TIME_CANDIDATES = [
+  { label: "logn",   fn: (n: number) => Math.log2(Math.max(n, 2)) },
+  { label: "n",      fn: (n: number) => n },
+  { label: "n logn", fn: (n: number) => n * Math.log2(Math.max(n, 2)) },
+  { label: "n²",     fn: (n: number) => n * n },
+];
+
+const SPACE_CANDIDATES = [
+  { label: "1",    fn: (_: number) => 1 },
+  { label: "logn", fn: (n: number) => Math.log2(Math.max(n, 2)) },
+  { label: "n",    fn: (n: number) => n },
+];
+
+interface FitResult {
+  label: string;
+  k: number;
+  fn: (n: number) => number;
+  pctAt: (n: number, measured: number) => number;
+}
+
+function fitBigO(
+  points: { n: number; val: number }[],
+  candidates: { label: string; fn: (n: number) => number }[],
+): FitResult | null {
+  const valid = points.filter(p => p.val > 0 && p.n > 0);
+  if (valid.length < 2) return null;
+  let best: FitResult | null = null;
+  let bestRMS = Infinity;
+  for (const { label, fn } of candidates) {
+    let num = 0, den = 0;
+    for (const { n, val } of valid) { const f = fn(n); num += f * val; den += f * f; }
+    if (den === 0) continue;
+    const k = num / den;
+    let rss = 0;
+    for (const { n, val } of valid) {
+      const pred = k * fn(n);
+      if (pred === 0) continue;
+      const rel = (val - pred) / pred;
+      rss += rel * rel;
+    }
+    const rms = Math.sqrt(rss / valid.length);
+    if (rms < bestRMS) {
+      bestRMS = rms;
+      best = { label, k, fn, pctAt: (n, measured) => { const p = k * fn(n); return p === 0 ? 0 : ((measured - p) / p) * 100; } };
+    }
+  }
+  return best;
+}
+
 const SIZE_BUTTONS: { n: number; word: string }[] = [
   { n: 1,           word: "One" },
   { n: 10,          word: "Ten" },
@@ -232,9 +283,9 @@ function Spinner({ value, onChange, min, max, label }: {
   const dec = () => onChange(Math.max(min, value - 1));
   const inc = () => onChange(Math.min(max, value + 1));
   const btnStyle = (disabled: boolean): React.CSSProperties => ({
-    width: 26, height: 28, display: "flex", alignItems: "center", justifyContent: "center",
+    width: 22, height: 24, display: "flex", alignItems: "center", justifyContent: "center",
     background: "none", border: "none", cursor: disabled ? "not-allowed" : "pointer",
-    color: disabled ? "var(--color-border)" : "var(--color-muted)", fontSize: 15, lineHeight: 1,
+    color: disabled ? "var(--color-border)" : "var(--color-muted)", fontSize: 11, lineHeight: 1,
     flexShrink: 0, userSelect: "none",
   });
   return (
@@ -244,7 +295,7 @@ function Spinner({ value, onChange, min, max, label }: {
       background: "var(--color-surface-1)", overflow: "hidden",
     }} aria-label={label}>
       <button onClick={dec} disabled={value <= min} style={btnStyle(value <= min)}>−</button>
-      <span style={{ minWidth: 32, textAlign: "center", fontSize: 12, fontFamily: "monospace", color: "var(--color-text)", padding: "0 2px" }}>
+      <span style={{ minWidth: 26, textAlign: "center", fontSize: 11, fontFamily: "monospace", color: "var(--color-text)", padding: "0 2px" }}>
         {value}
       </span>
       <button onClick={inc} disabled={value >= max} style={btnStyle(value >= max)}>+</button>
@@ -285,51 +336,205 @@ function CurveChart({
   onNChange?: (n: number | null) => void;
   mode?: "time" | "space";
 }) {
+  const [locked, setLocked] = useState(true);
+  const [interactMode, setInteractMode] = useState<"brush" | "zoom">("brush");
+  const [yZoom, setYZoom] = useState(1.0);           // <1 = zoomed in on y (lower ceiling)
+  const [xRange, setXRange] = useState<[number, number] | null>(null); // size indices
+  const [dragStart,  setDragStart]  = useState<number | null>(null);
+  const [dragCur,    setDragCur]    = useState<number | null>(null);
+  const [dragStartY, setDragStartY] = useState<number | null>(null);
+  const [dragCurY,   setDragCurY]   = useState<number | null>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  // Reset zoom state when locking
+  useEffect(() => { if (locked) { setYZoom(1); setXRange(null); } }, [locked]);
+  // Reset x-range when the available sizes change
+  useEffect(() => { setXRange(null); }, [sizes]);
+
+  // Non-passive wheel listener so we can prevent page scroll while zooming
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (locked || interactMode !== "zoom") return;
+      e.preventDefault();
+      setYZoom(prev => Math.max(0.05, Math.min(1, prev * (e.deltaY > 0 ? 1.18 : 1 / 1.18))));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [locked, interactMode]);
+
   const VW = 560;
   const VH = 230;
   const pL = 60, pR = 82, pT = 15, pB = 42;
   const iW = VW - pL - pR;
   const iH = VH - pT - pB;
 
+  const visSizes = xRange ? sizes.slice(xRange[0], xRange[1] + 1) : sizes;
+
   const xAt = (n: number): number => {
-    const idx = sizes.indexOf(n);
+    const idx = visSizes.indexOf(n);
     if (idx < 0) return pL;
-    return sizes.length === 1 ? pL + iW / 2 : pL + (idx / (sizes.length - 1)) * iW;
+    return visSizes.length === 1 ? pL + iW / 2 : pL + (idx / (visSizes.length - 1)) * iW;
   };
 
   const getValue = (p: CurvePoint) => mode === "space" ? (p.spaceBytes ?? 0) : p.timeMs;
   const fmtY     = mode === "space" ? fmtBytes : fmtTime;
 
-  const allValues = algos.flatMap(id => (data[id] ?? []).map(getValue));
-  const maxY = Math.max(...allValues, mode === "space" ? 1 : 0.001);
-  const yAt = (v: number) => pT + iH - (v / maxY) * iH;
+  const allValues = algos.flatMap(id => (data[id] ?? []).filter(p => visSizes.includes(p.n)).map(getValue));
+  const rawMaxY   = Math.max(...allValues, mode === "space" ? 1 : 0.001);
+  const maxY      = rawMaxY * yZoom;
+  const yAt       = (v: number) => pT + iH - (v / maxY) * iH;
 
   const yTicks = [0.25, 0.5, 0.75, 1].map(f => ({ v: maxY * f, y: yAt(maxY * f) }));
 
-  const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
-    if (!onNChange || !sizes.length) return;
+  const getSvgX = (e: React.MouseEvent<SVGSVGElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * VW;
-    let best = sizes[0], bestDist = Infinity;
-    sizes.forEach(n => { const d = Math.abs(xAt(n) - x); if (d < bestDist) { bestDist = d; best = n; } });
-    onNChange(best);
+    return ((e.clientX - rect.left) / rect.width) * VW;
   };
 
+  const getSvgY = (e: React.MouseEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    return ((e.clientY - rect.top) / rect.height) * VH;
+  };
+
+  const snapToSize = (svgX: number) => {
+    let best = visSizes[0], bestDist = Infinity;
+    visSizes.forEach(n => { const d = Math.abs(xAt(n) - svgX); if (d < bestDist) { bestDist = d; best = n; } });
+    return best;
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const svgX = getSvgX(e);
+    if (locked) {
+      if (onNChange && visSizes.length) onNChange(snapToSize(svgX));
+      return;
+    }
+    if (dragStart !== null) {
+      setDragCur(svgX);
+      if (interactMode === "zoom") setDragCurY(getSvgY(e));
+    }
+  };
+
+  const handleMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (locked) return;
+    e.preventDefault();
+    const x = getSvgX(e);
+    setDragStart(x); setDragCur(x);
+    if (interactMode === "zoom") {
+      const y = getSvgY(e);
+      setDragStartY(y); setDragCurY(y);
+    }
+  };
+
+  const clearDrag = () => {
+    setDragStart(null); setDragCur(null);
+    setDragStartY(null); setDragCurY(null);
+  };
+
+  const applyXZoom = (x0: number, x1: number) => {
+    if (x1 - x0 <= 8) return;
+    const baseStart = xRange?.[0] ?? 0;
+    const baseLen   = xRange ? xRange[1] - xRange[0] : sizes.length - 1;
+    const f0 = Math.max(0, (x0 - pL) / iW);
+    const f1 = Math.min(1, (x1 - pL) / iW);
+    const i0 = baseStart + Math.round(f0 * baseLen);
+    const i1 = baseStart + Math.round(f1 * baseLen);
+    if (i1 > i0) setXRange([i0, Math.min(i1, sizes.length - 1)]);
+  };
+
+  const handleMouseUp = () => {
+    if (locked || dragStart === null || dragCur === null) { clearDrag(); return; }
+    const x0 = Math.min(dragStart, dragCur);
+    const x1 = Math.max(dragStart, dragCur);
+    if (interactMode === "brush") {
+      applyXZoom(x0, x1);
+    } else if (dragStartY !== null && dragCurY !== null) {
+      // box zoom: zoom x-range + y-range to the selected rectangle
+      applyXZoom(x0, x1);
+      const y0 = Math.min(dragStartY, dragCurY);
+      const y1 = Math.max(dragStartY, dragCurY);
+      if (y1 - y0 > 8) {
+        // y0 is visually higher = larger value; clamp to data area
+        const topVal = Math.max(0, (pT + iH - y0) / iH * maxY);
+        if (topVal > 0) setYZoom(prev => Math.max(0.05, (topVal / rawMaxY) * prev));
+      }
+    }
+    clearDrag();
+  };
+
+  const selRect = dragStart !== null && dragCur !== null
+    ? {
+        x: Math.max(pL, Math.min(dragStart, dragCur)),
+        w: Math.min(Math.abs(dragCur - dragStart), iW),
+        y: interactMode === "zoom" && dragStartY !== null && dragCurY !== null
+          ? Math.max(pT, Math.min(dragStartY, dragCurY)) : pT,
+        h: interactMode === "zoom" && dragStartY !== null && dragCurY !== null
+          ? Math.min(Math.abs(dragCurY - dragStartY), iH) : iH,
+      }
+    : null;
+
+  const isZoomed = yZoom < 0.99 || xRange !== null;
+
   // Build sorted bubble data for activeN column
-  const bubbles = activeN != null
+  const bubbles = activeN != null && visSizes.includes(activeN)
     ? algos
         .map(id => ({ id, pt: data[id]?.find(p => p.n === activeN) }))
         .filter((x): x is { id: string; pt: CurvePoint } => !!x.pt && !x.pt.timedOut)
         .sort((a, b) => getValue(a.pt) - getValue(b.pt))
     : [];
 
+  const overlayBtnBase: React.CSSProperties = btn("secondary", {
+    fontSize: 9, padding: "2px 5px", borderRadius: 4, background: "var(--color-surface-2)",
+  });
+
   return (
+    <div style={{ position: "relative", userSelect: "none" }}>
+      <div style={{ position: "absolute", top: 20, left: `calc(${(pL / VW * 100).toFixed(2)}% + 10px)`, zIndex: 2, display: "flex", flexDirection: "row", alignItems: "center", gap: 4 }}>
+        {/* Lock toggle */}
+        <button
+          onClick={() => setLocked(l => !l)}
+          style={{ ...overlayBtnBase, color: locked ? "var(--color-muted)" : "var(--color-accent)", border: `1px solid ${locked ? "var(--color-border)" : "var(--color-accent)"}` }}
+          title={locked ? "Unlock to enable interactions" : "Lock chart"}
+        >
+          {locked ? <Lock size={8} /> : <Unlock size={8} />}
+          {locked ? "locked" : "unlocked"}
+        </button>
+        {/* Mode toggle + reset — to the right of lock button when unlocked */}
+        {!locked && (
+          <>
+            <div style={{ display: "flex", borderRadius: 4, overflow: "hidden", border: "1px solid var(--color-border)" }}>
+              {(["brush", "zoom"] as const).map(m => (
+                <button
+                  key={m}
+                  onClick={() => setInteractMode(m)}
+                  style={btn(interactMode === m ? "primary" : "ghost", {
+                    fontSize: 9, padding: "2px 6px", borderRadius: 0,
+                    background: interactMode === m ? "var(--color-accent)" : "var(--color-surface-2)",
+                  })}
+                  title={m === "brush" ? "Drag to select x-range and zoom in" : "Drag or scroll to zoom y-axis"}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+            {isZoomed && (
+              <button onClick={() => { setYZoom(1); setXRange(null); }} style={{ ...overlayBtnBase, color: "var(--color-muted)" }}>
+                reset
+              </button>
+            )}
+          </>
+        )}
+      </div>
     <svg
+      ref={svgRef}
       viewBox={`0 0 ${VW} ${VH}`}
-      style={{ width: "100%", height: VH, display: "block", cursor: onNChange ? "crosshair" : "default" }}
+      style={{ width: "100%", height: "auto", aspectRatio: `${VW} / ${VH}`, display: "block", cursor: locked ? (onNChange ? "crosshair" : "default") : "crosshair" }}
       aria-label={mode === "space" ? "Space usage vs input size per algorithm" : "Performance curve: time vs input size per algorithm"}
       onMouseMove={handleMouseMove}
-      onMouseLeave={() => onNChange?.(null)}
+      onMouseDown={handleMouseDown}
+      onMouseUp={handleMouseUp}
+      onMouseLeave={() => { onNChange?.(null); clearDrag(); }}
     >
       {/* horizontal grid + y labels */}
       {yTicks.map(({ v, y }) => (
@@ -346,9 +551,9 @@ function CurveChart({
       <line x1={pL} y1={pT + iH} x2={VW - pR} y2={pT + iH} stroke="var(--color-border)" strokeWidth={0.8} />
 
       {/* Big-O reference curves — calibrated to actual data, labeled with predicted values */}
-      {sizes.length >= 1 && (() => {
+      {visSizes.length >= 1 && (() => {
         let calibC = 0;
-        const calN = sizes.find(n => n >= 2);
+        const calN = visSizes.find(n => n >= 2);
         if (calN !== undefined) {
           if (mode === "space") {
             // Anchor O(n) to the largest space value at the smallest valid n.
@@ -374,7 +579,7 @@ function CurveChart({
         if (calibC <= 0) return null; // time mode only — space always has calibC
 
         const refs = mode === "space" ? SPACE_BIG_O_REFS : BIG_O_REFS;
-        const maxN = sizes[sizes.length - 1];
+        const maxN = visSizes[visSizes.length - 1];
         const STEPS = 80;
 
         return refs.map(ref => {
@@ -385,10 +590,10 @@ function CurveChart({
           for (let i = 0; i <= STEPS; i++) {
             const t = i / STEPS;
             const x = pL + t * iW;
-            const fi = t * (sizes.length - 1);
+            const fi = t * (visSizes.length - 1);
             const lo = Math.floor(fi), hi2 = Math.ceil(fi);
             const ft = fi - lo;
-            const n = lo === hi2 ? sizes[lo] : sizes[lo] * Math.pow(sizes[hi2] / sizes[lo], ft);
+            const n = lo === hi2 ? visSizes[lo] : visSizes[lo] * Math.pow(visSizes[hi2] / visSizes[lo], ft);
             pts.push(`${x.toFixed(1)},${refY(n).toFixed(1)}`);
           }
 
@@ -423,7 +628,7 @@ function CurveChart({
       })()}
 
       {/* vertical grid + x tick labels */}
-      {sizes.map(n => {
+      {visSizes.map(n => {
         const x = xAt(n);
         return (
           <g key={n}>
@@ -535,7 +740,15 @@ function CurveChart({
           </g>
         );
       })()}
+      {/* Selection rect (brush = full height, zoom = box) */}
+      {selRect && (
+        <rect x={selRect.x} y={selRect.y} width={selRect.w} height={selRect.h}
+          fill="var(--color-accent)" opacity={0.12}
+          stroke="var(--color-accent)" strokeWidth={1}
+          style={{ pointerEvents: "none" }} />
+      )}
     </svg>
+    </div>
   );
 }
 
@@ -761,6 +974,27 @@ function ProofSlider({
 
 // ── Playback strip ─────────────────────────────────────────────────────────────
 
+// ── Shared button style helper ────────────────────────────────────────────────
+
+function btn(
+  variant: "primary" | "secondary" | "danger" | "ghost",
+  extra?: React.CSSProperties
+): React.CSSProperties {
+  const base: React.CSSProperties = {
+    display: "inline-flex", alignItems: "center", gap: 4,
+    padding: "3px 8px", fontSize: 11, fontFamily: "monospace", fontWeight: 500,
+    borderRadius: 5, cursor: "pointer", border: "none", userSelect: "none",
+    lineHeight: 1.4,
+  };
+  const variants: Record<string, React.CSSProperties> = {
+    primary:   { background: "var(--color-accent)", color: "#fff" },
+    danger:    { background: "var(--color-state-swap)", color: "#fff" },
+    secondary: { background: "var(--color-surface-1)", border: "1px solid var(--color-border)", color: "var(--color-muted)" },
+    ghost:     { background: "none", color: "var(--color-muted)" },
+  };
+  return { ...base, ...variants[variant], ...extra };
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function BenchmarkVisualizer() {
@@ -788,6 +1022,10 @@ export default function BenchmarkVisualizer() {
   const [activeProofAlgo, setActiveProofAlgo] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [hoverN, setHoverN] = useState<number | null>(null);
+  const [hoverBigO, setHoverBigO] = useState<{ id: string; type: "time" | "space" } | null>(null);
+  type SortCol = "name" | "speed" | "time" | "tvsb" | "tbigo" | "space" | "svsb" | "sbigo";
+  const [sortCol, setSortCol] = useState<SortCol>("time");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [chartMode, setChartMode] = useState<"time" | "space">("time");
   const [customInput, setCustomInput] = useState("");
   const [pendingCustomN, setPendingCustomN] = useState<number | null>(null);
@@ -1054,34 +1292,20 @@ export default function BenchmarkVisualizer() {
             borderRadius: 12, padding: "24px 28px", maxWidth: 360, width: "90%",
             boxShadow: "0 8px 40px rgba(0,0,0,0.4)",
           }}>
-            <p style={{ fontSize: 13, fontWeight: 700, color: "var(--color-state-swap)", marginBottom: 8 }}>
+            <p style={{ fontSize: 11, fontWeight: 700, color: "var(--color-state-swap)", marginBottom: 8 }}>
               ⚠ Large input warning
             </p>
-            <p style={{ fontSize: 12, color: "var(--color-text)", marginBottom: 6, lineHeight: 1.5 }}>
+            <p style={{ fontSize: 11, color: "var(--color-text)", marginBottom: 6, lineHeight: 1.5 }}>
               n = <span style={{ fontFamily: "monospace", fontWeight: 700 }}>{pendingCustomN.toLocaleString()}</span> is above 100,000,000.
             </p>
-            <p style={{ fontSize: 12, color: "var(--color-muted)", marginBottom: 20, lineHeight: 1.5 }}>
+            <p style={{ fontSize: 11, color: "var(--color-muted)", marginBottom: 20, lineHeight: 1.5 }}>
               Allocating and sorting an array this large may take a very long time or freeze the browser tab. Only Logos Sort and Tim Sort are allowed at this size.
             </p>
             <div className="flex gap-2 justify-end">
-              <button
-                onClick={cancelCustomN}
-                style={{
-                  padding: "6px 16px", borderRadius: 6, fontSize: 12, fontWeight: 500,
-                  background: "var(--color-surface-3)", border: "1px solid var(--color-border)",
-                  color: "var(--color-muted)", cursor: "pointer",
-                }}
-              >
+              <button onClick={cancelCustomN} style={btn("secondary", { padding: "4px 14px" })}>
                 Cancel
               </button>
-              <button
-                onClick={confirmCustomN}
-                style={{
-                  padding: "6px 16px", borderRadius: 6, fontSize: 12, fontWeight: 600,
-                  background: "var(--color-state-swap)", border: "none",
-                  color: "#fff", cursor: "pointer",
-                }}
-              >
+              <button onClick={confirmCustomN} style={btn("danger", { padding: "4px 14px" })}>
                 Add anyway
               </button>
             </div>
@@ -1094,7 +1318,7 @@ export default function BenchmarkVisualizer() {
         style={{ borderBottom: "1px solid var(--color-border)" }}
       >
         <div className="flex items-center gap-2">
-          <Zap size={18} style={{ color: "var(--color-accent)" }} strokeWidth={1.75} />
+          <LineChart size={18} style={{ color: "var(--color-accent)" }} strokeWidth={1.75} />
           <h1 className="text-xl font-bold">Algorithm Benchmark</h1>
         </div>
         <p className="text-xs" style={{ color: "var(--color-muted)" }}>
@@ -1136,13 +1360,7 @@ export default function BenchmarkVisualizer() {
                     <button
                       key={label}
                       onClick={() => setSelectedSizes(new Set(sizes))}
-                      style={{
-                        padding: "3px 10px", borderRadius: 6, fontSize: 9,
-                        fontFamily: "monospace", fontWeight: 500,
-                        background: "var(--color-surface-1)",
-                        border: "1px solid var(--color-border)",
-                        color: "var(--color-muted)", cursor: "pointer",
-                      }}
+                      style={btn("secondary", { fontSize: 9, padding: "2px 8px" })}
                     >
                       {label}
                     </button>
@@ -1158,15 +1376,14 @@ export default function BenchmarkVisualizer() {
                         key={n}
                         onClick={() => on ? removeSize(n) : addSize(n)}
                         disabled={disabled}
-                        style={{
-                          display: "flex", flexDirection: "column", alignItems: "center",
-                          padding: "4px 7px", borderRadius: 6,
+                        style={btn(on ? "primary" : "secondary", {
+                          flexDirection: "column", padding: "3px 7px",
                           background: on ? "rgba(139,58,42,0.12)" : "var(--color-surface-1)",
                           border: `1px solid ${on ? "var(--color-accent)" : "var(--color-border)"}`,
                           color: on ? "var(--color-accent)" : "var(--color-muted)",
                           cursor: disabled ? "not-allowed" : "pointer",
-                          opacity: disabled ? 0.35 : 1, minWidth: 56,
-                        }}
+                          opacity: disabled ? 0.35 : 1, minWidth: 52,
+                        })}
                       >
                         <span style={{ fontSize: 9, fontFamily: "monospace", fontWeight: on ? 700 : 500, lineHeight: 1.2 }}>
                           {n.toLocaleString()}
@@ -1179,15 +1396,11 @@ export default function BenchmarkVisualizer() {
                   <button
                     onClick={() => setSelectedSizes(new Set())}
                     disabled={selectedSizes.size === 0}
-                    style={{
-                      display: "flex", flexDirection: "column", alignItems: "center",
-                      padding: "6px 10px", borderRadius: 6,
-                      background: "var(--color-surface-1)",
-                      border: "1px solid var(--color-border)",
-                      color: "var(--color-muted)",
+                    style={btn("secondary", {
+                      flexDirection: "column", padding: "3px 10px",
                       cursor: selectedSizes.size === 0 ? "not-allowed" : "pointer",
-                      opacity: selectedSizes.size === 0 ? 0.35 : 1, minWidth: 72,
-                    }}
+                      opacity: selectedSizes.size === 0 ? 0.35 : 1, minWidth: 52,
+                    })}
                   >
                     <span style={{ fontSize: 9, fontFamily: "monospace", fontWeight: 500, lineHeight: 1.2 }}>Clear</span>
                   </button>
@@ -1211,11 +1424,7 @@ export default function BenchmarkVisualizer() {
                       outline: "none",
                     }}
                   />
-                  <button type="submit" style={{
-                    padding: "4px 10px", fontSize: 11, borderRadius: 6,
-                    background: "var(--color-surface-3)", border: "1px solid var(--color-border)",
-                    color: "var(--color-muted)", cursor: "pointer",
-                  }}>Add</button>
+                  <button type="submit" style={btn("secondary")}>Add</button>
                 </form>
 
                 {/* Custom sizes (not in SIZE_BUTTONS) shown as removable chips */}
@@ -1225,7 +1434,7 @@ export default function BenchmarkVisualizer() {
                     {n.toLocaleString()}
                     <button onClick={() => removeSize(n)} style={{
                       background: "none", border: "none", cursor: "pointer",
-                      color: "var(--color-accent)", fontSize: 13, lineHeight: 1, padding: 0, marginLeft: 2,
+                      color: "var(--color-accent)", fontSize: 11, lineHeight: 1, padding: 0, marginLeft: 2,
                     }}>×</button>
                   </span>
                 ))}
@@ -1324,8 +1533,8 @@ export default function BenchmarkVisualizer() {
               <div className="mb-4">
                 <button
                   onClick={() => setAdvancedOpen(o => !o)}
-                  className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wider"
-                  style={{ background: "none", border: "none", cursor: "pointer", color: "var(--color-muted)", padding: 0 }}
+                  className="flex items-center gap-1"
+                  style={btn("ghost", { padding: 0, fontSize: 9, fontWeight: 600, letterSpacing: "0.07em", textTransform: "uppercase" })}
                 >
                   <ChevronRight size={12} style={{ transform: advancedOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s ease" }} />
                   Advanced
@@ -1394,46 +1603,28 @@ export default function BenchmarkVisualizer() {
                 <button
                   onClick={run}
                   disabled={!canRun}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium disabled:opacity-50"
-                  style={{
-                    background: "var(--color-accent)",
-                    color: "#fff",
-                    border: "none",
-                    cursor: canRun ? "pointer" : "not-allowed",
-                  }}
+                  style={btn("primary", { padding: "4px 12px", opacity: canRun ? 1 : 0.5, cursor: canRun ? "pointer" : "not-allowed" })}
                 >
                   <Play size={11} strokeWidth={2} />
                   {status === "running"
                     ? `${currentAlgo ? ALGO_NAMES[currentAlgo] : "…"} at n=${currentN?.toLocaleString()} (${progress.done}/${progress.total})`
-                    : `Run${sortedSizes.length > 1 ? ` · ${sortedSizes.length} sizes` : ""}`}
+                    : <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 1 }}>
+                        <span>Run</span>
+                        <span style={{ fontSize: 9, opacity: 0.8, fontWeight: 400 }}>
+                          {activeAlgos.length} algo{activeAlgos.length !== 1 ? "s" : ""} · {sortedSizes.length} size{sortedSizes.length !== 1 ? "s" : ""} · {rounds} run{rounds !== 1 ? "s" : ""} · discard {warmup}
+                        </span>
+                      </span>
+                  }
                 </button>
 
                 {status === "running" && (
-                  <button
-                    onClick={stop}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium"
-                    style={{
-                      background: "var(--color-state-swap)",
-                      color: "#fff",
-                      border: "none",
-                      cursor: "pointer",
-                    }}
-                  >
+                  <button onClick={stop} style={btn("danger", { padding: "4px 12px" })}>
                     <Square size={11} strokeWidth={2} fill="currentColor" /> Stop
                   </button>
                 )}
 
                 {status === "done" && (
-                  <button
-                    onClick={reset}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium"
-                    style={{
-                      background: "var(--color-surface-3)",
-                      border: "1px solid var(--color-border)",
-                      color: "var(--color-muted)",
-                      cursor: "pointer",
-                    }}
-                  >
+                  <button onClick={reset} style={btn("secondary", { padding: "4px 12px" })}>
                     <RotateCcw size={11} strokeWidth={1.75} /> Reset
                   </button>
                 )}
@@ -1448,37 +1639,14 @@ export default function BenchmarkVisualizer() {
             {(hasCurveData || status === "running") ? (
               <div
                 className="rounded-xl p-4"
-                style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)" }}
+                style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)", display: "flex", flexDirection: "column" }}
               >
                 {/* Results header */}
                 <div className="flex items-start justify-between mb-3">
                   <div>
-                    <div className="flex items-center gap-2 mb-0.5">
-                      <p className="font-semibold text-sm" style={{ color: "var(--color-text)" }}>
-                        {chartMode === "time" ? "Performance curve" : "Space usage curve"}
-                      </p>
-                      {/* Time / Space toggle */}
-                      <div className="flex rounded overflow-hidden" style={{ border: "1px solid var(--color-border)" }}>
-                        {(["time", "space"] as const).map(m => (
-                          <button
-                            key={m}
-                            onClick={() => setChartMode(m)}
-                            style={{
-                              padding: "1px 8px",
-                              fontSize: 10,
-                              fontFamily: "monospace",
-                              fontWeight: chartMode === m ? 700 : 400,
-                              background: chartMode === m ? "var(--color-accent)" : "var(--color-surface-1)",
-                              color: chartMode === m ? "#fff" : "var(--color-muted)",
-                              border: "none",
-                              cursor: "pointer",
-                            }}
-                          >
-                            {m}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
+                    <p className="font-semibold text-sm mb-0.5" style={{ color: "var(--color-text)" }}>
+                      {chartMode === "time" ? "Performance curve" : "Space usage curve"}
+                    </p>
                     {runConfig && (
                       <p className="font-mono font-normal text-xs" style={{ color: "var(--color-muted)" }}>
                         {runConfig.scenarios.join(", ")} · {runConfig.rounds} rounds, {runConfig.warmup} discarded
@@ -1501,9 +1669,27 @@ export default function BenchmarkVisualizer() {
                   )}
                 </div>
 
+                <div style={{ order: 2 }}>
                 {/* Curve chart */}
                 {hasCurveData && (
                   <>
+                    {/* Time / Space toggle — centred above the chart */}
+                    <div style={{ display: "flex", justifyContent: "center", marginBottom: 4, marginTop: 15 }}>
+                    <div className="flex rounded overflow-hidden" style={{ border: "1px solid var(--color-border)" }}>
+                      {(["time", "space"] as const).map(m => (
+                        <button
+                          key={m}
+                          onClick={() => setChartMode(m)}
+                          style={btn(chartMode === m ? "primary" : "ghost", {
+                            padding: "2px 10px", fontSize: 10, borderRadius: 0,
+                            background: chartMode === m ? "var(--color-accent)" : "var(--color-surface-1)",
+                          })}
+                        >
+                          {m}
+                        </button>
+                      ))}
+                    </div>
+                    </div>{/* end centering wrapper */}
                     <CurveChart
                       data={curveDataExt} sizes={chartSizes} algos={chartAlgos}
                       highlight={activeProofAlgo}
@@ -1536,7 +1722,7 @@ export default function BenchmarkVisualizer() {
                 {/* Placeholder while first result loads */}
                 {!hasCurveData && status === "running" && (
                   <div className="flex items-center justify-center"
-                    style={{ height: 230, color: "var(--color-muted)", fontSize: 13 }}>
+                    style={{ height: 230, color: "var(--color-muted)", fontSize: 11 }}>
                     Waiting for first result…
                   </div>
                 )}
@@ -1571,10 +1757,13 @@ export default function BenchmarkVisualizer() {
                   </div>
                 )}
 
+                </div>{/* end order:2 chart section */}
+
+                <div style={{ order: 1 }}>
                 {/* Rankings table at largest completed n */}
                 {summaryResults.length > 0 && (() => {
                   const COL = { bl: "1px solid var(--color-border)", pl: 4 } as const;
-                  const BAR_W = 80; // fixed speed bar px
+                  const BAR_W = 40; // each bar column (speed + space) is 40px
 
                   // Measure name column: longest display name × ~5.5px + rank(14) + dot(5) + gaps(10)
                   const longestName = Math.max(...tableRows.map(r => {
@@ -1589,6 +1778,11 @@ export default function BenchmarkVisualizer() {
                       .map(r => curveDataExt[r.id]?.find(p => p.n === largestDone)?.spaceBytes ?? Infinity)
                       .filter(v => v > 0 && v < Infinity)
                   );
+                  const spaceSlowest = Math.max(
+                    ...summaryResults
+                      .map(r => curveDataExt[r.id]?.find(p => p.n === largestDone)?.spaceBytes ?? 0),
+                    1
+                  );
 
                   // Shared cell style helpers — data cols share remaining space evenly via flex:1
                   const cellHd = (i: number): React.CSSProperties => ({
@@ -1599,6 +1793,54 @@ export default function BenchmarkVisualizer() {
                     flex: 1, textAlign: "center", fontFamily: "monospace",
                     color, borderLeft: i > 0 ? COL.bl : undefined, paddingLeft: i > 0 ? COL.pl : 0, overflow: "hidden",
                   });
+
+                  const handleSort = (col: SortCol) => {
+                    if (sortCol === col) setSortDir(d => d === "asc" ? "desc" : "asc");
+                    else { setSortCol(col); setSortDir("asc"); }
+                  };
+                  const sortIcon = (col: SortCol) => sortCol === col ? (sortDir === "asc" ? " ↑" : " ↓") : "";
+                  const hdBtn = (col: SortCol, i: number): React.CSSProperties => ({
+                    ...cellHd(i),
+                    cursor: "pointer", userSelect: "none", background: "none", border: "none", padding: 0,
+                    color: sortCol === col ? "var(--color-text)" : "var(--color-muted)",
+                  });
+
+                  // Precompute per-algo sort keys (space/fit values)
+                  const algoSortKeys = new Map(summaryResults.map(r => {
+                    const sv = curveDataExt[r.id]?.find(p => p.n === largestDone)?.spaceBytes ?? 0;
+                    const sr = sv > 0 && spaceFastest > 0 && spaceFastest < Infinity ? sv / spaceFastest : 0;
+                    const tp = (curveDataExt[r.id] ?? []).filter(p => p.timeMs > 0).map(p => ({ n: p.n, val: p.timeMs }));
+                    const sp = (curveDataExt[r.id] ?? []).filter(p => (p.spaceBytes ?? 0) > 0).map(p => ({ n: p.n, val: p.spaceBytes! }));
+                    const tf = fitBigO(tp, TIME_CANDIDATES);
+                    const sf = fitBigO(sp, SPACE_CANDIDATES);
+                    return [r.id, {
+                      spaceVal: sv, spaceRatio: sr,
+                      tLabel: tf?.label ?? (ALGO_TIME[r.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? ""),
+                      sLabel: sf?.label ?? (ALGO_SPACE[r.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? ""),
+                    }];
+                  }));
+
+                  const algoName = (id: string) => id === "timsort-js" ? "TimSort (est)" : (ALGO_NAMES[id] ?? "");
+                  const sortedAlgoRows = [...summaryResults.map(r => ({ ...r, kind: "algo" as const }))].sort((a, b) => {
+                    const ak = algoSortKeys.get(a.id)!;
+                    const bk = algoSortKeys.get(b.id)!;
+                    let cmp = 0;
+                    switch (sortCol) {
+                      case "name":  cmp = algoName(a.id).localeCompare(algoName(b.id)); break;
+                      case "speed":
+                      case "time":  cmp = a.timeMs - b.timeMs; break;
+                      case "tvsb":  cmp = a.timeMs - b.timeMs; break;
+                      case "tbigo": cmp = ak.tLabel.localeCompare(bk.tLabel); break;
+                      case "space": cmp = ak.spaceVal - bk.spaceVal; break;
+                      case "svsb":  cmp = ak.spaceRatio - bk.spaceRatio; break;
+                      case "sbigo": cmp = ak.sLabel.localeCompare(bk.sLabel); break;
+                    }
+                    return sortDir === "asc" ? cmp : -cmp;
+                  });
+                  const sortedTableRows: TableRow[] = [
+                    ...sortedAlgoRows,
+                    ...refRows.sort((a, b) => a.timeMs - b.timeMs),
+                  ];
 
                   return (
                     <div className="mt-4 pt-4" style={{ borderTop: "1px solid var(--color-border)", fontSize: 10 }}>
@@ -1611,20 +1853,28 @@ export default function BenchmarkVisualizer() {
 
                       {/* Column headers */}
                       <div className="flex items-center mb-1.5">
-                        <div style={{ width: NAME_W, flexShrink: 0 }} />
-                        <div style={{ width: BAR_W, flexShrink: 0, textAlign: "center", fontSize: 8, fontFamily: "monospace", color: "var(--color-muted)" }}>speed</div>
+                        <button onClick={() => handleSort("name")} style={{ width: NAME_W, flexShrink: 0, textAlign: "left", fontSize: 8, fontFamily: "monospace", cursor: "pointer", userSelect: "none", background: "none", border: "none", padding: "0 4px 0 18px", color: sortCol === "name" ? "var(--color-text)" : "var(--color-muted)" }}>
+                          name{sortIcon("name")}
+                        </button>
+                        <button onClick={() => handleSort("speed")} style={{ width: BAR_W, flexShrink: 0, textAlign: "center", fontSize: 8, fontFamily: "monospace", cursor: "pointer", userSelect: "none", background: "none", border: "none", padding: 0, color: sortCol === "speed" ? "var(--color-text)" : "var(--color-muted)" }}>
+                          speed{sortIcon("speed")}
+                        </button>
+                        <button onClick={() => handleSort("space")} style={{ width: BAR_W, flexShrink: 0, textAlign: "center", fontSize: 8, fontFamily: "monospace", cursor: "pointer", userSelect: "none", background: "none", border: "none", padding: 0, color: sortCol === "space" ? "var(--color-text)" : "var(--color-muted)" }}>
+                          space{sortIcon("space")}
+                        </button>
                         <div style={{ flex: 1, display: "flex", borderLeft: COL.bl }}>
-                          <span style={cellHd(0)}>t</span>
-                          <span style={cellHd(1)}>vs best</span>
-                          <span style={cellHd(1)}>big O</span>
-                          <span style={cellHd(1)}>s</span>
-                          <span style={cellHd(1)}>vs best</span>
+                          <button style={hdBtn("time", 0)} onClick={() => handleSort("time")}>time{sortIcon("time")}</button>
+                          <button style={hdBtn("tvsb", 1)} onClick={() => handleSort("tvsb")}>t vs best{sortIcon("tvsb")}</button>
+                          <button style={hdBtn("tbigo", 1)} onClick={() => handleSort("tbigo")}>t big O{sortIcon("tbigo")}</button>
+                          <button style={hdBtn("space", 1)} onClick={() => handleSort("space")}>space{sortIcon("space")}</button>
+                          <button style={hdBtn("svsb", 1)} onClick={() => handleSort("svsb")}>s vs best{sortIcon("svsb")}</button>
+                          <button style={hdBtn("sbigo", 1)} onClick={() => handleSort("sbigo")}>s big O{sortIcon("sbigo")}</button>
                         </div>
                       </div>
 
                       {/* Rows */}
                       <div className="flex flex-col gap-1.5">
-                        {tableRows.map((row) => {
+                        {sortedTableRows.map((row) => {
                           if (row.kind === "ref") {
                             const barPct    = Math.min(100, summarySlowest > 0 ? (row.timeMs / summarySlowest) * 100 : 0);
                             const overScale = row.timeMs > summarySlowest;
@@ -1643,10 +1893,14 @@ export default function BenchmarkVisualizer() {
                                     }} />
                                   </div>
                                 </div>
+                                <div style={{ width: BAR_W, flexShrink: 0, padding: "0 5px", display: "flex", alignItems: "center" }}>
+                                  <div style={{ flex: 1, borderRadius: 3, background: "var(--color-surface-3)", height: 8 }} />
+                                </div>
                                 <div style={{ flex: 1, display: "flex", borderLeft: COL.bl }}>
                                   <div style={cell(row.color, 0)}>{overScale ? "↑" : ""}{fmtPredicted(row.timeMs)}</div>
                                   <div style={cell("var(--color-muted)", 1)}>{(row.timeMs / summaryFastest).toFixed(1)}×</div>
-                                  <div style={cell("var(--color-muted)", 1)}>theory</div>
+                                  <div style={cell("var(--color-muted)", 1)}>{row.label.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn")}</div>
+                                  <div style={cell("var(--color-muted)", 1)}>—</div>
                                   <div style={cell("var(--color-muted)", 1)}>—</div>
                                   <div style={cell("var(--color-muted)", 1)}>—</div>
                                 </div>
@@ -1660,11 +1914,21 @@ export default function BenchmarkVisualizer() {
                           const spaceVal   = curveDataExt[row.id]?.find(p => p.n === largestDone)?.spaceBytes;
                           const spaceRatio = spaceVal && spaceFastest > 0 && spaceFastest < Infinity ? spaceVal / spaceFastest : null;
                           const timeStr    = fmtTime(row.timeMs);
-                          const bigOStr    = ALGO_TIME[row.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? "—";
                           const spaceStr   = spaceVal != null && spaceVal > 0
                             ? fmtBytes(spaceVal)
                             : (ALGO_SPACE[row.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace("log n", "logn") ?? "—");
                           const spRatioStr = spaceRatio != null ? (spaceRatio < 1.05 ? "—" : `${spaceRatio.toFixed(1)}×`) : "—";
+                          const timePts  = (curveDataExt[row.id] ?? []).filter(p => p.timeMs > 0).map(p => ({ n: p.n, val: p.timeMs }));
+                          const spacePts = (curveDataExt[row.id] ?? []).filter(p => (p.spaceBytes ?? 0) > 0).map(p => ({ n: p.n, val: p.spaceBytes! }));
+                          const timeFit  = fitBigO(timePts, TIME_CANDIDATES);
+                          const spaceFit = fitBigO(spacePts, SPACE_CANDIDATES);
+                          const tBigOLabel = timeFit?.label ?? (ALGO_TIME[row.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? "—");
+                          const sBigOLabel = spaceFit?.label ?? (ALGO_SPACE[row.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? "—");
+                          const tPct = largestDone != null && timeFit ? timeFit.pctAt(largestDone, row.timeMs) : null;
+                          const sPct = largestDone != null && spaceFit && spaceVal ? spaceFit.pctAt(largestDone, spaceVal) : null;
+                          const isHoverT = hoverBigO?.id === row.id && hoverBigO.type === "time";
+                          const isHoverS = hoverBigO?.id === row.id && hoverBigO.type === "space";
+                          const fmtPct = (pct: number) => `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
                           const canDl    = largestDone != null;
                           const handleDl = () => {
                             if (!largestDone) return;
@@ -1735,7 +1999,7 @@ export default function BenchmarkVisualizer() {
                                     <span className="truncate" style={{ color: "var(--color-text)", fontWeight: row.rank === 1 ? 600 : 400 }}>{ALGO_NAMES[row.id]}</span>
                                   )}
                                   {row.id === "timsort-js" && (
-                                    <span style={{ fontSize: 7, color: "var(--color-muted)", fontWeight: 400 }}>JS estimate</span>
+                                    <span style={{ fontSize: 8, color: "var(--color-muted)", fontWeight: 400 }}>JS estimate</span>
                                   )}
                                 </span>
                               </div>
@@ -1747,16 +2011,40 @@ export default function BenchmarkVisualizer() {
                                   }} />
                                 </div>
                               </div>
+                              <div style={{ width: BAR_W, flexShrink: 0, padding: "0 5px", display: "flex", alignItems: "center" }}>
+                                <div style={{ flex: 1, borderRadius: 3, overflow: "hidden", background: "var(--color-surface-3)", height: 8 }}>
+                                  <div style={{
+                                    width: `${spaceVal ? Math.min(100, (spaceVal / spaceSlowest) * 100) : 0}%`,
+                                    height: "100%", borderRadius: 3, minWidth: spaceVal ? 3 : 0,
+                                    background: dotColor, opacity: 0.5, transition: "width 0.35s ease",
+                                  }} />
+                                </div>
+                              </div>
                               <div style={{ flex: 1, display: "flex", borderLeft: COL.bl }}>
                                 <div style={cell(rankClr, 0)}>{timeStr}</div>
                                 <div style={cell("var(--color-muted)", 1)}>{row.rank === 1 ? "—" : `${(row.timeMs / summaryFastest).toFixed(1)}×`}</div>
-                                <div style={{ ...cell("var(--color-text)", 1), opacity: 0.75 }} title={ALGO_TIME[row.id]}>{bigOStr}</div>
+                                <div
+                                  style={{ ...cell("var(--color-text)", 1), opacity: 0.75, cursor: "default" }}
+                                  title={ALGO_TIME[row.id]}
+                                  onMouseEnter={() => setHoverBigO({ id: row.id, type: "time" })}
+                                  onMouseLeave={() => setHoverBigO(null)}
+                                >
+                                  {isHoverT && tPct !== null ? fmtPct(tPct) : tBigOLabel}
+                                </div>
                                 <div style={{ ...cell("var(--color-text)", 1), opacity: 0.75 }} title={ALGO_SPACE[row.id]}>
                                   {canDl ? (
-                                    <a onClick={handleDl} style={{ color: "var(--color-accent)", cursor: "pointer", textDecoration: "underline", fontFamily: "monospace" }} title={`Download input array (${fmtBytes(dlSpaceB)})`}>{spaceStr}</a>
+                                    <a onClick={handleDl} style={{ color: "var(--color-accent)", cursor: "pointer", textDecoration: "underline", fontFamily: "monospace" }} title={`Download space proof (${fmtBytes(spaceVal ?? 0)})`}>{spaceStr}</a>
                                   ) : spaceStr}
                                 </div>
                                 <div style={cell("var(--color-muted)", 1)}>{spRatioStr}</div>
+                                <div
+                                  style={{ ...cell("var(--color-text)", 1), opacity: 0.75, cursor: "default" }}
+                                  title={ALGO_SPACE[row.id]}
+                                  onMouseEnter={() => setHoverBigO({ id: row.id, type: "space" })}
+                                  onMouseLeave={() => setHoverBigO(null)}
+                                >
+                                  {isHoverS && sPct !== null ? fmtPct(sPct) : sBigOLabel}
+                                </div>
                               </div>
                             </div>
                           );
@@ -1765,6 +2053,7 @@ export default function BenchmarkVisualizer() {
                     </div>
                   );
                 })()}
+                </div>{/* end order:1 rankings section */}
               </div>
             ) : (
               <div
@@ -1774,7 +2063,7 @@ export default function BenchmarkVisualizer() {
                   border: "1px solid var(--color-border)",
                   minHeight: 200,
                   color: "var(--color-muted)",
-                  fontSize: 13,
+                  fontSize: 11,
                 }}
               >
                 Run a benchmark to see the curve.

@@ -5,7 +5,7 @@ import CytoscapeBase, { type CytoscapeBaseHandle } from "./CytoscapeBase";
 import CodePanel from "./CodePanel";
 import CodeModal from "./CodeModal";
 import PanelModal from "./PanelModal";
-import { Info } from "lucide-react";
+import { Info, Layers } from "lucide-react";
 
 const MAX_SIZE = 12;
 const NODE_D   = 56; // diameter — equal width & height makes a circle
@@ -206,6 +206,7 @@ export default function StackVisualizer() {
       {/* Header */}
       <div className="px-5 pt-6 pb-4" style={{ borderBottom: "1px solid var(--color-border)" }}>
         <div className="flex flex-wrap items-center gap-2 mb-1">
+          <Layers size={20} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
           <h1 className="text-2xl font-bold">Stack</h1>
           <Pill text="LIFO" purple />
           <Pill text="O(1)" />

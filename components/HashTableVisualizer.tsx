@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import CodePanel from "./CodePanel";
 import CodeModal from "./CodeModal";
 import PanelModal from "./PanelModal";
-import { Info } from "lucide-react";
+import { Info, Hash } from "lucide-react";
 
 const TABLE_SIZE = 11;
 
@@ -104,6 +104,7 @@ export default function HashTableVisualizer() {
       {/* Header */}
       <div className="px-5 pt-6 pb-4" style={{ borderBottom: "1px solid var(--color-border)" }}>
         <div className="flex flex-wrap items-center gap-2 mb-1">
+          <Hash size={20} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
           <h1 className="text-2xl font-bold">Hash Table</h1>
           <Pill text="O(1) avg" />
           <Pill text="Chaining" green />

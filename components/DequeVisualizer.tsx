@@ -5,7 +5,7 @@ import CytoscapeBase, { type CytoscapeBaseHandle } from "./CytoscapeBase";
 import CodePanel from "./CodePanel";
 import CodeModal from "./CodeModal";
 import PanelModal from "./PanelModal";
-import { Info } from "lucide-react";
+import { Info, ArrowLeftRight } from "lucide-react";
 
 const MAX_SIZE = 10;
 const NODE_D   = 56;
@@ -247,6 +247,7 @@ export default function DequeVisualizer() {
     <div className="flex flex-col min-h-dvh" style={{ background: "var(--color-bg)" }}>
       <div className="px-5 pt-6 pb-4" style={{ borderBottom: "1px solid var(--color-border)" }}>
         <div className="flex flex-wrap items-center gap-2 mb-1">
+          <ArrowLeftRight size={20} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
           <h1 className="text-2xl font-bold">Deque</h1>
           <Pill text="FIFO+LIFO" green />
           <Pill text="O(1)" />

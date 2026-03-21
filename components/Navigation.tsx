@@ -10,6 +10,7 @@ import {
   Heart,
   Menu,
   X,
+  Zap,
 } from "lucide-react";
 import { BENCHMARK, SORTING_ALGORITHMS, DATA_STRUCTURES } from "@/lib/catalog";
 import AlgoBadge from "@/components/AlgoBadge";
@@ -19,7 +20,6 @@ const NAV_ITEMS = [
     group: "Sorting Algorithms",
     icon: <BarChart2 size={14} />,
     items: [
-      { name: BENCHMARK.name, path: BENCHMARK.path },
       ...SORTING_ALGORITHMS.map((a) => ({
         name: a.name,
         path: a.path,
@@ -51,8 +51,28 @@ function NavItems({
   pathname: string;
   onClick?: () => void;
 }) {
+  const benchmarkActive = pathname === BENCHMARK.path;
   return (
     <>
+      {/* Standalone Benchmark link */}
+      <div className="mb-4">
+        <Link
+          href={BENCHMARK.path}
+          onClick={onClick}
+          className="flex items-center gap-2 px-3 py-2 rounded-lg transition-colors"
+          style={{
+            background: benchmarkActive ? "var(--color-accent-muted)" : "var(--color-surface-2)",
+            color: benchmarkActive ? "var(--color-accent)" : "var(--color-text)",
+            border: `1px solid ${benchmarkActive ? "var(--color-accent)" : "var(--color-border)"}`,
+            borderLeft: `3px solid ${benchmarkActive ? "var(--color-accent)" : "var(--color-border)"}`,
+            fontWeight: 600,
+          }}
+        >
+          <Zap size={14} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
+          <span className="text-sm">{BENCHMARK.name}</span>
+        </Link>
+      </div>
+
       {NAV_ITEMS.map((group) => (
         <div key={group.group} className="mb-5">
           {/* Group heading */}

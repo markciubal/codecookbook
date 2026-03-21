@@ -5,7 +5,7 @@ import CytoscapeBase, { type CytoscapeBaseHandle } from "./CytoscapeBase";
 import CodePanel from "./CodePanel";
 import CodeModal from "./CodeModal";
 import PanelModal from "./PanelModal";
-import { Info } from "lucide-react";
+import { Info, GitFork } from "lucide-react";
 
 const MAX_SIZE = 15;
 
@@ -390,6 +390,7 @@ export default function BSTVisualizer() {
       {/* Header */}
       <div className="px-5 pt-6 pb-4" style={{ borderBottom: "1px solid var(--color-border)" }}>
         <div className="flex flex-wrap items-center gap-2 mb-1">
+          <GitFork size={20} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
           <h1 className="text-2xl font-bold">Binary Search Tree</h1>
           <Pill text="BST" purple />
           <Pill text="O(log n)" />

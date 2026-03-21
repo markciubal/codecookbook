@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Zap, Info, MousePointer2, GripVertical } from "lucide-react";
+import { Zap, Info, MousePointer2, GripVertical, Network } from "lucide-react";
 import PlaybackControls from "./PlaybackControls";
 import CytoscapeBase, { type CytoscapeBaseHandle } from "./CytoscapeBase";
 import CodePanel from "./CodePanel";
@@ -655,6 +655,7 @@ export default function GraphVisualizer() {
       {/* Header */}
       <div className="shrink-0 px-5 pt-6 pb-4" style={{ borderBottom: "1px solid var(--color-border)" }}>
         <div className="flex flex-wrap items-center gap-2 mb-1">
+          <Network size={20} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
           <h1 className="text-2xl font-bold">Graph</h1>
           <Pill text="Undirected" />
           {advancedMode && <Pill text="Weighted" amber />}

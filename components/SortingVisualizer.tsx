@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { RotateCcw, Settings, Volume2, VolumeX, BrainCircuit } from "lucide-react";
+import { RotateCcw, Settings, Volume2, VolumeX, BrainCircuit, BarChart2 } from "lucide-react";
 import PlaybackControls from "./PlaybackControls";
 import {
   generateArray,
@@ -109,6 +109,7 @@ export default function SortingVisualizer({ algorithm }: Props) {
         style={{ borderBottom: "1px solid var(--color-border)" }}
       >
         <div className="flex flex-wrap items-center gap-2">
+          <BarChart2 size={20} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
           <h1 className="text-2xl font-bold">{meta.name}</h1>
           <Badge text={meta.timeComplexity} accent />
           <Badge text={meta.stable ? "stable" : "unstable"} color={meta.stable ? "green" : "red"} />
