@@ -35,6 +35,7 @@ import { LANGUAGE_META } from "./annotatedCode";
  */
 export function lc(lang: Language, text: string): string {
   if (lang === "python") return `# ${text}`;
+  if (lang === "r")      return `# ${text}`;
   if (lang === "c")      return `/* ${text} */`;
   return `// ${text}`;
 }
@@ -52,10 +53,12 @@ export function statsLine(
   space: string,
   stable: boolean,
 ): string {
-  // Python conventionally writes True/False; other languages YES/NO
+  // Python conventionally writes True/False; R writes TRUE/FALSE; other languages YES/NO
   const stableStr = lang === "python"
     ? (stable ? "True" : "False")
-    : (stable ? "YES" : "NO");
+    : lang === "r"
+      ? (stable ? "TRUE" : "FALSE")
+      : (stable ? "YES" : "NO");
   return lc(lang, `Time: ${time}  Space: ${space}  Stable: ${stableStr}`);
 }
 
@@ -111,6 +114,7 @@ export function fnName(algo: string, lang: Language): string {
     case "python":
     case "c":
     case "rust":
+    case "r":
       return `${base}_sort`;
 
     case "go":

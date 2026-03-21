@@ -9,7 +9,7 @@ import type { Language } from "./annotatedCode";
  */
 const SORT_PATTERNS: Record<string, Record<number, string[]>> = {
   bubble: {
-    2: ["arr[j] > arr[j + 1]", "arr[j] > arr[j+1]", "v[j] > v[j + 1]"],
+    2: ["arr[j] > arr[j + 1]", "arr[j] > arr[j+1]", "v[j] > v[j + 1]", "v[j] > v[j+1]"],
     3: [
       "arr.swap(j",
       "std::swap",
@@ -19,12 +19,13 @@ const SORT_PATTERNS: Record<string, Record<number, string[]>> = {
       "arr[j], arr[j+1] = arr[j+1]",
       "int tmp",
       "= tmp;",
+      "tmp      <- v[j]",   // R swap temp variable
     ],
   },
   selection: {
-    1: ["minIdx = i", "min_idx = i"],
-    3: ["arr[j] < arr[minIdx]", "arr[j] < arr[min_idx]", "v[j] < v[minIdx]", "v[j] < v[min_idx]"],
-    4: ["minIdx = j", "min_idx = j"],
+    1: ["minIdx = i", "min_idx = i", "min_idx <- i"],
+    3: ["arr[j] < arr[minIdx]", "arr[j] < arr[min_idx]", "v[j] < v[minIdx]", "v[j] < v[min_idx]", "v[j] < v[min_idx]"],
+    4: ["minIdx = j", "min_idx = j", "min_idx <- j"],
     5: [
       "arr[i], arr[minIdx]",
       "arr[i], arr[min_idx]",
@@ -33,13 +34,14 @@ const SORT_PATTERNS: Record<string, Record<number, string[]>> = {
       "arr.swap(i,",
       "arr[i]     = arr[minIdx]",
       "arr[minIdx] = tmp",
+      "tmp          <- v[i]",   // R swap for selection sort
     ],
   },
   insertion: {
-    1: ["const key = arr[i]", "key = arr[i]", "let key", "key = v[i]"],
-    3: ["arr[j] > key", "arr[j - 1] > key", "v[j] > key", "arr[j] > key"],
-    4: ["arr[j + 1] = arr[j]", "arr[j+1] = arr[j]", "v[j + 1] = v[j]", "arr[j] = arr[j - 1]"],
-    6: ["arr[j + 1] = key", "arr[j+1] = key", "v[j + 1] = key", "arr[j] = key;"],
+    1: ["const key = arr[i]", "key = arr[i]", "let key", "key = v[i]", "key <- v[i]"],
+    3: ["arr[j] > key", "arr[j - 1] > key", "v[j] > key", "arr[j] > key", "v[j] > key"],
+    4: ["arr[j + 1] = arr[j]", "arr[j+1] = arr[j]", "v[j + 1] = v[j]", "arr[j] = arr[j - 1]", "v[j + 1] <- v[j]"],
+    6: ["arr[j + 1] = key", "arr[j+1] = key", "v[j + 1] = key", "arr[j] = key;", "v[j + 1] <- key"],
   },
   merge: {
     // All merge steps highlight the two-pointer comparison and copy-back lines
@@ -58,8 +60,9 @@ const SORT_PATTERNS: Record<string, Record<number, string[]>> = {
       "pivot = a[hi]", "pivot := a[hi]",             // Go/Rust annotated
       "int pivot = arr[hi]",                         // C annotated
       "pivot_val", "pivotVal",
+      "pivot <- v[hi]",                              // R annotated
     ],
-    4: ["arr[j] <=", "arr[j] <= pivot", "a[j] <= pivot"],
+    4: ["arr[j] <=", "arr[j] <= pivot", "a[j] <= pivot", "v[j] <= pivot"],
     5: [
       "swap(arr[i",                   // C legacy
       "[arr[i + 1], arr[j]]",         // TS legacy
@@ -67,6 +70,7 @@ const SORT_PATTERNS: Record<string, Record<number, string[]>> = {
       "a[i], a[j] = a[j], a[i]",     // Python/Go annotated
       "a.swap(i, j)",                 // Rust annotated
       "a[i] = a[j]",                  // Java/C++ annotated (tmp swap)
+      "tmp  <- v[i]",                 // R swap into left partition
     ],
     6: [
       "arr[pivotIndex]", "pivotIndex = i + 1", "pivot_index",  // legacy
@@ -75,6 +79,7 @@ const SORT_PATTERNS: Record<string, Record<number, string[]>> = {
       "swap(&arr[i + 1], &arr[hi])",  // C annotated
       "a.swap(i, hi)",                // Rust annotated
       "a[i], a[hi] = a[hi]",         // Go annotated
+      "tmp       <- v[i + 1L]",       // R place pivot at final position
     ],
   },
   heap: {
@@ -85,8 +90,9 @@ const SORT_PATTERNS: Record<string, Record<number, string[]>> = {
       "for i in range(n // 2",                        // Python annotated
       "for i := n/2",                                 // Go annotated
       "for i in (0..n / 2)",                          // Rust annotated
+      "for (i in seq(n %/%",                          // R annotated build loop
     ],
-    1: ["heapify(", "siftDown(", "sift_down("],
+    1: ["heapify(", "siftDown(", "sift_down(", "v <- heapify("],
     3: [
       "arr[0], arr[i]",                               // TS/JS/C annotated (includes both)
       "arr.swap(0",                                   // Rust
@@ -95,13 +101,14 @@ const SORT_PATTERNS: Record<string, Record<number, string[]>> = {
       "arr[0], arr[i] = arr[i]",                      // Python
       "arr[0], arr[i] = arr[i], arr[0]",             // Python annotated
       "std::swap(arr[0]",                             // C++
+      "tmp  <- v[1L]; v[1L] <- v[i]",                // R swap root with last
     ],
-    5: ["largest = left", "largest = right", "largest ="],
+    5: ["largest = left", "largest = right", "largest =", "largest <- left", "largest <- right"],
   },
   shell: {
-    0: ["gap = Math.floor", "gap = n / 2", "gap /= 2", "for gap :=", "let mut gap"],
-    3: ["temp = arr[i]", "key = arr[i]", "const temp = arr", "let temp = arr"],
-    6: ["arr[j] = arr[j - gap]", "arr[j - gap]"],
+    0: ["gap = Math.floor", "gap = n / 2", "gap /= 2", "for gap :=", "let mut gap", "gap <- n %/%"],
+    3: ["temp = arr[i]", "key = arr[i]", "const temp = arr", "let temp = arr", "temp <- v[i]"],
+    6: ["arr[j] = arr[j - gap]", "arr[j - gap]", "v[j] <- v[j - gap]"],
   },
   counting: {
     1: [
@@ -110,36 +117,41 @@ const SORT_PATTERNS: Record<string, Record<number, string[]>> = {
       "count[val - lo] += 1", // Python annotated
       "count[v - min]++",     // Java/C/C++ annotated
       "count[(v - lo)",       // Rust annotated
+      "count[val - lo + 1L]", // R annotated
     ],
-    2: ["count[i] += count[i - 1]", "count[i] +="],
+    2: ["count[i] += count[i - 1]", "count[i] +=", "count[i] <- count[i] + count[i - 1L]"],
     4: [
       "output[count[arr[i]] - 1]", "output[count[a[i]]",  // legacy
       "count[arr[i] - min] - 1",   // TS/JS annotated
       "count[val - lo] - 1",       // Python annotated
       "count[arr[i] - min]--",     // any language decrement after
       "count[bucket] -= 1",        // Rust annotated
+      "pos           <- count[bucket]",  // R annotated placement
     ],
   },
   radix: {
     0: [
       "for (let exp", "exp *= 10",  // TS/JS (covers both while and for)
       "for exp in", "let exp = 1",
+      "exp <- 1L",                  // R annotated
     ],
     2: [
       "Math.floor(a[i] / exp) % 10", "Math.floor(arr[i] / exp)", "/ exp) % 10",
       "digit = Math.floor",          // TS/JS annotated
       "digit = (arr[i] / exp)",      // Python/Go annotated
+      "digit          <- (val %/%",  // R annotated
     ],
     5: [
       "for (let i = 0; i < n; i++) arr[i]", "for i in range(n): arr[i]",  // legacy
       "result = countingSort(",    // TS/JS annotated outer copy-back
       "output[count[digit]",       // any language placement step
+      "v   <- counting_sort_digit(",  // R annotated outer call
     ],
   },
   bucket: {
-    1: ["buckets[", "bucket_idx", "bucketIdx", "buckets.push", "bucket_index"],
-    3: ["for (let b = 0", "for b in range", "for bucket in", "for b :="],
-    4: ["concat", "extend", "a[writeIdx]", "result.push", "arr[write"],
+    1: ["buckets[", "bucket_idx", "bucketIdx", "buckets.push", "bucket_index", "buckets[[idx]]"],
+    3: ["for (let b = 0", "for b in range", "for bucket in", "for b :=", "for (b in buckets)"],
+    4: ["concat", "extend", "a[writeIdx]", "result.push", "arr[write", "result <- c(result,"],
   },
   timsort: {
     2: [
@@ -149,27 +161,32 @@ const SORT_PATTERNS: Record<string, Record<number, string[]>> = {
       "for i := 0; i < n",                // Go
       "insertionSort(a, i,",              // TS/JS call inside Phase-1 loop
       "insertionSort(arr, i,",            // alternate TS/Java
+      "v <- insertion_sort_run(",         // R annotated Phase-1 call
     ],
     3: [
       "const key = arr", "key = arr[j]", "key = a[j]",
       "temp = arr[j",
       "let key =", "let temp =",
+      "key <- v[i]",                      // R insertion sort within tim_sort
     ],
     4: [
       "arr[j + 1] = arr[j]", "arr[j+1] = arr[j]",  // TS/JS/Java shift
       "a[j + 1] = a[j]",                            // TS/JS inner
       "arr[j] = arr[j - 1]",                        // Java/C alternate
       "arr[k + 1] = arr[k]",                        // C/C++
+      "v[j + 1L] <- v[j]",                          // R shift right
     ],
     5: [
       "arr[j + 1] = key", "arr[j+1] = key",  // TS/JS/Java place key
       "a[j + 1] = key",                       // TS/JS inner
       "arr[k + 1] = key",                     // C/C++
+      "v[j + 1L] <- key",                     // R place key
     ],
     6: [
       "size < n; size *= 2", "size *= 2",  // TS/JS/Java/C Phase-2 outer loop
       "while size < n", "while (size < n)",
       "size = RUN; size < n",
+      "while (size < n)",                   // R Phase-2 outer loop
     ],
     7: [
       "l[i] <= r[j]",           // TS/JS/Java merge comparison
@@ -178,6 +195,7 @@ const SORT_PATTERNS: Record<string, Record<number, string[]>> = {
       "merge(a, left",          // TS/JS merge call
       "merge(arr, left",        // Java/C merge call
       "l[i] <= r[j] {",         // Rust/Go
+      "left_arr[i] <= right_arr[j]",  // R merge comparison
     ],
   },
   logos: {
@@ -186,18 +204,26 @@ const SORT_PATTERNS: Record<string, Record<number, string[]>> = {
       "size <= 48",           // if-guard
       "a[j+1] = a[j]",       // shift element right during insertion
       "a[j+1] = key",        // place the key in its sorted position
+      "size <= 48L",          // R if-guard
+      "a[j + 1L] <<- a[j]",  // R shift element right
+      "a[j + 1L] <<- key",   // R place key
     ],
     // Line 1 — counting sort shortcut (dense integers, range < 4×size)
     1: [
       "span < size * 4",     // trigger condition
       "counts[a[k]-mn]++",   // tally each value
       "a[k++] = v + mn",     // pour values back in order
+      "span < size * 4L",    // R trigger condition
+      "counts[a[k] - mn + 1L]",  // R tally each value
     ],
     // Line 2 — gallop check (already sorted or reversed)
     2: [
       "a[lo] <= a[lo+1]",              // prefix ascending check
       "let sorted = true",             // scanning for sorted
       "[a[l], a[r]] = [a[r], a[l]]",  // O(n) in-place reversal
+      "a[lo] <= a[lo + 1L]",          // R prefix ascending check
+      "sorted <- all(",                // R scanning for sorted
+      "a[lo:hi] <<- rev(",            // R in-place reversal
     ],
     // Line 3 — chaos draw + golden-ratio index candidates
     3: [
@@ -206,43 +232,59 @@ const SORT_PATTERNS: Record<string, Record<number, string[]>> = {
       "PHI  * chaos",       // φ¹ golden cut position
       "idx1 =",             // first candidate index
       "idx2 =",             // second candidate index
+      "chaos <- abs(",      // R chaos factor
+      "idx1 <- lo +",       // R first candidate index
+      "idx2 <- lo +",       // R second candidate index
     ],
     // Line 4 — ninther pivot refinement
     4: [
       "const p1 = ninther",  // smooth first pivot against neighbours
       "const p2 = ninther",  // smooth second pivot against neighbours
       "ninther(lo",          // any ninther call
+      "p1   <- ninther(",    // R first ninther call
+      "p2   <- ninther(",    // R second ninther call
     ],
     // Line 5 — partition pointer initialisation
     5: [
       "let lt = lo, gt = hi",  // pointer init inside dualPartition
       "dualPartition(",        // call site
+      "lt <- lo; gt <- hi",   // R pointer init
+      "bounds <- dual_partition(",  // R call site
     ],
     // Line 6 — dual-pointer scan loop
     6: [
       "while (i <= gt)",  // the scanning loop condition
+      "while (i <= gt)",  // R scanning loop condition
     ],
     // Line 7 — element < p1: send left
     7: [
       "a[i] < p1",            // comparison
       "[a[lt], a[i]] = ",     // swap with left boundary
       "lt++; i++",            // advance both pointers
+      "if (a[i] < p1)",       // R comparison
+      "t <- a[lt]; a[lt] <<- a[i]; a[i] <<- t",  // R swap with left boundary
     ],
     // Line 8 — element > p2: send right
     8: [
       "a[i] > p2",            // comparison
       "[a[i], a[gt]] = ",     // swap with right boundary
       "gt--",                 // retract right boundary (i stays)
+      "} else if (a[i] > p2)",  // R comparison
+      "t <- a[i]; a[i] <<- a[gt]; a[gt] <<- t",  // R swap with right boundary
     ],
     // Line 9 — element in [p1,p2]: already in place, just advance
     9: [
       "else                 { i++; }",  // middle-region no-op branch
+      "i <- i + 1L",                    // R middle-region advance
     ],
     // Line 10 — size-ranked recursion + tail continuation
     10: [
       "regions.sort(",         // rank regions by size
       "sort(regions[0]",       // recurse into smallest
       "lo = regions[2]",       // tail-call largest (no stack frame)
+      "regions <- regions[order_]",  // R rank regions
+      "sort_rec(regions[[1L]]",      // R recurse smallest
+      "lo    <- regions[[3L]]",      // R tail-call largest
     ],
   },
 };

@@ -54,8 +54,8 @@ function NavItems({
   const benchmarkActive = pathname === BENCHMARK.path;
   return (
     <>
-      {/* Standalone Benchmark link */}
-      <div className="mb-4">
+      {/* Standalone utility links */}
+      <div className="flex flex-col gap-1 mb-4">
         <Link
           href={BENCHMARK.path}
           onClick={onClick}

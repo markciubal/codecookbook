@@ -155,19 +155,6 @@ const SPACE_BIG_O_REFS = [
 
 // ── Big-O curve fitting ───────────────────────────────────────────────────────
 
-const TIME_CANDIDATES = [
-  { label: "logn",   fn: (n: number) => Math.log2(Math.max(n, 2)) },
-  { label: "n",      fn: (n: number) => n },
-  { label: "n logn", fn: (n: number) => n * Math.log2(Math.max(n, 2)) },
-  { label: "n²",     fn: (n: number) => n * n },
-];
-
-const SPACE_CANDIDATES = [
-  { label: "1",    fn: (_: number) => 1 },
-  { label: "logn", fn: (n: number) => Math.log2(Math.max(n, 2)) },
-  { label: "n",    fn: (n: number) => n },
-];
-
 interface FitResult {
   label: string;
   k: number;
@@ -175,33 +162,37 @@ interface FitResult {
   pctAt: (n: number, measured: number) => number;
 }
 
-function fitBigO(
-  points: { n: number; val: number }[],
-  candidates: { label: string; fn: (n: number) => number }[],
-): FitResult | null {
-  const valid = points.filter(p => p.val > 0 && p.n > 0);
+// Convert a numeric string to Unicode superscript, e.g. "1.08" → "¹·⁰⁸"
+function toSup(s: string): string {
+  return s.replace(/./g, c =>
+    ({ "0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹","-":"⁻",".":"·" } as Record<string,string>)[c] ?? c
+  );
+}
+
+// Log-log OLS regression: fits y = a · nᵇ by linearising log(y) = log(a) + b·log(n).
+// All data points contribute equally (no large-n bias) and no Big-O class is assumed —
+// the exponent b is derived entirely from the measured data.
+function fitLogLog(points: { n: number; val: number }[]): FitResult | null {
+  const valid = points.filter(p => p.val > 0 && p.n > 1);
   if (valid.length < 2) return null;
-  let best: FitResult | null = null;
-  let bestRMS = Infinity;
-  for (const { label, fn } of candidates) {
-    let num = 0, den = 0;
-    for (const { n, val } of valid) { const f = fn(n); num += f * val; den += f * f; }
-    if (den === 0) continue;
-    const k = num / den;
-    let rss = 0;
-    for (const { n, val } of valid) {
-      const pred = k * fn(n);
-      if (pred === 0) continue;
-      const rel = (val - pred) / pred;
-      rss += rel * rel;
-    }
-    const rms = Math.sqrt(rss / valid.length);
-    if (rms < bestRMS) {
-      bestRMS = rms;
-      best = { label, k, fn, pctAt: (n, measured) => { const p = k * fn(n); return p === 0 ? 0 : ((measured - p) / p) * 100; } };
-    }
-  }
-  return best;
+
+  const xs = valid.map(p => Math.log(p.n));
+  const ys = valid.map(p => Math.log(p.val));
+  const m  = valid.length;
+  const sx  = xs.reduce((s, x) => s + x, 0);
+  const sy  = ys.reduce((s, y) => s + y, 0);
+  const sxx = xs.reduce((s, x) => s + x * x, 0);
+  const sxy = xs.reduce((s, x, i) => s + x * ys[i], 0);
+
+  const denom = m * sxx - sx * sx;
+  if (denom === 0) return null;
+
+  const b    = (m * sxy - sx * sy) / denom;  // empirical exponent
+  const a    = Math.exp((sy - b * sx) / m);  // scale factor
+  const fn   = (n: number) => Math.pow(n, b);
+  const label = `n${toSup(b.toFixed(2))}`;
+
+  return { label, k: a, fn, pctAt: (n, measured) => { const p = a * fn(n); return p === 0 ? 0 : ((measured - p) / p) * 100; } };
 }
 
 const SIZE_BUTTONS: { n: number; word: string }[] = [
@@ -337,6 +328,7 @@ function CurveChart({
   mode?: "time" | "space";
 }) {
   const [locked, setLocked] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   const [interactMode, setInteractMode] = useState<"brush" | "zoom">("brush");
   const [yZoom, setYZoom] = useState(1.0);           // <1 = zoomed in on y (lower ceiling)
   const [xRange, setXRange] = useState<[number, number] | null>(null); // size indices
@@ -364,24 +356,77 @@ function CurveChart({
     return () => el.removeEventListener("wheel", onWheel);
   }, [locked, interactMode]);
 
-  const VW = 560;
+  const VW = 600;
   const VH = 230;
-  const pL = 60, pR = 82, pT = 15, pB = 42;
+  const pL = 60, pR = 122, pT = 15, pB = 42;
+  // Extrapolation zone: 36px (non-expanded) — collapses when expanded since projSizes fill iW
+  const extraZoneW = expanded ? 0 : 36;
   const iW = VW - pL - pR;
   const iH = VH - pT - pB;
 
   const visSizes = xRange ? sizes.slice(xRange[0], xRange[1] + 1) : sizes;
 
+  // Projected sizes: 10 steps from 10× to 100× the last measured n (shown when expanded)
+  const _globalLastN = (() => {
+    let mx = 0;
+    for (const id of algos) {
+      const pts = (data[id] ?? []).filter(p => visSizes.includes(p.n) && !p.timedOut);
+      if (pts.length) mx = Math.max(mx, Math.max(...pts.map(p => p.n)));
+    }
+    return mx || (visSizes[visSizes.length - 1] ?? 1000);
+  })();
+  const projSizes = expanded
+    ? Array.from({ length: 10 }, (_, i) => _globalLastN * (i + 1) * 10)
+    : [];
+  const displaySizes = expanded ? [...visSizes, ...projSizes] : visSizes;
+
   const xAt = (n: number): number => {
-    const idx = visSizes.indexOf(n);
+    const idx = displaySizes.indexOf(n);
     if (idx < 0) return pL;
-    return visSizes.length === 1 ? pL + iW / 2 : pL + (idx / (visSizes.length - 1)) * iW;
+    return displaySizes.length === 1 ? pL + iW / 2 : pL + (idx / (displaySizes.length - 1)) * iW;
   };
 
   const getValue = (p: CurvePoint) => mode === "space" ? (p.spaceBytes ?? 0) : p.timeMs;
   const fmtY     = mode === "space" ? fmtBytes : fmtTime;
 
-  const allValues = algos.flatMap(id => (data[id] ?? []).filter(p => visSizes.includes(p.n)).map(getValue));
+  // Pre-compute one fit per algo — reused for y-scale extension and tail drawing.
+  // Avoids calling fitLogLog twice per algo per render.
+  const extraFits = new Map<string, FitResult | null>(
+    algos.map(id => {
+      const vp = (data[id] ?? [])
+        .filter(p => visSizes.includes(p.n) && !p.timedOut && getValue(p) > 0)
+        .sort((a, b) => a.n - b.n);
+      const fit = vp.length >= 2
+        ? fitLogLog(vp.map(p => ({ n: p.n, val: getValue(p) })))
+        : null;
+      return [id, fit] as [string, FitResult | null];
+    })
+  );
+
+  // Include capped extrapolated endpoints so the y-axis actually accommodates the projections.
+  // Cap at 4× measured max to prevent O(n²) tails from collapsing the rest of the chart.
+  const measuredValues = algos.flatMap(id => (data[id] ?? []).filter(p => visSizes.includes(p.n)).map(getValue));
+  const measuredMax    = Math.max(...measuredValues, mode === "space" ? 1 : 0.001);
+  const extrapValues: number[] = [];
+  for (const id of algos) {
+    const fit = extraFits.get(id);
+    if (!fit) continue;
+    const vp = (data[id] ?? []).filter(p => visSizes.includes(p.n) && !p.timedOut && getValue(p) > 0).sort((a, b) => a.n - b.n);
+    if (vp.length < 2) continue;
+    if (expanded) {
+      // Include all valid projected values — y-axis scales to fit them
+      for (const pn of projSizes) {
+        const ev = fit.k * fit.fn(pn);
+        if (isFinite(ev) && ev > 0) extrapValues.push(ev);
+      }
+    } else {
+      const lastN = vp[vp.length - 1].n;
+      const ev    = fit.k * fit.fn(lastN * 4);
+      if (isFinite(ev) && ev > 0 && ev <= measuredMax * 4) extrapValues.push(ev);
+    }
+  }
+
+  const allValues = [...measuredValues, ...extrapValues];
   const rawMaxY   = Math.max(...allValues, mode === "space" ? 1 : 0.001);
   const maxY      = rawMaxY * yZoom;
   const yAt       = (v: number) => pT + iH - (v / maxY) * iH;
@@ -399,8 +444,8 @@ function CurveChart({
   };
 
   const snapToSize = (svgX: number) => {
-    let best = visSizes[0], bestDist = Infinity;
-    visSizes.forEach(n => { const d = Math.abs(xAt(n) - svgX); if (d < bestDist) { bestDist = d; best = n; } });
+    let best = displaySizes[0], bestDist = Infinity;
+    displaySizes.forEach(n => { const d = Math.abs(xAt(n) - svgX); if (d < bestDist) { bestDist = d; best = n; } });
     return best;
   };
 
@@ -484,13 +529,26 @@ function CurveChart({
         .sort((a, b) => getValue(a.pt) - getValue(b.pt))
     : [];
 
+  // Estimated bubbles for projected sizes (expanded mode)
+  const projBubbles = expanded && activeN != null && projSizes.includes(activeN)
+    ? algos
+        .flatMap(id => {
+          const fit = extraFits.get(id);
+          if (!fit) return [];
+          const v = fit.k * fit.fn(activeN);
+          if (!isFinite(v) || v <= 0) return [];
+          return [{ id, v }];
+        })
+        .sort((a, b) => a.v - b.v)
+    : [];
+
   const overlayBtnBase: React.CSSProperties = btn("secondary", {
     fontSize: 9, padding: "2px 5px", borderRadius: 4, background: "var(--color-surface-2)",
   });
 
   return (
     <div style={{ position: "relative", userSelect: "none" }}>
-      <div style={{ position: "absolute", top: 20, left: `calc(${(pL / VW * 100).toFixed(2)}% + 10px)`, zIndex: 2, display: "flex", flexDirection: "row", alignItems: "center", gap: 4 }}>
+      <div className="print:hidden" style={{ position: "absolute", top: 20, left: `calc(${(pL / VW * 100).toFixed(2)}% + 10px)`, zIndex: 2, display: "flex", flexDirection: "row", alignItems: "center", gap: 4 }}>
         {/* Lock toggle */}
         <button
           onClick={() => setLocked(l => !l)}
@@ -499,6 +557,14 @@ function CurveChart({
         >
           {locked ? <Lock size={8} /> : <Unlock size={8} />}
           {locked ? "locked" : "unlocked"}
+        </button>
+        {/* Expand toggle — shows 10 projected sizes at 10–100× last measured n */}
+        <button
+          onClick={() => setExpanded(e => !e)}
+          style={{ ...overlayBtnBase, color: expanded ? "var(--color-accent)" : "var(--color-muted)", border: `1px solid ${expanded ? "var(--color-accent)" : "var(--color-border)"}` }}
+          title={expanded ? "Collapse to measured range" : "Project 10–100× beyond last measured n"}
+        >
+          {expanded ? "collapse" : "expand"}
         </button>
         {/* Mode toggle + reset — to the right of lock button when unlocked */}
         {!locked && (
@@ -600,7 +666,7 @@ function CurveChart({
           const predMs   = calibC * ref.fn(maxN);
           const clipped  = predMs > maxY;
           const labelY   = Math.max(pT + 7, Math.min(pT + iH - 14, refY(maxN) - 2));
-          const lx       = pL + iW + 5;
+          const lx       = pL + iW + extraZoneW + 5;
 
           return (
             <g key={ref.id} style={{ pointerEvents: "none" }}>
@@ -627,7 +693,19 @@ function CurveChart({
         });
       })()}
 
-      {/* vertical grid + x tick labels */}
+      {/* Separator — between measured data and projection zone */}
+      {visSizes.length >= 2 && (() => {
+        const sepX = expanded ? xAt(visSizes[visSizes.length - 1]) : pL + iW;
+        return (
+          <line
+            x1={sepX} y1={pT} x2={sepX} y2={pT + iH}
+            stroke="var(--color-border)" strokeWidth={0.8} strokeDasharray="3 3" opacity={0.6}
+            style={{ pointerEvents: "none" }}
+          />
+        );
+      })()}
+
+      {/* vertical grid + x tick labels (measured) */}
       {visSizes.map(n => {
         const x = xAt(n);
         return (
@@ -636,6 +714,19 @@ function CurveChart({
               stroke="var(--color-border)" strokeWidth={0.4} strokeDasharray="2 5" opacity={0.5} />
             <text x={x} y={VH - pB + 14} textAnchor="middle" fontSize={9}
               fill="var(--color-muted)">{fmtN(n)}</text>
+          </g>
+        );
+      })}
+      {/* x tick labels for projected sizes (every other one to avoid clutter) */}
+      {expanded && projSizes.map((n, i) => {
+        if (i % 2 !== 0) return null; // show every other
+        const x = xAt(n);
+        return (
+          <g key={`proj-${n}`}>
+            <line x1={x} y1={pT} x2={x} y2={pT + iH}
+              stroke="var(--color-border)" strokeWidth={0.3} strokeDasharray="2 6" opacity={0.3} />
+            <text x={x} y={VH - pB + 14} textAnchor="middle" fontSize={7.5}
+              fill="var(--color-muted)" opacity={0.6}>{fmtN(n)}</text>
           </g>
         );
       })}
@@ -662,6 +753,127 @@ function CurveChart({
         const color = ALGO_COLORS[id] ?? "#888";
         const isHl = !highlight || highlight === id;
         const sw = isHl && highlight ? 2.5 : 1.75;
+
+        // ── Extrapolation tail / projected curve ────────────────────────────
+        const validPts = pts.filter(p => !p.timedOut && getValue(p) > 0);
+        let extraTail: React.ReactNode = null;
+
+        if (validPts.length >= 2 && visSizes.length >= 2) {
+          const fit = extraFits.get(id);
+          if (fit) {
+            // log rate: empirical power-law exponent from data; fitted: same from fit shape
+            const firstPt = validPts[0];
+            const lastPt  = validPts[validPts.length - 1];
+            const lnRatio = Math.log(lastPt.n / firstPt.n);
+            const actualLogRate = lnRatio > 0
+              ? Math.log(getValue(lastPt) / getValue(firstPt)) / lnRatio
+              : 0;
+            const fittedLogRate = lnRatio > 0 && fit.fn(firstPt.n) > 0
+              ? Math.log(fit.fn(lastPt.n) / fit.fn(firstPt.n)) / lnRatio
+              : 0;
+            const tailOp = Math.max(0, Math.min(1, actualLogRate > 0 ? 1 : 0));
+            const tailLabel = `n${toSup(actualLogRate.toFixed(2))}`;
+
+            if (expanded && projSizes.length > 0) {
+              // ── Expanded mode: draw projected curve using actual projSizes x positions ──
+              const lastValidPt = validPts[validPts.length - 1];
+              const connX = xAt(lastValidPt.n);
+              const connY = Math.max(pT, Math.min(pT + iH, yAt(getValue(lastValidPt))));
+
+              const projPts = projSizes.map(pn => {
+                const v = fit.k * fit.fn(pn);
+                const y = isFinite(v) && v > 0
+                  ? Math.max(pT, Math.min(pT + iH, yAt(v)))
+                  : null;
+                return { n: pn, v, x: xAt(pn), y };
+              });
+              const validProj = projPts.filter((p): p is typeof p & { y: number } => p.y !== null);
+
+              // Build segment list starting from the last measured point
+              const segPts = [{ x: connX, y: connY }, ...validProj];
+
+              extraTail = (
+                <g style={{ pointerEvents: "none" }}>
+                  {segPts.slice(1).map((pt, i) => (
+                    <line key={i}
+                      x1={segPts[i].x} y1={segPts[i].y}
+                      x2={pt.x}        y2={pt.y}
+                      stroke={color} strokeWidth={1.1}
+                      strokeDasharray="4 3"
+                      opacity={tailOp}
+                      strokeLinecap="round"
+                    />
+                  ))}
+                  {validProj.map((pp, i) => {
+                    const isActive = activeN === pp.n;
+                    return (
+                    <g key={i}>
+                      <circle cx={pp.x} cy={pp.y} r={isActive ? 4.5 : 3}
+                        fill="var(--color-surface-2)"
+                        stroke={color} strokeWidth={isActive ? 1.8 : 1.2}
+                        opacity={tailOp + 0.1}
+                        style={{ transition: "r 0.1s ease" }}
+                      />
+                      {/* value label every other point */}
+                      {i % 2 === 1 && (
+                        <text x={pp.x} y={pp.y - 5} textAnchor="middle"
+                          fontSize={6} fontFamily="monospace"
+                          fill={color} opacity={Math.min(1, tailOp + 0.2)}
+                        >
+                          {fmtY(pp.v)}
+                        </text>
+                      )}
+                    </g>
+                  );
+                  })}
+                  {/* rate badge at last projected point */}
+                  {validProj.length > 0 && (() => {
+                    const last = validProj[validProj.length - 1];
+                    return (
+                      <text x={last.x} y={last.y - 7} textAnchor="middle"
+                        fontSize={6.5} fontFamily="monospace"
+                        fill={color} opacity={Math.min(1, tailOp + 0.2)}
+                      >
+                        {tailLabel}
+                      </text>
+                    );
+                  })()}
+                </g>
+              );
+            } else if (!expanded) {
+              // ── Non-expanded mode: narrow 4× extrapolation zone tail ──
+              const lastN   = validPts[validPts.length - 1].n;
+              const lastVal = getValue(validPts[validPts.length - 1]);
+              const x0      = pL + iW;
+              const x1      = pL + iW + extraZoneW;
+              const STEPS   = 16;
+              const tpts: string[] = [`${x0.toFixed(1)},${yAt(lastVal).toFixed(1)}`];
+              for (let s = 1; s <= STEPS; s++) {
+                const t  = s / STEPS;
+                const n  = lastN * Math.pow(4, t);
+                const v  = fit.k * fit.fn(n);
+                const ex = x0 + t * (x1 - x0);
+                const ey = Math.max(pT, Math.min(pT + iH, yAt(v)));
+                tpts.push(`${ex.toFixed(1)},${ey.toFixed(1)}`);
+              }
+              const endV = fit.k * fit.fn(lastN * 4);
+              const endY = Math.max(pT + 4, Math.min(pT + iH - 4, yAt(endV)));
+              extraTail = (
+                <g style={{ pointerEvents: "none" }}>
+                  <polyline points={tpts.join(" ")} fill="none"
+                    stroke={color} strokeWidth={1.1} strokeDasharray="2 2" opacity={tailOp} />
+                  <text x={x1 - 1} y={endY - 3} textAnchor="end"
+                    fontSize={6.5} fontFamily="monospace"
+                    fill={color} opacity={Math.min(1, tailOp + 0.15)}
+                  >
+                    {tailLabel}
+                  </text>
+                </g>
+              );
+            }
+          }
+        }
+
         return (
           <g key={id} opacity={isHl ? 1 : 0.12} style={{ transition: "opacity 0.2s ease" }}>
             {pts.slice(1).map((p, i) => {
@@ -703,6 +915,7 @@ function CurveChart({
                 />
               );
             })}
+            {extraTail}
           </g>
         );
       })}
@@ -740,6 +953,38 @@ function CurveChart({
           </g>
         );
       })()}
+      {/* Estimated bubbles for projected sizes */}
+      {projBubbles.length > 0 && activeN != null && (() => {
+        const cx = xAt(activeN);
+        const flipRight = cx > VW * 0.6;
+        return (
+          <g style={{ pointerEvents: "none" }}>
+            {projBubbles.map(({ id, v }) => {
+              const cy = Math.max(pT + 8, Math.min(pT + iH - 8, yAt(v)));
+              const color = ALGO_COLORS[id] ?? "#888";
+              const label = `${ALGO_NAMES[id]}  ~est: ${fmtY(v)}`;
+              const bw = label.length * 5.6 + 10;
+              const bh = 16;
+              const bx = flipRight ? cx - bw - 10 : cx + 10;
+              const by = cy - bh / 2;
+              return (
+                <g key={id}>
+                  <rect x={bx} y={by} width={bw} height={bh} rx={4}
+                    fill={color} opacity={0.7}
+                    stroke={color} strokeWidth={1} strokeDasharray="3 2" />
+                  <text x={bx + 5} y={by + 11} fontSize={9.5} fontWeight={700}
+                    fill="#fff" style={{ letterSpacing: "0.01em" }}>
+                    {label}
+                  </text>
+                  <circle cx={cx} cy={cy} r={4.5}
+                    fill="var(--color-surface-2)" stroke={color} strokeWidth={2} />
+                </g>
+              );
+            })}
+          </g>
+        );
+      })()}
+
       {/* Selection rect (brush = full height, zoom = box) */}
       {selRect && (
         <rect x={selRect.x} y={selRect.y} width={selRect.w} height={selRect.h}
@@ -1355,7 +1600,7 @@ export default function BenchmarkVisualizer() {
                 </span>
 
                 {/* Presets */}
-                <div className="flex gap-1.5 mt-2 mb-1.5">
+                <div className="print:hidden flex gap-1.5 mt-2 mb-1.5">
                   {([
                     { label: "Small",  sizes: [100, 1_000, 10_000] },
                     { label: "Medium", sizes: [1_000, 10_000, 100_000] },
@@ -1371,7 +1616,7 @@ export default function BenchmarkVisualizer() {
                   ))}
                 </div>
 
-                <div className="flex flex-wrap gap-1.5 mt-2">
+                <div className="print:hidden flex flex-wrap gap-1.5 mt-2">
                   {SIZE_BUTTONS.map(({ n }) => {
                     const on = selectedSizes.has(n);
                     const disabled = !UNLIMITED_IDS.has([...selected][0] ?? "") && n > LARGE_THRESHOLD && selected.size > 0 && [...selected].every(id => !UNLIMITED_IDS.has(id));
@@ -1412,7 +1657,7 @@ export default function BenchmarkVisualizer() {
 
                 {/* Custom n input */}
                 <form
-                  className="flex items-center gap-1.5 mt-2"
+                  className="print:hidden flex items-center gap-1.5 mt-2"
                   onSubmit={e => { e.preventDefault(); submitCustomN(customInput); }}
                 >
                   <input
@@ -1534,7 +1779,7 @@ export default function BenchmarkVisualizer() {
               </div>
 
               {/* Advanced */}
-              <div className="mb-4">
+              <div className="print:hidden mb-4">
                 <button
                   onClick={() => setAdvancedOpen(o => !o)}
                   className="flex items-center gap-1"
@@ -1603,7 +1848,7 @@ export default function BenchmarkVisualizer() {
               </div>
 
               {/* Buttons */}
-              <div className="flex gap-1.5 flex-wrap">
+              <div className="print:hidden flex gap-1.5 flex-wrap">
                 <button
                   onClick={run}
                   disabled={!canRun}
@@ -1678,7 +1923,7 @@ export default function BenchmarkVisualizer() {
                 {hasCurveData && (
                   <>
                     {/* Time / Space toggle — centred above the chart */}
-                    <div style={{ display: "flex", justifyContent: "center", marginBottom: 4, marginTop: 15 }}>
+                    <div className="print:hidden" style={{ display: "flex", justifyContent: "center", marginBottom: 4, marginTop: 15 }}>
                     <div className="flex rounded overflow-hidden" style={{ border: "1px solid var(--color-border)" }}>
                       {(["time", "space"] as const).map(m => (
                         <button
@@ -1733,13 +1978,15 @@ export default function BenchmarkVisualizer() {
 
                 {/* Proof slider */}
                 {Object.keys(sampleProofs).length > 0 && (
-                  <ProofSlider
-                    proofs={sampleProofs} algos={chartAlgos}
-                    activeAlgo={activeProofAlgo}
-                    onSelect={setActiveProofAlgo}
-                    revealed={status === "done"}
-                    curveData={curveDataExt}
-                  />
+                  <div className="print:hidden">
+                    <ProofSlider
+                      proofs={sampleProofs} algos={chartAlgos}
+                      activeAlgo={activeProofAlgo}
+                      onSelect={setActiveProofAlgo}
+                      revealed={status === "done"}
+                      curveData={curveDataExt}
+                    />
+                  </div>
                 )}
 
                 {/* Legend */}
@@ -1815,8 +2062,8 @@ export default function BenchmarkVisualizer() {
                     const sr = sv > 0 && spaceFastest > 0 && spaceFastest < Infinity ? sv / spaceFastest : 0;
                     const tp = (curveDataExt[r.id] ?? []).filter(p => p.timeMs > 0).map(p => ({ n: p.n, val: p.timeMs }));
                     const sp = (curveDataExt[r.id] ?? []).filter(p => (p.spaceBytes ?? 0) > 0).map(p => ({ n: p.n, val: p.spaceBytes! }));
-                    const tf = fitBigO(tp, TIME_CANDIDATES);
-                    const sf = fitBigO(sp, SPACE_CANDIDATES);
+                    const tf = fitLogLog(tp);
+                    const sf = fitLogLog(sp);
                     return [r.id, {
                       spaceVal: sv, spaceRatio: sr,
                       tLabel: tf?.label ?? (ALGO_TIME[r.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? ""),
@@ -1924,8 +2171,8 @@ export default function BenchmarkVisualizer() {
                           const spRatioStr = spaceRatio != null ? (spaceRatio < 1.05 ? "—" : `${spaceRatio.toFixed(1)}×`) : "—";
                           const timePts  = (curveDataExt[row.id] ?? []).filter(p => p.timeMs > 0).map(p => ({ n: p.n, val: p.timeMs }));
                           const spacePts = (curveDataExt[row.id] ?? []).filter(p => (p.spaceBytes ?? 0) > 0).map(p => ({ n: p.n, val: p.spaceBytes! }));
-                          const timeFit  = fitBigO(timePts, TIME_CANDIDATES);
-                          const spaceFit = fitBigO(spacePts, SPACE_CANDIDATES);
+                          const timeFit  = fitLogLog(timePts);
+                          const spaceFit = fitLogLog(spacePts);
                           const tBigOLabel = timeFit?.label ?? (ALGO_TIME[row.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? "—");
                           const sBigOLabel = spaceFit?.label ?? (ALGO_SPACE[row.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? "—");
                           const tPct = largestDone != null && timeFit ? timeFit.pctAt(largestDone, row.timeMs) : null;
@@ -1972,6 +2219,9 @@ export default function BenchmarkVisualizer() {
                               };
                             }
 
+                            const sampleCount = Math.min(Math.ceil(n * 0.05), 25);
+                            const inputSample = generateBenchmarkInput(sampleCount, "random");
+
                             const proof = {
                               proof_type: "space_complexity_verification",
                               algorithm: ALGO_NAMES[row.id],
@@ -1981,6 +2231,11 @@ export default function BenchmarkVisualizer() {
                               space_breakdown: spaceBreakdown,
                               measured_heap_delta_bytes: (spaceVal != null && spaceVal > 0) ? spaceVal : null,
                               theoretical_bytes: theoreticalSpaceBytes(row.id, n),
+                              input_sample: {
+                                note: `${sampleCount} of ${n.toLocaleString()} elements (${sampleCount === 25 ? "capped at 25" : "5%"}). Same distribution as benchmark inputs: uniform integers in [0, 10 000).`,
+                                count: sampleCount,
+                                values: inputSample,
+                              },
                               generated_at: new Date().toISOString(),
                             };
 

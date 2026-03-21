@@ -4,7 +4,8 @@
       "Bash(npm run:*)",
       "Bash(find c:/Users/markc/OneDrive/Coding/codecookbook/node_modules/next/dist/docs/01-app/02-guides/upgrading -name *.md)",
       "Bash(grep -E \"\\\\.\\(tsx?|json\\)$\")",
-      "Bash(node scripts/trinity-bench.mjs)"
+      "Bash(node scripts/trinity-bench.mjs)",
+      "Bash(grep -n \"go: \\\\`package main\" \"C:/Users/markc/OneDrive/Coding/codecookbook/lib/annotatedCode.ts\")"
     ]
   }
 }

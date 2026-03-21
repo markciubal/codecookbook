@@ -61,3 +61,50 @@ input[type="number"]::-webkit-inner-spin-button,
 input[type="number"]::-webkit-outer-spin-button {
   opacity: 0.5;
 }
+
+/* ── Print / Save-to-PDF ────────────────────────────────────────────────── */
+@media print {
+  @page { margin: 1.5cm; }
+
+  /* Reset the viewport-height flex shell */
+  html, body {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+  }
+  body { display: block !important; }
+
+  /* Hide chrome that makes no sense on paper */
+  aside, header { display: none !important; }
+
+  /* Main fills the page, no clipping */
+  main {
+    flex: none !important;
+    width: 100% !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+  }
+
+  /* Undo every overflow container so nothing is clipped */
+  .overflow-hidden,
+  .overflow-y-auto { overflow: visible !important; }
+
+  /* Undo viewport-height / flex-fill sizing */
+  .h-full { height: auto !important; }
+  .h-dvh  { height: auto !important; }
+  .flex-1 { flex: none !important; }
+
+  /* Benchmark: stack the 50/50 panes vertically */
+  .lg\:w-1\/2 { width: 100% !important; }
+
+  /* SVG chart — never split across a page break */
+  svg {
+    break-inside: avoid;
+    max-width: 100%;
+    height: auto !important;
+  }
+
+  /* Table rows — keep each row intact */
+  tr { break-inside: avoid; }
+}
