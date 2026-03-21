@@ -1395,7 +1395,7 @@ export function getLogosSortSteps(arr: number[]): SortStep[] {
        */
       if (size <= BASE || depth <= 0) {
         ins(lo, hi);
-        step(`[${lo}..${hi}] insertion-sorted`, 0);
+        step(`[${lo}..${hi}] insertion-sorted — size ${size} ≤ 48 or depth exhausted; recursion overhead costs more than it saves here`, 0);
         break;
       }
 
@@ -1411,13 +1411,13 @@ export function getLogosSortSteps(arr: number[]): SortStep[] {
       if (Number.isInteger(mn) && valSpan < size * 4) {
         const ov: Partial<Record<number, BarState>> = {};
         for (let k = lo; k <= hi; k++) ov[k] = "comparing";
-        step(`Counting sort: range ${mn}–${mx} fits ${valSpan + 1} buckets`, 1, ov);
+        step(`Counting sort: range ${mn}–${mx}, span ${valSpan + 1} < ${size * 4} — values are dense enough to count instead of compare`, 1, ov);
         const counts = new Array(valSpan + 1).fill(0);
         for (let k = lo; k <= hi; k++) counts[a[k] - mn]++;
         let k = lo;
         for (let v = 0; v <= valSpan; v++) { while (counts[v]-- > 0) a[k++] = v + mn; }
         for (let k = lo; k <= hi; k++) settled.add(k);
-        step(`Counting sort placed [${lo}..${hi}]`, 1);
+        step(`Counting sort placed [${lo}..${hi}] — no comparisons used; values poured back by address`, 1);
         break;
       }
 
@@ -1433,7 +1433,7 @@ export function getLogosSortSteps(arr: number[]): SortStep[] {
         for (let k = lo; k < hi; k++) { comparisons++; if (a[k] > a[k + 1]) { isSorted = false; break; } }
         if (isSorted) {
           for (let k = lo; k <= hi; k++) settled.add(k);
-          step(`Gallop: [${lo}..${hi}] already sorted`, 2);
+          step(`Gallop: [${lo}..${hi}] already in order — O(n) scan found no inversion; no partition needed`, 2);
           break;
         }
         let isReversed = true;
@@ -1441,7 +1441,7 @@ export function getLogosSortSteps(arr: number[]): SortStep[] {
         if (isReversed) {
           for (let l = lo, r = hi; l < r; l++, r--) { [a[l], a[r]] = [a[r], a[l]]; swaps++; }
           for (let k = lo; k <= hi; k++) settled.add(k);
-          step(`Gallop: [${lo}..${hi}] reversed → flipped`, 2);
+          step(`Gallop: [${lo}..${hi}] perfectly reversed — one O(n) mirror-pass restores it; no pivots spent`, 2);
           break;
         }
       }
@@ -1465,11 +1465,15 @@ export function getLogosSortSteps(arr: number[]): SortStep[] {
        */
       const idx1 = lo + Math.min(range, Math.floor(range * PHI2 * chaos));
       const idx2 = lo + Math.min(range, Math.floor(range * PHI  * chaos));
+      // Line 3 — chaos drawn; golden-ratio positions computed. Highlight the raw candidate slots
+      // before refinement so the user sees where the pivots are aimed, not yet what they become.
+      step(`chaos=${chaos.toFixed(2)} — golden-ratio candidates at [${idx1}] (φ²·range) and [${idx2}] (φ·range); no fixed pattern can predict these positions`, 3, { [idx1]: "comparing", [idx2]: "comparing" });
       const p1Raw = ninther(lo, hi, idx1);
       const p2Raw = ninther(lo, hi, idx2);
       const [pLo, pHi] = p1Raw <= p2Raw ? [p1Raw, p2Raw] : [p2Raw, p1Raw];
-
-      step(`Dual φ-pivots: p1=${pLo}, p2=${pHi} (chaos=${chaos.toFixed(2)})`, 4, { [idx1]: "pivot", [idx2]: "pivot" });
+      // Line 4 — ninther sharpens each raw index against its two neighbours; a single outlier
+      // cannot skew the pivot because it is outvoted by the surrounding values.
+      step(`p1=${pLo}, p2=${pHi} — each refined through 3 neighbours via ninther, reducing outlier influence`, 4, { [idx1]: "pivot", [idx2]: "pivot" });
 
       /*
        * "And God said, Let there be a firmament in the midst of the waters,
@@ -1481,27 +1485,30 @@ export function getLogosSortSteps(arr: number[]): SortStep[] {
        */
       let lt = lo, gt = hi, i = lo;
       const p1 = pLo, p2 = pHi;
+      // Line 5 — lt marks where the left region ends, gt where the right region begins;
+      // i is the explorer that advances through the unknown middle until it meets gt.
+      step(`Partition init: lt=${lt}, gt=${gt} — lt=left boundary, gt=right boundary, i=${i} will scan forward`, 5, { [lt]: "swapping", [gt]: "swapping" });
       while (i <= gt) {
         comparisons++;
         if (a[i] < p1) {
           // Element belongs in the left region — swap it to lt and advance both pointers.
-          step(`${a[i]} < p1(${p1}) → swap arr[${i}]↔arr[${lt}]`, 7, { [i]: "comparing", [lt]: "swapping" });
+          step(`${a[i]} < p1(${p1}) → swap [${i}]↔[${lt}], advance lt and i — element sent to left region`, 7, { [i]: "comparing", [lt]: "swapping" });
           [a[lt], a[i]] = [a[i], a[lt]]; swaps++; lt++; i++;
         } else if (a[i] > p2) {
           // Element belongs in the right region — swap to gt. Don't advance i yet;
           // the value that arrived from gt hasn't been examined.
-          step(`${a[i]} > p2(${p2}) → swap arr[${i}]↔arr[${gt}]`, 8, { [i]: "comparing", [gt]: "swapping" });
+          step(`${a[i]} > p2(${p2}) → swap [${i}]↔[${gt}], retract gt — i stays because the arriving value is unexamined`, 8, { [i]: "comparing", [gt]: "swapping" });
           [a[i], a[gt]] = [a[gt], a[i]]; swaps++; gt--;
         } else {
           // Element is already in the middle region — leave it and move on.
-          step(`${a[i]} ∈ [${p1},${p2}] → middle region`, 9, { [i]: "minimum" });
+          step(`${a[i]} ∈ [${p1},${p2}] — already in the middle region, no swap needed, advance i`, 9, { [i]: "minimum" });
           i++;
         }
       }
 
       const midOv: Partial<Record<number, BarState>> = {};
       for (let k = lt; k <= gt; k++) midOv[k] = "minimum";
-      step(`Partitioned: [${lo}..${lt-1}]<${p1} | [${lt}..${gt}]∈[${p1},${p2}] | [${gt+1}..${hi}]>${p2}`, 10, midOv);
+      step(`Partitioned into 3 regions — [${lo}..${lt-1}] < ${p1} | [${lt}..${gt}] ∈ [${p1},${p2}] | [${gt+1}..${hi}] > ${p2}; middle is permanently settled`, 10, midOv);
 
       /*
        * "So the last will be first, and the first will be last." — Matthew 20:16

@@ -180,6 +180,71 @@ const SORT_PATTERNS: Record<string, Record<number, string[]>> = {
       "l[i] <= r[j] {",         // Rust/Go
     ],
   },
+  logos: {
+    // Line 0 — insertion sort fallback (size ≤ 48 or depth gone)
+    0: [
+      "size <= 48",           // if-guard
+      "a[j+1] = a[j]",       // shift element right during insertion
+      "a[j+1] = key",        // place the key in its sorted position
+    ],
+    // Line 1 — counting sort shortcut (dense integers, range < 4×size)
+    1: [
+      "span < size * 4",     // trigger condition
+      "counts[a[k]-mn]++",   // tally each value
+      "a[k++] = v + mn",     // pour values back in order
+    ],
+    // Line 2 — gallop check (already sorted or reversed)
+    2: [
+      "a[lo] <= a[lo+1]",              // prefix ascending check
+      "let sorted = true",             // scanning for sorted
+      "[a[l], a[r]] = [a[r], a[l]]",  // O(n) in-place reversal
+    ],
+    // Line 3 — chaos draw + golden-ratio index candidates
+    3: [
+      "chaos = Math.abs",   // derive chaos factor from PRNG
+      "PHI2 * chaos",       // φ² golden cut position
+      "PHI  * chaos",       // φ¹ golden cut position
+      "idx1 =",             // first candidate index
+      "idx2 =",             // second candidate index
+    ],
+    // Line 4 — ninther pivot refinement
+    4: [
+      "const p1 = ninther",  // smooth first pivot against neighbours
+      "const p2 = ninther",  // smooth second pivot against neighbours
+      "ninther(lo",          // any ninther call
+    ],
+    // Line 5 — partition pointer initialisation
+    5: [
+      "let lt = lo, gt = hi",  // pointer init inside dualPartition
+      "dualPartition(",        // call site
+    ],
+    // Line 6 — dual-pointer scan loop
+    6: [
+      "while (i <= gt)",  // the scanning loop condition
+    ],
+    // Line 7 — element < p1: send left
+    7: [
+      "a[i] < p1",            // comparison
+      "[a[lt], a[i]] = ",     // swap with left boundary
+      "lt++; i++",            // advance both pointers
+    ],
+    // Line 8 — element > p2: send right
+    8: [
+      "a[i] > p2",            // comparison
+      "[a[i], a[gt]] = ",     // swap with right boundary
+      "gt--",                 // retract right boundary (i stays)
+    ],
+    // Line 9 — element in [p1,p2]: already in place, just advance
+    9: [
+      "else                 { i++; }",  // middle-region no-op branch
+    ],
+    // Line 10 — size-ranked recursion + tail continuation
+    10: [
+      "regions.sort(",         // rank regions by size
+      "sort(regions[0]",       // recurse into smallest
+      "lo = regions[2]",       // tail-call largest (no stack frame)
+    ],
+  },
 };
 
 /**
