@@ -176,7 +176,7 @@ export const MNEMONICS: Record<string, Mnemonic[]> = {
     },
     {
       headline: "Ninther: take the median of three medians",
-      body: "A single median-of-3 can still be fooled. Logos Sort uses a ninther: for each candidate pivot index it takes the median of that index and its two neighbours. This costs three comparisons but raises pivot quality substantially — even in nearly-sorted or adversarial inputs the pivot lands close to the true median, shrinking both partition regions toward equal halves.",
+      body: "A single median-of-3 can still be fooled. Logos Sort uses a ninther: for each candidate pivot index it takes the median of that index and its two neighbors. This costs three comparisons but raises pivot quality substantially — even in nearly-sorted or adversarial inputs the pivot lands close to the true median, shrinking both partition regions toward equal halves.",
     },
     {
       headline: "Smallest region first, introsort as a safety net",

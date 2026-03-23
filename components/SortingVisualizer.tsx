@@ -195,66 +195,72 @@ export default function SortingVisualizer({ algorithm }: Props) {
             <Stat label="Sorted" value={`${sortedPct}%`} color="var(--color-state-sorted)" />
           </div>
 
-          {/* Step description */}
-          <div
-            className="rounded-lg px-4 py-3 text-sm min-h-[2.75rem] flex items-center"
-            style={{ background: "var(--color-surface-2)", color: "var(--color-muted)" }}
-          >
-            {step.description}
-          </div>
-
-          {/* Bar chart */}
-          <div
-            className="rounded-xl flex-1 min-h-0 overflow-hidden"
-            style={{
-              background: "var(--color-surface-2)",
-              border: "1px solid var(--color-border)",
-            }}
-          >
+          {/* Two-column layout: bar chart left, controls right */}
+          <div className="flex flex-1 gap-4 min-h-0">
+            {/* Bar chart */}
             <div
-              className="w-full h-full flex items-end gap-px p-3"
-              style={{ boxSizing: "border-box" }}
+              className="rounded-xl flex-1 min-h-0 overflow-hidden"
+              style={{
+                background: "var(--color-surface-2)",
+                border: "1px solid var(--color-border)",
+              }}
             >
-              {step.array.map((val, i) => (
-                <div
-                  key={i}
-                  title={String(val)}
-                  style={{
-                    flex: 1,
-                    height: `${(val / peak) * 100}%`,
-                    minWidth: 2,
-                    maxWidth: 40,
-                    background: BAR_COLORS[step.states[i]],
-                    borderRadius: "2px 2px 0 0",
-                    transition: "height 0.08s ease, background-color 0.12s ease",
-                  }}
-                />
-              ))}
+              <div
+                className="w-full h-full flex items-end gap-px p-3"
+                style={{ boxSizing: "border-box" }}
+              >
+                {step.array.map((val, i) => (
+                  <div
+                    key={i}
+                    title={String(val)}
+                    style={{
+                      flex: 1,
+                      height: `${(val / peak) * 100}%`,
+                      minWidth: 2,
+                      maxWidth: 40,
+                      background: BAR_COLORS[step.states[i]],
+                      borderRadius: "2px 2px 0 0",
+                      transition: "height 0.08s ease, background-color 0.12s ease",
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {/* Right column: legend + controls + step description beneath */}
+            <div className="flex flex-col gap-4 w-80 shrink-0">
+              {/* Legend */}
+              <div className="flex flex-wrap gap-4">
+                {(Object.entries(BAR_COLORS) as [string, string][]).map(([state, color]) => (
+                  <div key={state} className="flex items-center gap-1.5">
+                    <div className="w-3 h-3 rounded-sm" style={{ background: color }} />
+                    <span className="text-xs capitalize" style={{ color: "var(--color-muted)" }}>
+                      {state === "minimum" ? "curr. min" : state}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <PlaybackControls
+                stepCount={steps.length}
+                stepIdx={stepIdx}
+                setStepIdx={setStepIdx}
+                isPlaying={isPlaying}
+                setIsPlaying={setIsPlaying}
+                speed={speed}
+                setSpeed={setSpeed}
+                onReset={reset}
+              />
+
+              {/* Step description — slides under the shorter (right) column */}
+              <div
+                className="rounded-lg px-4 py-3 text-sm min-h-[2.75rem] flex items-center mt-auto"
+                style={{ background: "var(--color-surface-2)", color: "var(--color-muted)" }}
+              >
+                {step.description}
+              </div>
             </div>
           </div>
-
-          {/* Legend */}
-          <div className="flex flex-wrap gap-4">
-            {(Object.entries(BAR_COLORS) as [string, string][]).map(([state, color]) => (
-              <div key={state} className="flex items-center gap-1.5">
-                <div className="w-3 h-3 rounded-sm" style={{ background: color }} />
-                <span className="text-xs capitalize" style={{ color: "var(--color-muted)" }}>
-                  {state === "minimum" ? "curr. min" : state}
-                </span>
-              </div>
-            ))}
-          </div>
-
-          <PlaybackControls
-            stepCount={steps.length}
-            stepIdx={stepIdx}
-            setStepIdx={setStepIdx}
-            isPlaying={isPlaying}
-            setIsPlaying={setIsPlaying}
-            speed={speed}
-            setSpeed={setSpeed}
-            onReset={reset}
-          />
         </div>
 
       </div>

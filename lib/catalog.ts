@@ -58,6 +58,12 @@ export const SORTING_ALGORITHMS: SortingEntry[] = [
   { kind: "sorting", name: "Radix Sort",     path: "/sorting/radix",     time: "O(nk)",      space: "O(n+k)",    stable: true,  online: false, blurb: "Sorts digit by digit, least to most significant, using counting sort at each position." },
   { kind: "sorting", name: "Bucket Sort",    path: "/sorting/bucket",    time: "O(n+k)",     space: "O(n)",      stable: true,  online: false, blurb: "Scatters elements into buckets, sorts each bucket with insertion sort, then concatenates." },
   { kind: "sorting", name: "Tim Sort",       path: "/sorting/timsort",   time: "O(n log n)", space: "O(n)",      stable: true,  online: false, blurb: "Detects natural runs, extends short ones with insertion sort, then merges via galloping mode. Python's and Java's built-in sort." },
+  { kind: "sorting", name: "Cocktail Sort",  path: "/sorting/cocktail",  time: "O(n²)",      space: "O(1)",      stable: true,  online: false, blurb: "Bidirectional bubble sort — forward pass pushes the max right, backward pass pushes the min left. Faster on partially-sorted data." },
+  { kind: "sorting", name: "Comb Sort",      path: "/sorting/comb",      time: "O(n²)",      space: "O(1)",      stable: false, online: false, blurb: "Eliminates turtles (small values near the end) by comparing elements far apart. Shrinks the gap by factor 1.3 each pass." },
+  { kind: "sorting", name: "Gnome Sort",     path: "/sorting/gnome",     time: "O(n²)",      space: "O(1)",      stable: true,  online: true,  blurb: "A single pointer advances if neighbors are in order, or swaps and retreats. The simplest possible sorting algorithm." },
+  { kind: "sorting", name: "Pancake Sort",   path: "/sorting/pancake",   time: "O(n²)",      space: "O(1)",      stable: false, online: false, blurb: "Sorts by prefix reversals only — like flipping stacks of pancakes. Each round places the next-largest element using at most 2 flips." },
+  { kind: "sorting", name: "Cycle Sort",     path: "/sorting/cycle",     time: "O(n²)",      space: "O(1)",      stable: false, online: false, blurb: "Writes each element exactly once by tracing permutation cycles. Optimal when array writes are expensive." },
+  { kind: "sorting", name: "Odd-Even Sort",  path: "/sorting/oddeven",   time: "O(n²)",      space: "O(1)",      stable: true,  online: false, blurb: "Alternates between odd-indexed and even-indexed adjacent swaps. Parallelizes naturally — each phase can run simultaneously." },
 ];
 
 export const DATA_STRUCTURES: DSEntry[] = [

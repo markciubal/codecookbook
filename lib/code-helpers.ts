@@ -27,11 +27,12 @@ import { LANGUAGE_META } from "./annotatedCode";
 
 // ── Comment primitives ────────────────────────────────────────────────────────
 
-/**
- * Single-line comment in the idiomatic style for the given language.
- *   TypeScript / JavaScript / Java / C++ / Rust / Go → // text
- *   Python                                            → # text
- *   C                                                 → /* text *\/
+/*
+ * Language comment syntax.
+ *
+ * Each language has one idiomatic style for inline comments. This function
+ * returns the correctly-prefixed comment string. C is the odd one — it uses
+ * block comment syntax even for single lines because // is not standard C89.
  */
 export function lc(lang: Language, text: string): string {
   if (lang === "python") return `# ${text}`;
@@ -42,10 +43,14 @@ export function lc(lang: Language, text: string): string {
 
 // ── Derived helpers ───────────────────────────────────────────────────────────
 
-/**
- * Standard algorithm stats footer.
- * Produces e.g. `// Time: O(n²)  Space: O(1)  Stable: YES`
- * with the comment style appropriate for the language.
+/*
+ * Stats footer.
+ *
+ * Produces a single comment line summarising the algorithm's complexity,
+ * e.g. `// Time: O(n²)  Space: O(1)  Stable: YES`.
+ *
+ * Python and R use their own boolean spellings (True/TRUE); everything else
+ * uses YES/NO. The comment prefix comes from lc() so the style is consistent.
  */
 export function statsLine(
   lang: Language,
@@ -62,16 +67,23 @@ export function statsLine(
   return lc(lang, `Time: ${time}  Space: ${space}  Stable: ${stableStr}`);
 }
 
-/**
- * Section divider, e.g. `// ── demo ──`
+/*
+ * Section divider.
+ *
+ * Produces a visual break comment, e.g. `// ── demo ──`.
+ * Used to separate the algorithm implementation from the demo block in
+ * annotated code samples.
  */
 export function sectionDivider(lang: Language, label: string): string {
   return lc(lang, `── ${label} ──`);
 }
 
-/**
- * Run command footer, e.g. `// Run: npx ts-node solution.ts`
- * Reads the canonical run command from LANGUAGE_META.
+/*
+ * Run command footer.
+ *
+ * Produces the final comment line telling the reader how to execute the file,
+ * e.g. `// Run: npx ts-node solution.ts`. The command comes from LANGUAGE_META
+ * so every language has one consistent, correct invocation.
  */
 export function runLine(lang: Language): string {
   return lc(lang, `Run: ${LANGUAGE_META[lang].runCmd}`);
@@ -79,16 +91,18 @@ export function runLine(lang: Language): string {
 
 // ── Function name generation ──────────────────────────────────────────────────
 
-/**
- * Returns the idiomatic sort function name for a given algorithm and language.
+/*
+ * Idiomatic function name.
  *
- * Naming conventions:
- *   TypeScript / JavaScript / Java / C++ → camelCase  bubbleSort, logosSort
- *   Python / C / Rust                    → snake_case  bubble_sort, logos_sort
- *   Go                                   → PascalCase  BubbleSort, LogosSort
+ * Each language has a naming convention for functions. This function returns
+ * the correctly-cased sort function name for the given algorithm and language.
  *
- * Special cases:
- *   timsort → timSort (not timsortSort)
+ *   camelCase  → TypeScript, JavaScript, Java, C++   (bubbleSort)
+ *   snake_case → Python, C, Rust, R                   (bubble_sort)
+ *   PascalCase → Go                                   (BubbleSort)
+ *
+ * "timsort" is a special case — the base word is "tim" so the result is
+ * timSort, not timsortSort.
  */
 
 // The "base word" before "Sort" — avoids timsortSort

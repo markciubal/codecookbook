@@ -2,10 +2,15 @@ import type { Language } from "./annotatedCode";
 
 // ── Sorting: map pseudocode line → code line highlights ──────────────────────
 
-/**
- * Patterns that identify the code lines corresponding to each pseudocode step.
- * Each entry is an array of substrings — a code line is highlighted if it
- * contains ANY of them.  Keep patterns specific enough to avoid false positives.
+/*
+ * Pattern table.
+ *
+ * A lookup from algorithm + pseudocode step number to a list of substrings.
+ * A code line is highlighted if it contains any of those substrings.
+ *
+ * The invariant: every pattern is specific enough that it only matches the
+ * intended line, not neighboring code. When in doubt, be more specific.
+ * A false positive (highlighting the wrong line) is worse than a miss.
  */
 const SORT_PATTERNS: Record<string, Record<number, string[]>> = {
   bubble: {
@@ -238,8 +243,8 @@ const SORT_PATTERNS: Record<string, Record<number, string[]>> = {
     ],
     // Line 4 — ninther pivot refinement
     4: [
-      "const p1 = ninther",  // smooth first pivot against neighbours
-      "const p2 = ninther",  // smooth second pivot against neighbours
+      "const p1 = ninther",  // smooth first pivot against neighbors
+      "const p2 = ninther",  // smooth second pivot against neighbors
       "ninther(lo",          // any ninther call
       "p1   <- ninther(",    // R first ninther call
       "p2   <- ninther(",    // R second ninther call
@@ -289,9 +294,16 @@ const SORT_PATTERNS: Record<string, Record<number, string[]>> = {
   },
 };
 
-/**
- * Returns the set of 0-based line indices to highlight in the actual code
- * for the given algorithm + pseudocode step.
+/*
+ * Highlight resolver.
+ *
+ * Takes an algorithm id, a pseudocode step number, and the full source code.
+ * Returns the set of 0-based line indices in the code that correspond to
+ * that pseudocode step.
+ *
+ * How it works: look up the patterns for this step, split the code into lines,
+ * and mark every line that contains any of the patterns. The Set handles
+ * deduplication — a line matched by two patterns is only highlighted once.
  */
 export function getSortHighlightLines(
   algorithmId: string,
@@ -312,7 +324,13 @@ export function getSortHighlightLines(
 
 // ── DS: find method line range ────────────────────────────────────────────────
 
-/** Converts a camelCase/PascalCase method name to the language-specific variant. */
+/*
+ * Name convention adapter.
+ *
+ * Method names in the codebase are written in camelCase (JavaScript convention).
+ * Python uses snake_case; Go uses PascalCase. This function translates before
+ * searching so the same method name works across all languages.
+ */
 function resolveMethodName(name: string, language: Language): string {
   if (language === "python") {
     // camelCase → snake_case
@@ -325,9 +343,12 @@ function resolveMethodName(name: string, language: Language): string {
   return name;
 }
 
-/**
- * Finds the start and end (0-based, inclusive) line indices of a named method
- * in the given code string.  Works for brace-delimited languages and Python.
+/*
+ * Method range finder — entry point.
+ *
+ * Finds the start and end line indices (0-based, inclusive) of a named method.
+ * Dispatches to the right strategy: brace-counting for C-family languages,
+ * indentation-tracking for Python.
  */
 export function getMethodLineRange(
   code: string,
@@ -343,6 +364,19 @@ export function getMethodLineRange(
   return getBraceMethodRange(lines, name);
 }
 
+/*
+ * Brace-counting range finder.
+ *
+ * A method starts when we find its name on a non-comment line.
+ * It ends when the brace depth returns to zero after having opened.
+ *
+ * Invariant: `depth` counts open braces minus close braces seen so far.
+ * When depth drops back to zero after going above zero, the method body is complete.
+ *
+ * Think of it like tracking how many rooms deep you are in a building.
+ * You enter the front door (depth 1), pass through inner rooms (depth 2, 3…),
+ * and when you exit the front door again (depth 0), the building is complete.
+ */
 function getBraceMethodRange(
   lines: string[],
   name: string,
@@ -378,6 +412,16 @@ function getBraceMethodRange(
   return { start, end: lines.length - 1 };
 }
 
+/*
+ * Indentation-based range finder (Python).
+ *
+ * Python methods are bounded by indentation, not braces. A method ends when
+ * a non-blank line appears at the same or lesser indentation as the `def` line.
+ *
+ * Invariant: every line included has strictly greater indentation than the `def`.
+ * Blank lines are included (they may be part of the body).
+ * The first non-blank line that violates this invariant ends the range.
+ */
 function getPythonMethodRange(
   lines: string[],
   name: string,
