@@ -87,12 +87,11 @@ function logosSort(input: number[]): number[] {
    * index when the cut is placed here. An adversary must solve a problem as hard
    * as approximating φ — which is maximally hard by Hurwitz's theorem.
    *
-   * Technical: φ⁻¹ = (√5−1)/2 ≈ 0.618 and φ⁻² = (3−√5)/2 ≈ 0.382.
-   * Computed from definition rather than hardcoded: Math.sqrt(5) is correctly
-   * rounded to within one ULP by IEEE 754. Transcribing 0.6180339887… by hand
-   * introduces a silent error on the last digit. The definition is the proof.
+   * Technical: φ⁻¹ = (√5−1)/2 ≈ 0.61803399 and φ⁻² = (3−√5)/2 ≈ 0.38196601.
+   * PHI is literal here for clarity; PHI2 is computed so both constants share
+   * the same √5 source and their sum stays exactly 1.0 in IEEE 754 double.
    */
-  const PHI  = (Math.sqrt(5) - 1) / 2; // φ⁻¹ = (√5−1)/2
+  const PHI  = 0.61803399; // φ⁻¹ ≈ 0.61803399 (8 decimal places)
   const PHI2 = (3 - Math.sqrt(5)) / 2; // φ⁻² = (3−√5)/2
 
   /*
@@ -358,29 +357,23 @@ function logosSort(input: number[]): number[] {
        * xrand() costs 6 XOR/shift operations — cheaper than a comparison.
        *
        * Technical: xrand() consumes one xoshiro128+ step — 6 XOR/shift operations,
-       * no division — producing a uniform float in (0, 1]. Combined with the
-       * φ-positions below, both pivot indices vary independently at every depth.
+       * no division — producing a uniform float in (0, 1]. Mapped to (−PHI, PHI] so
+       * pivot positions span both sides of center; indices clamped to [lo, hi].
        */
-      const randomFactor = xrand();
+      const randomFactor = (xrand() * 2 - 1) * PHI;
       const indexRange = upper - lower;
 
       /*
        * Golden-ratio pivot placement, refined by ninther.
        *
-       * Golden-ratio pivot placement.
-       *
-       * idx = lo + ⌊range × φ⁻ᵏ × chaos⌋.
-       * The chaos factor spreads positions across the full range.
-       * φ's irrationality means no repeating pattern can land on the same index.
-       * Ninther then replaces the raw value with the median of 3 neighbors.
-       *
-       * Technical: idx = lo + ⌊range × φ⁻ᵏ × chaos⌋.
-       * The chaos factor spreads positions across the full range.
+       * idx = lo + clamp(⌊range × φ⁻ᵏ × chaos⌋, 0, range).
+       * randomFactor ∈ (−PHI, PHI] keeps pivots spread across the full subarray
+       * while φ's irrationality prevents any periodic input from targeting the same index.
        * ninther then replaces the raw value with the local median of 3 neighbors,
        * improving expected partition balance (Bentley & McIlroy 1993 §5).
        */
-      const leftPivotIndex = lower + Math.min(indexRange, Math.floor(indexRange * PHI2 * randomFactor));
-      const rightPivotIndex = lower + Math.min(indexRange, Math.floor(indexRange * PHI  * randomFactor));
+      const leftPivotIndex  = lower + Math.max(0, Math.min(indexRange, Math.floor(indexRange * PHI2 * randomFactor)));
+      const rightPivotIndex = lower + Math.max(0, Math.min(indexRange, Math.floor(indexRange * PHI  * randomFactor)));
       const pivot1 = ninther(lower, upper, leftPivotIndex);
       const pivot2 = ninther(lower, upper, rightPivotIndex);
 

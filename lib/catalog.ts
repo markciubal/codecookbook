@@ -31,7 +31,23 @@ export type BenchmarkEntry = {
   blurb: string;
 };
 
-export type CatalogEntry = SortingEntry | DSEntry | BenchmarkEntry;
+export type CustomSortEntry = {
+  kind: "custom";
+  name: string;
+  path: string;
+  description: string;
+  blurb: string;
+};
+
+export type CatalogEntry = SortingEntry | DSEntry | BenchmarkEntry | CustomSortEntry;
+
+export const CUSTOM_SORT: CustomSortEntry = {
+  kind: "custom",
+  name: "Sort Your Data",
+  path: "/sorting/custom",
+  description: "Upload a CSV or paste your own numbers, pick an algorithm, and watch it sort live",
+  blurb: "Drop in any CSV or paste a list of numbers. Choose an algorithm, watch the sort animate bar-by-bar, then download the sorted result.",
+};
 
 export const BENCHMARK: BenchmarkEntry = {
   kind: "benchmark",

@@ -1486,18 +1486,20 @@ export function getLogosSortSteps(arr: number[]): SortStep[] {
       /*
        * PRNG draw — fresh randomness at each level scales the φ-pivot positions differently,
        * so no fixed input pattern can force the same pivot twice.
-       * Algorithmically: xrand() returns a uniform value in (0, 1] from the xoshiro128+ state.
+       * randomFactor ∈ (−PHI, PHI] = (−(φ−1), φ−1]: centered on zero, scaled by φ⁻¹ ≈ ±0.618.
+       * Algorithmically: xrand() ∈ (0,1] → (xrand()*2−1)*PHI ∈ (−PHI, PHI].
        */
-      const randomFactor = xrand();
+      const randomFactor = (xrand() * 2 - 1) * PHI;
       const range = upper - lower;
 
       /*
-       * Golden-ratio pivot placement — φ⁻² ≈ 0.382 and φ⁻¹ ≈ 0.618 scaled by randomFactor give
-       * positions no periodic input can target; ninther sharpens each index against its neighbors.
-       * Algorithmically: idx = lo + ⌊range × PHI × randomFactor⌋, refined by ninther before any swap.
+       * Golden-ratio pivot placement — φ⁻² and φ⁻¹ scaled by randomFactor ∈ (−PHI, PHI] give
+       * positions that span both sides of center; ninther sharpens each index against its neighbors.
+       * Clamped to [0, range] so indices stay within the subarray regardless of sign.
+       * Algorithmically: idx = lo + clamp(⌊range × PHI × randomFactor⌋, 0, range).
        */
-      const leftPivotIndex = lower + Math.min(range, Math.floor(range * PHI2 * randomFactor));
-      const rightPivotIndex = lower + Math.min(range, Math.floor(range * PHI  * randomFactor));
+      const leftPivotIndex  = lower + Math.max(0, Math.min(range, Math.floor(range * PHI2 * randomFactor)));
+      const rightPivotIndex = lower + Math.max(0, Math.min(range, Math.floor(range * PHI  * randomFactor)));
       // Line 3 — randomFactor drawn; golden-ratio positions computed. Highlight the raw candidate slots
       // before refinement so the user sees where the pivots are aimed, not yet what they become.
       step(`chaos=${randomFactor.toFixed(2)} — golden-ratio candidates at [${leftPivotIndex}] (φ²·range) and [${rightPivotIndex}] (φ·range); no fixed pattern can predict these positions`, 3, { [leftPivotIndex]: "comparing", [rightPivotIndex]: "comparing" });

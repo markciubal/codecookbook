@@ -11,8 +11,9 @@ import {
   Menu,
   X,
   Zap,
+  Upload,
 } from "lucide-react";
-import { BENCHMARK, SORTING_ALGORITHMS, DATA_STRUCTURES } from "@/lib/catalog";
+import { BENCHMARK, CUSTOM_SORT, SORTING_ALGORITHMS, DATA_STRUCTURES } from "@/lib/catalog";
 import AlgoBadge from "@/components/AlgoBadge";
 
 const NAV_ITEMS = [
@@ -70,6 +71,21 @@ function NavItems({
         >
           <Zap size={14} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
           <span className="text-sm">{BENCHMARK.name}</span>
+        </Link>
+        <Link
+          href={CUSTOM_SORT.path}
+          onClick={onClick}
+          className="flex items-center gap-2 px-3 py-2 rounded-lg transition-colors"
+          style={{
+            background: pathname === CUSTOM_SORT.path ? "var(--color-accent-muted)" : "var(--color-surface-2)",
+            color: pathname === CUSTOM_SORT.path ? "var(--color-accent)" : "var(--color-text)",
+            border: `1px solid ${pathname === CUSTOM_SORT.path ? "var(--color-accent)" : "var(--color-border)"}`,
+            borderLeft: `3px solid ${pathname === CUSTOM_SORT.path ? "var(--color-accent)" : "var(--color-border)"}`,
+            fontWeight: 600,
+          }}
+        >
+          <Upload size={14} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
+          <span className="text-sm">{CUSTOM_SORT.name}</span>
         </Link>
       </div>
 
