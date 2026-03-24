@@ -245,7 +245,7 @@ export default function CustomSortVisualizer() {
             <textarea
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
-              placeholder="e.g.  42, 7, 100, 3.14, 6, -6, 88..."
+              placeholder="e.g.  42, 7, 100, 3.14, -6, 6, 88..."
               rows={6}
               className="w-full rounded-xl px-4 py-3 text-sm font-mono resize-none"
               style={{

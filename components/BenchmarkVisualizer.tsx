@@ -74,7 +74,7 @@ const ALGO_NAMES: Record<string, string> = {
 const TIMSORT_JS_MULTIPLIER = 0.57;
 
 const ALGO_COLORS: Record<string, string> = {
-  logos:          "#e07b39",
+  logos:          "#000000",
   timsort:        "#5b9bd5",
   "timsort-js":   "#a8c9ed",  // lighter blue — same family, clearly related
   merge:     "#70ad47",
@@ -373,6 +373,7 @@ function Spinner({ value, onChange, min, max, label }: {
 
 // ── Scenario presets ──────────────────────────────────────────────────────────
 const SCENARIO_PRESETS = [
+  { label: "Logos vs Tim Sort", desc: "Head-to-head · random · 10K → 1M", algos: ["logos","timsort"], scenarios: ["random"] as BenchmarkScenario[], sizes: [10_000,100_000,1_000_000], pivot: undefined, gaps: undefined },
   { label: "O(n log n) shootout", desc: "All fast sorts · random · up to 1 M", algos: ["logos","timsort","merge","quick","heap"], scenarios: ["random"] as BenchmarkScenario[], sizes: [1000,10000,100000,500000,1000000], pivot: undefined, gaps: undefined },
   { label: "QuickSort worst case", desc: "First-pivot on sorted input", algos: ["quick","merge","logos"], scenarios: ["nearlySorted"] as BenchmarkScenario[], sizes: [500,1000,5000,10000,50000], pivot: "first" as QuickPivot, gaps: undefined },
   { label: "TimSort advantage", desc: "Nearly-sorted · merge vs insertion vs logos", algos: ["logos","timsort","merge","quick","insertion"], scenarios: ["nearlySorted"] as BenchmarkScenario[], sizes: [1000,10000,100000,500000], pivot: undefined, gaps: undefined },
@@ -2206,9 +2207,12 @@ function AlgoMiniCard({
               const fillDiameter = Math.max(1, (spaceBytes / maxSB) * 20);
               const label = spaceBytes >= 1_048_576 ? `${(spaceBytes / 1_048_576).toFixed(1)} MB` : spaceBytes >= 1024 ? `${(spaceBytes / 1024).toFixed(1)} KB` : `${spaceBytes} B`;
               return (
-                <span title={`Memory: ${label}`} style={{ position: "relative", width: 20, height: 20, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                  <span style={{ position: "absolute", inset: 0, borderRadius: "50%", background: "var(--color-surface-3)", border: "1px solid var(--color-border)" }} />
-                  <span style={{ position: "relative", width: fillDiameter, height: fillDiameter, borderRadius: "50%", background: "#000", display: "block" }} />
+                <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 1, flexShrink: 0 }}>
+                  <span style={{ position: "relative", width: 20, height: 20, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+                    <span style={{ position: "absolute", inset: 0, borderRadius: "50%", background: "var(--color-surface-3)", border: "1px solid var(--color-border)" }} />
+                    <span style={{ position: "relative", width: fillDiameter, height: fillDiameter, borderRadius: "50%", background: color, display: "block" }} />
+                  </span>
+                  <span style={{ fontSize: 7, fontFamily: "monospace", color: "var(--color-muted)", whiteSpace: "nowrap", lineHeight: 1 }}>{label}</span>
                 </span>
               );
             })()}
@@ -2350,7 +2354,7 @@ export default function BenchmarkVisualizer() {
     new Set([10_000, 100_000, 1_000_000])
   );
   const [scenarios, setScenarios] = useState<Set<BenchmarkScenario>>(
-    new Set(["random", "nearlySorted", "reversed", "duplicates"] as BenchmarkScenario[])
+    new Set(["random"] as BenchmarkScenario[])
   );
   const [rounds, setRounds] = useState(3);
   const [warmup, setWarmup] = useState(1);
@@ -2528,7 +2532,12 @@ export default function BenchmarkVisualizer() {
 
   const run = useCallback(async () => {
     const maxSz = selectedSizes.size > 0 ? Math.max(...selectedSizes) : 0;
-    const algos = [...selected].filter(id => !(SLOW_IDS.has(id) && maxSz > SLOW_THRESHOLD));
+    // Mirror slowDisabled exactly so the run list matches the checked-off checkboxes.
+    const algos = [...selected].filter(id =>
+      !(SLOW_IDS.has(id) && maxSz > SLOW_THRESHOLD) &&
+      !(MEDIUM_LIMITS[id] !== undefined && maxSz > MEDIUM_LIMITS[id].threshold) &&
+      !(!UNLIMITED_IDS.has(id) && maxSz > LARGE_THRESHOLD)
+    );
     const scenarioList = [...scenarios] as BenchmarkScenario[];
     if (!algos.length || !selectedSizes.size || !scenarioList.length) return;
 
