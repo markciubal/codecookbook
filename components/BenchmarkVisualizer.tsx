@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
-import { Play, Square, RotateCcw, Trophy, LineChart, ChevronRight, Lock, Unlock } from "lucide-react";
+import { Play, Square, RotateCcw, Trophy, LineChart, ChevronRight, Lock, Unlock, Volume2 } from "lucide-react";
 import { generateBenchmarkInput, SORT_FNS, makeQuickSort, makeShellSort, countSortOps, sortSteps, makeAdversarialInput, type BenchmarkScenario, type CustomDistribution, type QuickPivot, type ShellGaps, type SortStep } from "@/lib/benchmark";
 
 // ── Static config ─────────────────────────────────────────────────────────────
@@ -2114,8 +2114,43 @@ const MINI_BAR_COLORS = {
 
 const PLACE_EMOJI: Record<number, string> = { 1: "🥇", 2: "🥈", 3: "🥉" };
 
+/** Play 5 calm sine-wave beeps, each lasting exactly `timeMs` ms, then stop.
+ *  Pitch maps sort speed: faster → higher frequency. */
+function playBeep(timeMs: number) {
+  try {
+    const ctx = new AudioContext();
+    // Log-scale map: 1 ms → ~2000 Hz, 100 ms → ~440 Hz, 10 000 ms → ~150 Hz
+    const logMs = Math.log10(Math.max(1, timeMs));
+    const t     = Math.max(0, Math.min(1, logMs / 4));
+    const freq  = 2000 * Math.pow(150 / 2000, t);
+
+    const dur     = Math.max(0.08, timeMs / 1000);  // seconds, floor 80 ms
+    const gap     = 0.05;                            // 50 ms silence between beeps
+    const attack  = Math.min(0.04, dur * 0.10);
+    const release = Math.min(0.10, dur * 0.20);
+    const hold    = Math.max(0, dur - attack - release);
+
+    for (let i = 0; i < 5; i++) {
+      const t0  = ctx.currentTime + i * (dur + gap);
+      const osc  = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq, t0);
+      gain.gain.setValueAtTime(0, t0);
+      gain.gain.linearRampToValueAtTime(0.18, t0 + attack);
+      gain.gain.setValueAtTime(0.18, t0 + attack + hold);
+      gain.gain.linearRampToValueAtTime(0, t0 + attack + hold + release);
+      osc.start(t0);
+      osc.stop(t0 + dur + 0.01);
+      if (i === 4) osc.onended = () => ctx.close();
+    }
+  } catch { /* AudioContext not available */ }
+}
+
 function AlgoMiniCard({
-  id, steps, benchData, isActive, rank, loop, maxSpaceBytes, maxTotalSteps, onStop,
+  id, steps, benchData, isActive, rank, loop, maxSpaceBytes, maxTotalSteps, onStop, pulseEnabled, onTogglePulse,
 }: {
   id: string;
   steps: SortStep[] | null;
@@ -2126,6 +2161,8 @@ function AlgoMiniCard({
   maxSpaceBytes?: number;
   maxTotalSteps?: number;
   onStop?: () => void;
+  pulseEnabled?: boolean;
+  onTogglePulse?: () => void;
 }) {
   const [stepIdx, setStepIdx] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -2206,14 +2243,28 @@ function AlgoMiniCard({
               if (!spaceBytes || !maxSB) return null;
               const fillDiameter = Math.max(1, (spaceBytes / maxSB) * 20);
               const label = spaceBytes >= 1_048_576 ? `${(spaceBytes / 1_048_576).toFixed(1)} MB` : spaceBytes >= 1024 ? `${(spaceBytes / 1024).toFixed(1)} KB` : `${spaceBytes} B`;
+              const pulseDuration = Math.max(150, Math.min(5000, bestPoint.timeMs));
               return (
-                <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 1, flexShrink: 0 }}>
-                  <span style={{ position: "relative", width: 20, height: 20, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
-                    <span style={{ position: "absolute", inset: 0, borderRadius: "50%", background: "var(--color-surface-3)", border: "1px solid var(--color-border)" }} />
-                    <span style={{ position: "relative", width: fillDiameter, height: fillDiameter, borderRadius: "50%", background: color, display: "block" }} />
+                <>
+                  <span
+                    title={pulseEnabled ? "Click to pause pulse" : "Click to resume pulse"}
+                    onClick={onTogglePulse}
+                    style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 1, flexShrink: 0, cursor: "pointer" }}
+                  >
+                    <span style={{ position: "relative", width: 20, height: 20, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+                      <span style={{ position: "absolute", inset: 0, borderRadius: "50%", background: "var(--color-surface-3)", border: "1px solid var(--color-border)" }} />
+                      <span style={{ position: "relative", width: fillDiameter, height: fillDiameter, borderRadius: "50%", background: color, display: "block", ...(pulseEnabled ? { animationName: "cc-pulse", animationDuration: `${pulseDuration}ms`, animationTimingFunction: "ease-in-out", animationIterationCount: "infinite" } : {}) }} />
+                    </span>
+                    <span style={{ fontSize: 7, fontFamily: "monospace", color: "var(--color-muted)", whiteSpace: "nowrap", lineHeight: 1 }}>{label}</span>
                   </span>
-                  <span style={{ fontSize: 7, fontFamily: "monospace", color: "var(--color-muted)", whiteSpace: "nowrap", lineHeight: 1 }}>{label}</span>
-                </span>
+                  <button
+                    title={`Hear sort speed (${fmtTime(bestPoint.timeMs)})`}
+                    onClick={e => { e.stopPropagation(); playBeep(bestPoint.timeMs); }}
+                    style={{ background: "none", border: "none", cursor: "pointer", padding: "0 1px", color: "var(--color-muted)", display: "inline-flex", alignItems: "center", flexShrink: 0, position: "relative", top: -3 }}
+                  >
+                    <Volume2 size={10} strokeWidth={1.5} />
+                  </button>
+                </>
               );
             })()}
           </span>
@@ -2350,6 +2401,17 @@ function cacheLevel(id: string, n: number): { label: string; color: string } {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function BenchmarkVisualizer() {
+  const [pulseEnabled, setPulseEnabled] = useState<boolean>(() => {
+    try { return localStorage.getItem("cc-pulse") !== "off"; } catch { return true; }
+  });
+  const togglePulse = useCallback(() => {
+    setPulseEnabled(prev => {
+      const next = !prev;
+      try { localStorage.setItem("cc-pulse", next ? "on" : "off"); } catch {}
+      return next;
+    });
+  }, []);
+
   const [selectedSizes, setSelectedSizes] = useState<Set<number>>(
     new Set([10_000, 100_000, 1_000_000])
   );
@@ -3385,6 +3447,8 @@ export default function BenchmarkVisualizer() {
                           maxSpaceBytes={maxSpaceBytes}
                           maxTotalSteps={maxTotalSteps}
                           onStop={status === "running" ? () => stopAlgo(id) : undefined}
+                          pulseEnabled={pulseEnabled}
+                          onTogglePulse={togglePulse}
                         />
                       ))}
                     </div>
