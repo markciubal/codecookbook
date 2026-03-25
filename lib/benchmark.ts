@@ -1,5 +1,26 @@
 export type BenchmarkScenario = "random" | "nearlySorted" | "reversed" | "duplicates";
 
+/** Tunable constants for Logos Sort. */
+export interface LogosParams {
+  phi:            number;  // primary pivot offset   — default φ⁻¹ ≈ 0.618034
+  phi2:           number;  // secondary pivot offset — default φ⁻² ≈ 0.381966
+  base:           number;  // insertion-sort threshold (elements) — default 48
+  depthMult:      number;  // depth-limit multiplier — default 2  (limit = mult·⌊log₂n⌋ + add)
+  depthAdd:       number;  // depth-limit addend     — default 4
+  randomScale:    number;  // scales ±randomFactor range — default 1.0
+  countingMult:   number;  // counting-sort trigger: valueRange < n·mult — default 4
+}
+
+export const DEFAULT_LOGOS_PARAMS: LogosParams = {
+  phi:          0.61803399,
+  phi2:         0.38196601,
+  base:         48,
+  depthMult:    2,
+  depthAdd:     4,
+  randomScale:  1.0,
+  countingMult: 4,
+};
+
 export interface CustomDistribution {
   preSortedPct: number;  // 0–100: % of elements already in sorted position (prefix sorted)
   duplicatePct: number;  // 0–100: % of elements replaced with duplicates
@@ -55,7 +76,7 @@ export function generateBenchmarkInput(
 
 // ── Pure sort implementations ─────────────────────────────────────────────────
 
-function logosSort(input: number[]): number[] {
+function logosSort(input: number[], p: LogosParams = DEFAULT_LOGOS_PARAMS): number[] {
   /*
    * Logos Sort — dual-pivot introsort hybrid.
    *
@@ -91,8 +112,8 @@ function logosSort(input: number[]): number[] {
    * PHI is literal here for clarity; PHI2 is computed so both constants share
    * the same √5 source and their sum stays exactly 1.0 in IEEE 754 double.
    */
-  const PHI  = 0.61803399; // φ⁻¹ ≈ 0.61803399 (8 decimal places)
-  const PHI2 = (3 - Math.sqrt(5)) / 2; // φ⁻² = (3−√5)/2
+  const PHI  = p.phi;
+  const PHI2 = p.phi2;
 
   /*
    * Insertion sort threshold.
@@ -109,7 +130,7 @@ function logosSort(input: number[]): number[] {
    * has fixed cost γ. Below threshold n₀ where αn₀² < βn₀ log n₀ + γ, insertion
    * sort is faster. For typical α, β, γ on modern hardware, n₀ ∈ [10, 64]. We use 48.
    */
-  const BASE = 48;
+  const BASE = p.base;
   const arr = [...input];
   const arraySize = arr.length;
 
@@ -159,7 +180,7 @@ function logosSort(input: number[]): number[] {
    * small-n rounding. Beyond this depth the platform's sort (V8: TimSort,
    * itself O(n log n)) takes over — guaranteeing O(n log n) unconditionally.
    */
-  const depthLimit = 2 * Math.floor(Math.log2(arraySize)) + 4;
+  const depthLimit = p.depthMult * Math.floor(Math.log2(arraySize)) + p.depthAdd;
 
   /*
    * Median of three — sorting network.
@@ -314,7 +335,7 @@ function logosSort(input: number[]): number[] {
       let minValue = arr[lower], maxValue = arr[lower];
       for (let scanIndex = lower + 1; scanIndex <= upper; scanIndex++) { if (arr[scanIndex] < minValue) minValue = arr[scanIndex]; if (arr[scanIndex] > maxValue) maxValue = arr[scanIndex]; }
       const valueRange = maxValue - minValue;
-      if (Number.isInteger(minValue) && valueRange < subArraySize * 4) {
+      if (Number.isInteger(minValue) && valueRange < subArraySize * p.countingMult) {
         const counts = new Array(valueRange + 1).fill(0);
         for (let scanIndex = lower; scanIndex <= upper; scanIndex++) counts[arr[scanIndex] - minValue]++;
         let writePos = lower;
@@ -360,7 +381,7 @@ function logosSort(input: number[]): number[] {
        * no division — producing a uniform float in (0, 1]. Mapped to (−PHI, PHI] so
        * pivot positions span both sides of center; indices clamped to [lo, hi].
        */
-      const randomFactor = (xrand() * 2 - 1) * PHI;
+      const randomFactor = (xrand() * 2 - 1) * PHI * p.randomScale;
       const indexRange = upper - lower;
 
       /*
@@ -409,6 +430,11 @@ function logosSort(input: number[]): number[] {
 
   sort(0, arraySize - 1, depthLimit);
   return arr;
+}
+
+/** Returns a Logos Sort function bound to the given params. */
+export function makeLogosSort(params: LogosParams): (arr: number[]) => number[] {
+  return (input: number[]) => logosSort(input, params);
 }
 
 function mergeSort(input: number[]): number[] {

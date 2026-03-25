@@ -1,4 +1,6 @@
 import type { BarState, SortStep, AlgorithmMeta, SortAlgorithm } from "./types";
+import { DEFAULT_LOGOS_PARAMS } from "./benchmark";
+import type { LogosParams } from "./benchmark";
 
 export function generateArray(size: number, min: number, max: number): number[] {
   return Array.from(
@@ -1334,20 +1336,20 @@ export function getTimSortSteps(arr: number[]): SortStep[] {
  * Golden-ratio pivots (Musser 1997 introsort depth guard) + xoshiro128+ (Blackman &
  * Vigna 2018) + counting/gallop shortcuts + insertion sort fallback below BASE=48.
  */
-export function getLogosSortSteps(arr: number[]): SortStep[] {
+export function getLogosSortSteps(arr: number[], p: LogosParams = DEFAULT_LOGOS_PARAMS): SortStep[] {
   /*
    * Irrational pivot positions — φ⁻¹ ≈ 0.618 and φ⁻² ≈ 0.382.
    * No periodic input pattern can target these offsets.
    * Algorithmically: computing from definition gives the exact IEEE 754 double.
    */
-  const PHI  = (Math.sqrt(5) - 1) / 2; // φ⁻¹ = (√5−1)/2
-  const PHI2 = (3 - Math.sqrt(5)) / 2; // φ⁻² = (3−√5)/2
+  const PHI  = p.phi;
+  const PHI2 = p.phi2;
 
   /*
    * Insertion sort threshold — below 48 elements, recursion overhead exceeds its benefit.
    * Algorithmically: insertion sort's cache locality and zero overhead beats quicksort at small n.
    */
-  const BASE = 48;
+  const BASE = p.base;
 
   /*
    * Unpredictable seed — one CSPRNG call at creation seeds xoshiro128+ for all levels of recursion.
@@ -1420,7 +1422,7 @@ export function getLogosSortSteps(arr: number[]): SortStep[] {
    * Depth limit — if recursion descends 2·log₂(n)+4 levels, fall back to insertion sort.
    * Algorithmically: Musser's introsort depth guard; explicit stack for visualiser compatibility.
    */
-  const depthLimit = 2 * Math.floor(Math.log2(Math.max(arraySize, 2))) + 4;
+  const depthLimit = p.depthMult * Math.floor(Math.log2(Math.max(arraySize, 2))) + p.depthAdd;
   const stack: [number, number, number][] = [[0, arraySize - 1, depthLimit]];
 
   while (stack.length > 0) {
@@ -1447,10 +1449,10 @@ export function getLogosSortSteps(arr: number[]): SortStep[] {
       let minValue = arr2[lower], maxValue = arr2[lower];
       for (let k = lower + 1; k <= upper; k++) { if (arr2[k] < minValue) minValue = arr2[k]; if (arr2[k] > maxValue) maxValue = arr2[k]; }
       const valSpan = maxValue - minValue;
-      if (Number.isInteger(minValue) && valSpan < subSize * 4) {
+      if (Number.isInteger(minValue) && valSpan < subSize * p.countingMult) {
         const ov: Partial<Record<number, BarState>> = {};
         for (let k = lower; k <= upper; k++) ov[k] = "comparing";
-        step(`Counting sort: range ${minValue}–${maxValue}, span ${valSpan + 1} < ${subSize * 4} — values are dense enough to count instead of compare`, 1, ov);
+        step(`Counting sort: range ${minValue}–${maxValue}, span ${valSpan + 1} < ${subSize * p.countingMult} — values are dense enough to count instead of compare`, 1, ov);
         const counts = new Array(valSpan + 1).fill(0);
         for (let k = lower; k <= upper; k++) counts[arr2[k] - minValue]++;
         let k = lower;
@@ -1489,7 +1491,7 @@ export function getLogosSortSteps(arr: number[]): SortStep[] {
        * randomFactor ∈ (−PHI, PHI] = (−(φ−1), φ−1]: centered on zero, scaled by φ⁻¹ ≈ ±0.618.
        * Algorithmically: xrand() ∈ (0,1] → (xrand()*2−1)*PHI ∈ (−PHI, PHI].
        */
-      const randomFactor = (xrand() * 2 - 1) * PHI;
+      const randomFactor = (xrand() * 2 - 1) * PHI * p.randomScale;
       const range = upper - lower;
 
       /*

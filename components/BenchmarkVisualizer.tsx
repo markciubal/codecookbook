@@ -1,15 +1,16 @@
 "use client";
 
 import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
-import { Play, Square, RotateCcw, Trophy, LineChart, ChevronRight, Lock, Unlock, Volume2 } from "lucide-react";
-import { generateBenchmarkInput, SORT_FNS, makeQuickSort, makeShellSort, countSortOps, sortSteps, makeAdversarialInput, type BenchmarkScenario, type CustomDistribution, type QuickPivot, type ShellGaps, type SortStep } from "@/lib/benchmark";
+import { Play, Square, RotateCcw, Trophy, LineChart, ChevronRight, Lock, Unlock, Volume2, Settings } from "lucide-react";
+import { generateBenchmarkInput, SORT_FNS, makeQuickSort, makeShellSort, makeLogosSort, countSortOps, sortSteps, makeAdversarialInput, DEFAULT_LOGOS_PARAMS, type LogosParams, type BenchmarkScenario, type CustomDistribution, type QuickPivot, type ShellGaps, type SortStep } from "@/lib/benchmark";
+import { getLogosSortSteps } from "@/lib/algorithms";
 
 // ── Static config ─────────────────────────────────────────────────────────────
 
 const SLOW_IDS = new Set(["insertion", "selection", "bubble", "cocktail", "comb", "gnome", "pancake", "cycle", "oddeven"]);
 const SLOW_THRESHOLD = 5_000;
 // Only Logos Sort and Tim Sort are allowed above 5 M elements
-const UNLIMITED_IDS = new Set(["logos", "timsort"]);
+const UNLIMITED_IDS = new Set(["logos", "logos-custom", "timsort"]);
 const LARGE_THRESHOLD = 5_000_000;
 
 // Algorithms with practical upper bounds above SLOW_THRESHOLD but below LARGE_THRESHOLD
@@ -59,7 +60,8 @@ const ALGO_GROUPS = [
 ] as const;
 
 const ALGO_NAMES: Record<string, string> = {
-  logos: "Logos Sort", timsort: "Tim Sort",   merge: "Merge Sort",
+  logos: "Logos Sort", "logos-custom": "Logos (custom)",
+  timsort: "Tim Sort",   merge: "Merge Sort",
   quick: "Quick Sort", heap: "Heap Sort",      shell: "Shell Sort",
   counting: "Counting Sort", radix: "Radix Sort", bucket: "Bucket Sort",
   insertion: "Insertion Sort", selection: "Selection Sort", bubble: "Bubble Sort",
@@ -75,6 +77,7 @@ const TIMSORT_JS_MULTIPLIER = 0.57;
 
 const ALGO_COLORS: Record<string, string> = {
   logos:          "#000000",
+  "logos-custom": "#555555",
   timsort:        "#5b9bd5",
   "timsort-js":   "#a8c9ed",  // lighter blue — same family, clearly related
   merge:     "#70ad47",
@@ -97,6 +100,7 @@ const ALGO_COLORS: Record<string, string> = {
 
 const ALGO_SPACE: Record<string, string> = {
   logos:          "O(log n)",
+  "logos-custom": "O(log n)",
   timsort:        "O(n)",
   "timsort-js":   "O(n)",
   merge:     "O(n)",
@@ -119,6 +123,7 @@ const ALGO_SPACE: Record<string, string> = {
 
 const ALGO_TIME: Record<string, string> = {
   logos:          "O(n log n)",
+  "logos-custom": "O(n log n)",
   timsort:        "O(n log n)",
   "timsort-js":   "O(n log n)",
   merge:     "O(n log n)",
@@ -142,6 +147,7 @@ const ALGO_TIME: Record<string, string> = {
 // true = stable, false = unstable, null = not applicable
 const ALGO_STABLE: Record<string, boolean> = {
   logos:          false,
+  "logos-custom": false,
   timsort:        true,
   "timsort-js":   true,
   merge:     true,
@@ -165,6 +171,7 @@ const ALGO_STABLE: Record<string, boolean> = {
 // true = can sort a stream, false = needs full input
 const ALGO_ONLINE: Record<string, boolean> = {
   logos:          false,
+  "logos-custom": false,
   timsort:        false,
   "timsort-js":   false,
   merge:     false,
@@ -2404,6 +2411,8 @@ export default function BenchmarkVisualizer() {
   const [pulseEnabled, setPulseEnabled] = useState<boolean>(() => {
     try { return localStorage.getItem("cc-pulse") !== "off"; } catch { return true; }
   });
+  const [logosParams, setLogosParams] = useState<LogosParams>(DEFAULT_LOGOS_PARAMS);
+  const [logosSettingsOpen, setLogosSettingsOpen] = useState(false);
   const togglePulse = useCallback(() => {
     setPulseEnabled(prev => {
       const next = !prev;
@@ -2600,6 +2609,12 @@ export default function BenchmarkVisualizer() {
       !(MEDIUM_LIMITS[id] !== undefined && maxSz > MEDIUM_LIMITS[id].threshold) &&
       !(!UNLIMITED_IDS.has(id) && maxSz > LARGE_THRESHOLD)
     );
+    // Auto-inject logos-custom alongside logos whenever params differ from defaults.
+    const paramsChanged = (Object.keys(DEFAULT_LOGOS_PARAMS) as (keyof typeof DEFAULT_LOGOS_PARAMS)[])
+      .some(k => logosParams[k] !== DEFAULT_LOGOS_PARAMS[k]);
+    if (paramsChanged && algos.includes("logos") && !algos.includes("logos-custom")) {
+      algos.splice(algos.indexOf("logos") + 1, 0, "logos-custom");
+    }
     const scenarioList = [...scenarios] as BenchmarkScenario[];
     if (!algos.length || !selectedSizes.size || !scenarioList.length) return;
 
@@ -2641,11 +2656,30 @@ export default function BenchmarkVisualizer() {
     const prerunArr = generateBenchmarkInput(PRERUN_N, "random");
     const prerunStepsAcc: Record<string, SortStep[]> = {};
     for (const id of algos) {
-      const fn = id === "quick" ? makeQuickSort(quickPivot) :
-                 id === "shell" ? makeShellSort(shellGaps) :
+      const fn = id === "quick"         ? makeQuickSort(quickPivot) :
+                 id === "shell"         ? makeShellSort(shellGaps) :
+                 id === "logos-custom"  ? makeLogosSort(logosParams) :
+                 id === "logos"         ? makeLogosSort(DEFAULT_LOGOS_PARAMS) :
                  SORT_FNS[id];
       const stepsArr: SortStep[] = [];
-      for (const s of sortSteps(id, [...prerunArr])) { stepsArr.push(s); if (stepsArr.length > 50_000) break; }
+      if (id === "logos" || id === "logos-custom") {
+        const params = id === "logos-custom" ? logosParams : DEFAULT_LOGOS_PARAMS;
+        for (const s of getLogosSortSteps([...prerunArr], params)) {
+          // Convert types.ts SortStep {array, states} → benchmark.ts SortStep {arr, comparing, swapping, sorted, pivot}
+          const comparing: number[] = [], swapping: number[] = [], sorted: number[] = [];
+          let pivot: number | undefined;
+          s.states.forEach((st, i) => {
+            if (st === "comparing" || st === "current") comparing.push(i);
+            else if (st === "swapping") swapping.push(i);
+            else if (st === "sorted") sorted.push(i);
+            else if (st === "pivot") pivot = i;
+          });
+          stepsArr.push({ arr: s.array, comparing, swapping, sorted, pivot } as unknown as SortStep);
+          if (stepsArr.length > 50_000) break;
+        }
+      } else {
+        for (const s of sortSteps(id, [...prerunArr])) { stepsArr.push(s); if (stepsArr.length > 50_000) break; }
+      }
       prerunStepsAcc[id] = stepsArr;
       const pCopy = [...prerunArr];
       const pt0 = performance.now();
@@ -2683,8 +2717,10 @@ export default function BenchmarkVisualizer() {
         });
         if (excludedRef.current.has(id)) { done++; setProgress({ done, total }); continue; }
 
-        const fn = id === "quick" ? makeQuickSort(quickPivot) :
-                   id === "shell" ? makeShellSort(shellGaps) :
+        const fn = id === "quick"        ? makeQuickSort(quickPivot) :
+                   id === "shell"        ? makeShellSort(shellGaps) :
+                   id === "logos-custom" ? makeLogosSort(logosParams) :
+                   id === "logos"        ? makeLogosSort(DEFAULT_LOGOS_PARAMS) :
                    SORT_FNS[id];
         let best = Infinity;
         let didTimeout = false;
@@ -3165,6 +3201,33 @@ export default function BenchmarkVisualizer() {
                                   opacity: checked ? 1 : 0.4,
                                 }} />
                                 {item.name}
+                                {item.id === "logos" && (() => {
+                                  const hasCustom = (Object.keys(DEFAULT_LOGOS_PARAMS) as (keyof LogosParams)[]).some(k => logosParams[k] !== DEFAULT_LOGOS_PARAMS[k]);
+                                  return (
+                                    <button
+                                      type="button"
+                                      onClick={e => { e.preventDefault(); setLogosSettingsOpen(v => !v); }}
+                                      title="Customize Logos Sort parameters"
+                                      style={{
+                                        marginLeft: 4,
+                                        background: logosSettingsOpen ? "var(--color-accent-muted)" : hasCustom ? "rgba(85,85,85,0.08)" : "none",
+                                        border: `1px solid ${logosSettingsOpen ? "var(--color-accent)" : hasCustom ? "#555555" : "var(--color-border)"}`,
+                                        borderRadius: 4,
+                                        cursor: "pointer",
+                                        padding: "1px 4px",
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        gap: 3,
+                                        color: logosSettingsOpen ? "var(--color-accent)" : hasCustom ? "#555555" : "var(--color-muted)",
+                                        fontSize: 9,
+                                        lineHeight: 1,
+                                      }}
+                                    >
+                                      <Settings size={9} strokeWidth={1.75} />
+                                      {hasCustom ? "custom ●" : "custom"}
+                                    </button>
+                                  );
+                                })()}
                               </label>
                             );
                           })}
@@ -3173,6 +3236,48 @@ export default function BenchmarkVisualizer() {
                     );
                   })}
                 </div>
+
+                {logosSettingsOpen && (
+                  <div className="mt-3 rounded-lg p-3 flex flex-col gap-2.5" style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)" }}>
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-semibold" style={{ color: "var(--color-text)" }}>Logos Sort — parameters</p>
+                      <button
+                        type="button"
+                        onClick={() => setLogosParams(DEFAULT_LOGOS_PARAMS)}
+                        style={btn("ghost", { fontSize: 9, padding: "1px 6px", color: "var(--color-muted)", textDecoration: "underline", textDecorationStyle: "dotted" })}
+                      >reset defaults</button>
+                    </div>
+                    {(Object.keys(DEFAULT_LOGOS_PARAMS) as (keyof LogosParams)[]).some(k => logosParams[k] !== DEFAULT_LOGOS_PARAMS[k]) && (
+                      <p className="text-[10px] px-2 py-1 rounded" style={{ background: "rgba(85,85,85,0.08)", color: "#555555", border: "1px solid rgba(192,57,43,0.25)" }}>
+                        Params differ from defaults — both <strong>Logos Sort</strong> and <strong>Logos (custom)</strong> will run automatically.
+                      </p>
+                    )}
+                    {([
+                      { key: "phi",          label: "φ (phi)",           min: 0.05, max: 1.0,  step: 0.001, desc: "Primary pivot offset — φ⁻¹ ≈ 0.618" },
+                      { key: "phi2",         label: "φ² (phi2)",         min: 0.05, max: 1.0,  step: 0.001, desc: "Secondary pivot offset — φ⁻² ≈ 0.382" },
+                      { key: "base",         label: "Base",              min: 2,    max: 256,  step: 1,     desc: "Insertion sort threshold (elements)" },
+                      { key: "depthMult",    label: "Depth multiplier",  min: 1,    max: 6,    step: 0.5,   desc: "Depth limit = mult·⌊log₂n⌋ + add" },
+                      { key: "depthAdd",     label: "Depth addend",      min: 0,    max: 16,   step: 1,     desc: "Constant added to depth limit" },
+                      { key: "randomScale",  label: "Random scale",      min: 0,    max: 3,    step: 0.05,  desc: "Scales ±randomFactor range (0 = fixed pivots)" },
+                      { key: "countingMult", label: "Counting trigger",  min: 1,    max: 32,   step: 1,     desc: "Counting sort when valueRange < n×this" },
+                    ] as const).map(({ key, label, min, max, step, desc }) => (
+                      <div key={key} className="flex flex-col gap-0.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs" style={{ color: "var(--color-text)" }}>{label}</span>
+                          <span className="text-xs font-mono" style={{ color: "var(--color-accent)" }}>{logosParams[key]}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={min} max={max} step={step}
+                          value={logosParams[key]}
+                          onChange={e => setLogosParams(prev => ({ ...prev, [key]: parseFloat(e.target.value) }))}
+                          style={{ accentColor: "var(--color-accent)", width: "100%" }}
+                        />
+                        <p className="text-[10px]" style={{ color: "var(--color-muted)" }}>{desc}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 {(maxSelectedSize > SLOW_THRESHOLD || Object.entries(MEDIUM_LIMITS).some(([id, { threshold }]) => selected.has(id) && maxSelectedSize > threshold)) && (
                   <div className="mt-2.5 flex flex-col gap-1">
