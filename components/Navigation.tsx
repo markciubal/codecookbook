@@ -12,9 +12,17 @@ import {
   X,
   Zap,
   Upload,
+  GitCompare,
+  Wrench,
+  Search,
+  ScanSearch,
+  Network,
 } from "lucide-react";
-import { BENCHMARK, CUSTOM_SORT, SORTING_ALGORITHMS, DATA_STRUCTURES } from "@/lib/catalog";
+import { BENCHMARK, COMPARE, CUSTOM_SORT, SORTING_ALGORITHMS, DATA_STRUCTURES, TOOLS, SEARCHING_ALGORITHMS, GRAPH_ALGORITHMS } from "@/lib/catalog";
 import AlgoBadge from "@/components/AlgoBadge";
+import ThemeToggle from "@/components/ThemeToggle";
+import LevelSelector from "@/components/LevelSelector";
+import { useProgress } from "@/hooks/useProgress";
 
 const NAV_ITEMS = [
   {
@@ -41,17 +49,60 @@ const NAV_ITEMS = [
       badge: d.time,
     })),
   },
+  {
+    group: "Searching",
+    icon: <ScanSearch size={14} />,
+    items: SEARCHING_ALGORITHMS.map((s) => ({
+      name: s.name,
+      path: s.path,
+      badge: s.time,
+    })),
+  },
+  {
+    group: "Graph Algorithms",
+    icon: <Network size={14} />,
+    items: GRAPH_ALGORITHMS.map((g) => ({
+      name: g.name,
+      path: g.path,
+      badge: g.time,
+    })),
+  },
+  {
+    group: "Tools",
+    icon: <Wrench size={14} />,
+    items: TOOLS.map((t) => ({
+      name: t.name,
+      path: t.path,
+      badge: "",
+    })),
+  },
 ];
 
 type NavItem = { name: string; path: string; badge: string; time?: string; space?: string; stable?: boolean; online?: boolean };
 
+function fuzzyMatch(name: string, query: string): boolean {
+  if (!query) return true;
+  const n = name.toLowerCase();
+  const q = query.toLowerCase();
+  if (n.includes(q)) return true;
+  // character-order match
+  let qi = 0;
+  for (let i = 0; i < n.length && qi < q.length; i++) {
+    if (n[i] === q[qi]) qi++;
+  }
+  return qi === q.length;
+}
+
 function NavItems({
   pathname,
   onClick,
+  query,
 }: {
   pathname: string;
   onClick?: () => void;
+  query?: string;
 }) {
+  const { visited } = useProgress();
   const benchmarkActive = pathname === BENCHMARK.path;
   return (
     <>
@@ -87,9 +138,27 @@ function NavItems({
           <Upload size={14} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
           <span className="text-sm">{CUSTOM_SORT.name}</span>
         </Link>
+        <Link
+          href={COMPARE.path}
+          onClick={onClick}
+          className="flex items-center gap-2 px-3 py-2 rounded-lg transition-colors"
+          style={{
+            background: pathname === COMPARE.path ? "var(--color-accent-muted)" : "var(--color-surface-2)",
+            color: pathname === COMPARE.path ? "var(--color-accent)" : "var(--color-text)",
+            border: `1px solid ${pathname === COMPARE.path ? "var(--color-accent)" : "var(--color-border)"}`,
+            borderLeft: `3px solid ${pathname === COMPARE.path ? "var(--color-accent)" : "var(--color-border)"}`,
+            fontWeight: 600,
+          }}
+        >
+          <GitCompare size={14} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
+          <span className="text-sm">{COMPARE.name}</span>
+        </Link>
       </div>
 
-      {NAV_ITEMS.map((group) => (
+      {NAV_ITEMS.map((group) => {
+        const filteredItems = group.items.filter((item: NavItem) => fuzzyMatch(item.name, query ?? ""));
+        if (filteredItems.length === 0) return null;
+        return (
         <div key={group.group} className="mb-5">
           {/* Group heading */}
           <div className="flex items-center gap-2 mb-2 px-3">
@@ -102,9 +171,10 @@ function NavItems({
           </div>
 
           {/* Items */}
-          {group.items.map((item: NavItem) => {
+          {filteredItems.map((item: NavItem) => {
             const active = pathname === item.path;
             const hasMeta = "stable" in item;
+            const isVisited = visited.has(item.path);
             return (
               <Link
                 key={item.path}
@@ -118,17 +188,22 @@ function NavItems({
                   fontWeight: active ? 600 : 400,
                 }}
               >
-                {/* Row 1: name + badge (non-sorting items only) */}
+                {/* Row 1: name + visited dot + badge (non-sorting items only) */}
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-sm truncate">{item.name}</span>
-                  {!hasMeta && (
-                    <span
-                      className="text-[10px] font-mono px-1.5 py-0.5 rounded shrink-0"
-                      style={{ background: "var(--color-surface-3)", color: "var(--color-muted)" }}
-                    >
-                      {item.badge}
-                    </span>
-                  )}
+                  <div className="flex items-center gap-1 shrink-0">
+                    {isVisited && !active && (
+                      <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--color-accent)", opacity: 0.5, display: "inline-block" }} />
+                    )}
+                    {!hasMeta && item.badge && (
+                      <span
+                        className="text-[10px] font-mono px-1.5 py-0.5 rounded"
+                        style={{ background: "var(--color-surface-3)", color: "var(--color-muted)" }}
+                      >
+                        {item.badge}
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* Row 2: time · space · stable · online (sorting only) */}
@@ -144,7 +219,8 @@ function NavItems({
             );
           })}
         </div>
-      ))}
+        );
+      })}
     </>
   );
 }
@@ -165,11 +241,31 @@ function DonateLink({ onClick }: { onClick?: () => void }) {
   );
 }
 
+function SearchBox({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <div className="relative mx-2 mb-3">
+      <Search size={12} strokeWidth={1.75} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--color-muted)", pointerEvents: "none" }} />
+      <input
+        type="text"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder="Search…"
+        className="w-full text-xs rounded-lg pl-7 pr-7 py-1.5"
+        style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)", color: "var(--color-text)", outline: "none" }}
+      />
+      {value && (
+        <button onClick={() => onChange("")} style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "var(--color-muted)", padding: 0, lineHeight: 1, fontSize: 14 }}>×</button>
+      )}
+    </div>
+  );
+}
+
 export default function Navigation() {
   const pathname = usePathname();
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
 
-  const close = () => setDrawerOpen(false);
+  const close = () => { setDrawerOpen(false); setSearchQuery(""); };
 
   return (
     <>
@@ -191,11 +287,18 @@ export default function Navigation() {
         <div className="mx-4 mb-4" style={{ height: 1, background: "var(--color-border)" }} />
 
         <nav className="flex-1 px-2">
-          <NavItems pathname={pathname} />
+          <SearchBox value={searchQuery} onChange={setSearchQuery} />
+          <div className="mx-1 mb-3">
+            <LevelSelector />
+          </div>
+          <NavItems pathname={pathname} query={searchQuery} />
         </nav>
 
         <div className="px-4 pb-4 pt-3" style={{ borderTop: "1px solid var(--color-border)" }}>
           <DonateLink />
+          <div className="mt-2">
+            <ThemeToggle />
+          </div>
           <p className="text-xs text-center mt-3" style={{ color: "var(--color-muted)", lineHeight: 1.7 }}>
             Inspired by{" "}
             <a href="http://devincook.com/csc/130/" target="_blank" rel="noopener noreferrer"
@@ -277,12 +380,17 @@ export default function Navigation() {
 
             {/* Nav items */}
             <nav className="flex-1 px-2 py-3">
-              <NavItems pathname={pathname} onClick={close} />
+              <SearchBox value={searchQuery} onChange={setSearchQuery} />
+              <div className="mx-1 mb-3">
+                <LevelSelector />
+              </div>
+              <NavItems pathname={pathname} onClick={close} query={searchQuery} />
             </nav>
 
-            {/* Donate */}
-            <div className="px-4 py-4" style={{ borderTop: "1px solid var(--color-border)" }}>
+            {/* Donate + theme */}
+            <div className="px-4 py-4 flex flex-col gap-2" style={{ borderTop: "1px solid var(--color-border)" }}>
               <DonateLink onClick={close} />
+              <ThemeToggle />
             </div>
           </div>
         </>

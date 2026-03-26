@@ -38,6 +38,30 @@ html {
   font-size: 12px;
 }
 
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --color-bg:        #0f0e0d;
+  --color-surface-1: #161513;
+  --color-surface-2: #1e1c19;
+  --color-surface-3: #27241f;
+  --color-border:    #332f29;
+
+  --color-accent:       #c86050;
+  --color-accent-muted: #3a1a14;
+
+  --color-state-default: #55524c;
+  --color-state-compare: #d48830;
+  --color-state-swap:    #c84030;
+  --color-state-sorted:  #4e8858;
+  --color-state-active:  #c86050;
+  --color-state-min:     #9070c0;
+  --color-state-current: #c87030;
+  --color-state-pivot:   #3a9898;
+
+  --color-text:  #ede8e0;
+  --color-muted: #8a8278;
+}
+
 body {
   font-family: var(--font-sans);
   min-height: 100dvh;

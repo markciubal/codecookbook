@@ -4,6 +4,7 @@ import React, { useState, useCallback, useRef, useEffect, useMemo } from "react"
 import { Play, Square, RotateCcw, Trophy, LineChart, ChevronRight, Lock, Unlock, Volume2, Settings } from "lucide-react";
 import { generateBenchmarkInput, SORT_FNS, makeQuickSort, makeShellSort, makeLogosSort, countSortOps, sortSteps, makeAdversarialInput, DEFAULT_LOGOS_PARAMS, type LogosParams, type BenchmarkScenario, type CustomDistribution, type QuickPivot, type ShellGaps, type SortStep } from "@/lib/benchmark";
 import { getLogosSortSteps } from "@/lib/algorithms";
+import { useLevel } from "@/hooks/useLevel";
 
 // ── Static config ─────────────────────────────────────────────────────────────
 
@@ -26,8 +27,9 @@ const ALGO_GROUPS = [
   {
     label: "O(n log n)",
     items: [
-      { id: "logos",   name: "Logos Sort",     href: "/sorting/logos" },
-      { id: "timsort", name: "Tim Sort",        href: "/sorting/timsort" },
+      { id: "logos",     name: "Logos Sort",  href: "/sorting/logos" },
+      { id: "introsort", name: "Introsort",    href: "/sorting/introsort" },
+      { id: "timsort",   name: "Tim Sort",     href: "/sorting/timsort" },
       { id: "merge",   name: "Merge Sort",      href: "/sorting/merge" },
       { id: "quick",   name: "Quick Sort",      href: "/sorting/quick" },
       { id: "heap",    name: "Heap Sort",       href: "/sorting/heap" },
@@ -61,6 +63,7 @@ const ALGO_GROUPS = [
 
 const ALGO_NAMES: Record<string, string> = {
   logos: "Logos Sort", "logos-custom": "Logos (custom)",
+  introsort: "Introsort",
   timsort: "Tim Sort",   merge: "Merge Sort",
   quick: "Quick Sort", heap: "Heap Sort",      shell: "Shell Sort",
   counting: "Counting Sort", radix: "Radix Sort", bucket: "Bucket Sort",
@@ -78,6 +81,7 @@ const TIMSORT_JS_MULTIPLIER = 0.57;
 const ALGO_COLORS: Record<string, string> = {
   logos:          "#000000",
   "logos-custom": "#555555",
+  introsort:      "#e67e22",
   timsort:        "#5b9bd5",
   "timsort-js":   "#a8c9ed",  // lighter blue — same family, clearly related
   merge:     "#70ad47",
@@ -101,6 +105,7 @@ const ALGO_COLORS: Record<string, string> = {
 const ALGO_SPACE: Record<string, string> = {
   logos:          "O(log n)",
   "logos-custom": "O(log n)",
+  introsort:      "O(log n)",
   timsort:        "O(n)",
   "timsort-js":   "O(n)",
   merge:     "O(n)",
@@ -124,6 +129,7 @@ const ALGO_SPACE: Record<string, string> = {
 const ALGO_TIME: Record<string, string> = {
   logos:          "O(n log n)",
   "logos-custom": "O(n log n)",
+  introsort:      "O(n log n)",
   timsort:        "O(n log n)",
   "timsort-js":   "O(n log n)",
   merge:     "O(n log n)",
@@ -148,6 +154,7 @@ const ALGO_TIME: Record<string, string> = {
 const ALGO_STABLE: Record<string, boolean> = {
   logos:          false,
   "logos-custom": false,
+  introsort:      false,
   timsort:        true,
   "timsort-js":   true,
   merge:     true,
@@ -172,6 +179,7 @@ const ALGO_STABLE: Record<string, boolean> = {
 const ALGO_ONLINE: Record<string, boolean> = {
   logos:          false,
   "logos-custom": false,
+  introsort:      false,
   timsort:        false,
   "timsort-js":   false,
   merge:     false,
@@ -275,11 +283,12 @@ const SIZE_BUTTONS: { n: number; word: string }[] = [
   { n: 100_000_000, word: "One Hundred Million" },
 ];
 
-const SCENARIO_OPTIONS: { id: BenchmarkScenario; label: string; desc: string }[] = [
-  { id: "random",       label: "Random",         desc: "average case" },
-  { id: "nearlySorted", label: "Nearly sorted",  desc: "Timsort's home turf" },
-  { id: "reversed",     label: "Reversed",       desc: "worst case for naive quicksort" },
+const SCENARIO_OPTIONS: { id: BenchmarkScenario; label: string; desc: string; rare?: boolean }[] = [
+  { id: "random",       label: "Random",          desc: "average case" },
+  { id: "nearlySorted", label: "Nearly sorted",   desc: "Timsort's home turf" },
+  { id: "reversed",     label: "Reversed",        desc: "worst case for naive quicksort" },
   { id: "duplicates",   label: "Many duplicates", desc: "stress-tests three-way partition" },
+  { id: "sorted",       label: "Already sorted",  desc: "best case — rare in mix", rare: true },
 ];
 
 // ── Per-algorithm variant descriptors ─────────────────────────────────────────
@@ -321,8 +330,14 @@ function rankColor(rank: number, total: number): string {
 }
 
 function fmtN(n: number): string {
-  if (n >= 1_000_000) return `${+(n / 1_000_000).toPrecision(3).replace(/\.?0+$/, "")}M`;
-  if (n >= 1_000)     return `${+(n / 1_000).toPrecision(3).replace(/\.?0+$/, "")}k`;
+  const fmt = (v: number) => {
+    if (v % 1 === 0) return v.toFixed(0);                          // exact integer → no decimals
+    const s = v.toPrecision(3);
+    return s.includes(".") ? s.replace(/\.?0+$/, "") : s;         // strip trailing decimal zeros only
+  };
+  if (n >= 1_000_000_000) return `${fmt(n / 1_000_000_000)}B`;
+  if (n >= 1_000_000)     return `${fmt(n / 1_000_000)}M`;
+  if (n >= 1_000)         return `${fmt(n / 1_000)}k`;
   return String(n);
 }
 
@@ -412,7 +427,7 @@ function saveHistory(entries: HistoryEntry[]): void {
 // ── 3-D scatter chart ─────────────────────────────────────────────────────────
 // Orthographic projection with interactive orbit + zoom. Axes: X=log(n), Y=log(time), Z=log(space).
 
-type Chart3DPoint = { id: string; n: number; t: number; s: number; x: number; y: number; z: number };
+type Chart3DPoint = { id: string; n: number; t: number; s: number; x: number; y: number; z: number; work?: number };
 
 // Parse a #rrggbb hex color into {r,g,b}
 function parseHex(hex: string): { r: number; g: number; b: number } {
@@ -433,6 +448,180 @@ function hexAlpha(hex: string, alpha: number): string {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
+// ── Memory estimation ─────────────────────────────────────────────────────────
+
+function estimateMemory(alg: string, n: number): { avg: number; peak: number } {
+  const ELEMENT_SIZE = 8; // 8 bytes per number (Float64)
+  switch (alg) {
+    case "merge":
+    case "timsort":
+    case "timsort-js":
+      return { avg: n * ELEMENT_SIZE, peak: n * ELEMENT_SIZE * 1.5 };
+    case "radix":
+      return { avg: n * ELEMENT_SIZE * 2, peak: n * ELEMENT_SIZE * 2 };
+    case "bucket":
+      return { avg: n * ELEMENT_SIZE, peak: n * ELEMENT_SIZE * 1.2 };
+    case "quick":
+    case "introsort":
+    case "logos":
+    case "logos-custom":
+      return { avg: Math.log2(Math.max(n, 2)) * 64, peak: Math.log2(Math.max(n, 2)) * 128 };
+    default:
+      return { avg: 64, peak: 128 };
+  }
+}
+
+function fmtMemory(b: number): string {
+  if (b < 1_024)     return `${b.toFixed(0)} B`;
+  if (b < 1_048_576) return `${(b / 1_024).toFixed(1)} KB`;
+  return `${(b / 1_048_576).toFixed(2)} MB`;
+}
+
+// ── Memory bar chart ──────────────────────────────────────────────────────────
+
+function MemoryChart({ algos, n }: { algos: string[]; n: number }) {
+  const [tooltip, setTooltip] = useState<{ x: number; y: number; label: string; avg: number; peak: number } | null>(null);
+
+  const VW = 600, VH = 240;
+  const pL = 60, pR = 20, pT = 20, pB = 50;
+  const iW = VW - pL - pR;
+  const iH = VH - pT - pB;
+
+  const data = algos.map(id => ({ id, ...estimateMemory(id, n) }));
+  const maxVal = Math.max(...data.map(d => d.peak), 1);
+
+  // Y-axis: 5 gridlines
+  const gridLines = 5;
+  const yScale = (v: number) => pT + iH - (v / maxVal) * iH;
+
+  const groupW = iW / Math.max(data.length, 1);
+  const barW   = Math.min(groupW * 0.35, 28);
+  const gap    = Math.min(groupW * 0.05, 4);
+
+  return (
+    <div style={{ position: "relative", userSelect: "none" }}>
+      <svg
+        viewBox={`0 0 ${VW} ${VH}`}
+        width="100%"
+        style={{ display: "block", overflow: "visible" }}
+        onMouseLeave={() => setTooltip(null)}
+      >
+        {/* Gridlines + Y-axis labels */}
+        {Array.from({ length: gridLines + 1 }, (_, i) => {
+          const frac = i / gridLines;
+          const val  = maxVal * frac;
+          const y    = yScale(val);
+          return (
+            <g key={i}>
+              <line x1={pL} y1={y} x2={VW - pR} y2={y}
+                stroke="rgba(128,128,128,0.12)" strokeWidth={0.8} />
+              <text x={pL - 5} y={y + 3.5} textAnchor="end"
+                style={{ fontSize: 8, fontFamily: "monospace", fill: "var(--color-muted)" }}>
+                {fmtMemory(val)}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Bars */}
+        {data.map((d, gi) => {
+          const cx = pL + gi * groupW + groupW / 2;
+          const avgX  = cx - barW - gap / 2;
+          const peakX = cx + gap / 2;
+
+          const avgH  = Math.max((d.avg  / maxVal) * iH, 1);
+          const peakH = Math.max((d.peak / maxVal) * iH, 1);
+
+          const color = ALGO_COLORS[d.id] ?? "#888";
+
+          return (
+            <g key={d.id}>
+              {/* Average bar */}
+              <rect
+                x={avgX} y={yScale(d.avg)} width={barW} height={avgH}
+                fill={color} opacity={0.85} rx={2}
+                onMouseEnter={e => {
+                  const svg = (e.target as SVGRectElement).ownerSVGElement!;
+                  const rect = svg.getBoundingClientRect();
+                  const svgW = rect.width;
+                  const scaleX = svgW / VW;
+                  setTooltip({ x: (avgX + barW / 2) * scaleX, y: yScale(d.avg) * (rect.height / VH), label: ALGO_NAMES[d.id] ?? d.id, avg: d.avg, peak: d.peak });
+                }}
+                style={{ cursor: "pointer" }}
+              />
+              {/* Peak bar */}
+              <rect
+                x={peakX} y={yScale(d.peak)} width={barW} height={peakH}
+                fill={color} opacity={0.38} rx={2}
+                onMouseEnter={e => {
+                  const svg = (e.target as SVGRectElement).ownerSVGElement!;
+                  const rect = svg.getBoundingClientRect();
+                  const svgW = rect.width;
+                  const scaleX = svgW / VW;
+                  setTooltip({ x: (peakX + barW / 2) * scaleX, y: yScale(d.peak) * (rect.height / VH), label: ALGO_NAMES[d.id] ?? d.id, avg: d.avg, peak: d.peak });
+                }}
+                style={{ cursor: "pointer" }}
+              />
+              {/* X-axis label */}
+              <text
+                x={cx} y={VH - pB + 14} textAnchor="middle"
+                style={{ fontSize: 8, fontFamily: "monospace", fill: "var(--color-muted)" }}
+              >
+                {(ALGO_NAMES[d.id] ?? d.id).replace(" Sort", "").replace("Sort", "")}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* X axis line */}
+        <line x1={pL} y1={pT + iH} x2={VW - pR} y2={pT + iH}
+          stroke="var(--color-border)" strokeWidth={1} />
+        {/* Y axis line */}
+        <line x1={pL} y1={pT} x2={pL} y2={pT + iH}
+          stroke="var(--color-border)" strokeWidth={1} />
+
+        {/* Legend */}
+        <rect x={pL} y={VH - pB + 30} width={10} height={8} fill="var(--color-accent)" opacity={0.85} rx={1} />
+        <text x={pL + 13} y={VH - pB + 38} style={{ fontSize: 8, fontFamily: "monospace", fill: "var(--color-muted)" }}>
+          Average
+        </text>
+        <rect x={pL + 65} y={VH - pB + 30} width={10} height={8} fill="var(--color-accent)" opacity={0.38} rx={1} />
+        <text x={pL + 78} y={VH - pB + 38} style={{ fontSize: 8, fontFamily: "monospace", fill: "var(--color-muted)" }}>
+          Peak
+        </text>
+        <text x={VW - pR} y={VH - pB + 38} textAnchor="end"
+          style={{ fontSize: 8, fontFamily: "monospace", fill: "var(--color-muted)", fontStyle: "italic" }}>
+          n = {fmtN(n)} · theoretical
+        </text>
+      </svg>
+
+      {/* Hover tooltip */}
+      {tooltip && (
+        <div style={{
+          position: "absolute",
+          left: tooltip.x,
+          top: tooltip.y - 8,
+          transform: "translate(-50%, -100%)",
+          background: "var(--color-surface-1)",
+          border: "1px solid var(--color-border)",
+          borderRadius: 6,
+          padding: "5px 9px",
+          fontSize: 10,
+          fontFamily: "monospace",
+          color: "var(--color-text)",
+          pointerEvents: "none",
+          whiteSpace: "nowrap",
+          zIndex: 10,
+        }}>
+          <div style={{ fontWeight: 700, marginBottom: 3 }}>{tooltip.label}</div>
+          <div>avg:  {fmtMemory(tooltip.avg)}</div>
+          <div>peak: {fmtMemory(tooltip.peak)}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Chart3D({
   data, algos, highlight,
 }: {
@@ -444,13 +633,13 @@ function Chart3D({
   const [rotX, setRotX]         = useState(28);
   const [rotY, setRotY]         = useState(-40);
   const [zoom, setZoom]         = useState(1.0);
-  const [tool, setTool]         = useState<"orbit" | "measure" | "shadows">("orbit");
+  const [tool, setTool]         = useState<"orbit" | "measure" | "shadows">("measure");
   const [showSurface, setShowSurface] = useState(true);
   const [hoverInfo, setHoverInfo] = useState<(Chart3DPoint & { sx: number; sy: number }) | null>(null);
   const dragRef = useRef<{ startX: number; startY: number; startRx: number; startRy: number } | null>(null);
   const hitRef  = useRef<(Chart3DPoint & { sx: number; sy: number })[]>([]);
 
-  const { pts3d, ranges } = useMemo(() => {
+  const { pts3d, ranges, workLogMin, workLogMax } = useMemo(() => {
     const raw: { id: string; n: number; t: number; s: number }[] = [];
     for (const id of algos) {
       for (const p of data[id] ?? []) {
@@ -458,7 +647,7 @@ function Chart3D({
           raw.push({ id, n: p.n, t: p.timeMs, s: p.spaceBytes! });
       }
     }
-    if (raw.length === 0) return { pts3d: [] as Chart3DPoint[], ranges: null };
+    if (raw.length === 0) return { pts3d: [] as Chart3DPoint[], ranges: null, workLogMin: 0, workLogMax: 1 };
     const logNs = raw.map(p => Math.log10(p.n));
     const logTs = raw.map(p => Math.log10(p.t));
     const logSs = raw.map(p => Math.log10(p.s));
@@ -468,13 +657,33 @@ function Chart3D({
       s: [Math.min(...logSs), Math.max(...logSs)] as [number, number],
     };
     const nr = (v: number, [lo, hi]: [number, number]) => hi > lo ? (v - lo) / (hi - lo) : 0.5;
-    const pts3d: Chart3DPoint[] = raw.map(p => ({
-      ...p,
-      x: nr(Math.log10(p.n), ranges.n),
-      y: nr(Math.log10(p.t), ranges.t),
-      z: nr(Math.log10(p.s), ranges.s),
-    }));
-    return { pts3d, ranges };
+
+    // Log-log fit per algorithm → cumulative work integral ∫₀ⁿ f(n) dn = a·nᵇ⁺¹/(b+1)
+    const fitMap: Record<string, { a: number; b: number } | null> = {};
+    for (const id of algos) {
+      const pts = raw.filter(p => p.id === id && p.t > 0 && p.n > 1);
+      if (pts.length < 2) { fitMap[id] = null; continue; }
+      const xs = pts.map(p => Math.log(p.n)), ys = pts.map(p => Math.log(p.t));
+      const m = pts.length;
+      const sx = xs.reduce((a, x) => a + x, 0), sy = ys.reduce((a, y) => a + y, 0);
+      const sxx = xs.reduce((a, x) => a + x * x, 0), sxy = xs.reduce((a, x, i) => a + x * ys[i], 0);
+      const den = m * sxx - sx * sx;
+      if (den === 0) { fitMap[id] = null; continue; }
+      const b = (m * sxy - sx * sy) / den;
+      const a = Math.exp((sy - b * sx) / m);
+      fitMap[id] = { a, b };
+    }
+
+    const pts3d: Chart3DPoint[] = raw.map(p => {
+      const fit = fitMap[p.id];
+      const work = (fit && fit.b > -1) ? fit.a * Math.pow(p.n, fit.b + 1) / (fit.b + 1) : undefined;
+      return { ...p, x: nr(Math.log10(p.n), ranges.n), y: nr(Math.log10(p.t), ranges.t), z: nr(Math.log10(p.s), ranges.s), work };
+    });
+
+    const workVals = pts3d.map(p => p.work).filter((w): w is number => w != null && w > 0);
+    const workLogMin = workVals.length > 0 ? Math.log10(Math.min(...workVals)) : 0;
+    const workLogMax = workVals.length > 0 ? Math.log10(Math.max(...workVals)) : 1;
+    return { pts3d, ranges, workLogMin, workLogMax };
   }, [data, algos]);
 
   const project = useCallback((x: number, y: number, z: number, W: number, H: number): [number, number] => {
@@ -483,7 +692,7 @@ function Chart3D({
     const rx1 = px * Math.cos(ryR) + pz * Math.sin(ryR);
     const rz1 = -px * Math.sin(ryR) + pz * Math.cos(ryR);
     const ry2 = py * Math.cos(rxR) - rz1 * Math.sin(rxR);
-    const sc = Math.min(W, H) * 0.36 * zoom;
+    const sc = Math.min(W, H) * 0.44 * zoom;
     return [W / 2 + rx1 * sc, H / 2 - ry2 * sc];
   }, [rotX, rotY, zoom]);
 
@@ -494,6 +703,11 @@ function Chart3D({
     const rz1 = -px * Math.sin(ryR) + pz * Math.cos(ryR);
     return py * Math.sin(rxR) + rz1 * Math.cos(rxR);
   }, [rotX, rotY]);
+
+  // Normalise a work value → [0, 1] for visual encoding
+  const normWork = useCallback((w: number) =>
+    workLogMax > workLogMin ? (Math.log10(w) - workLogMin) / (workLogMax - workLogMin) : 0.5,
+  [workLogMin, workLogMax]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -527,97 +741,57 @@ function Chart3D({
       ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.stroke();
     }
 
-    // ── Surface mesh — painter's algorithm ────────────────────────────────────
-    // Sort algorithms by average normalized time so the surface spans from
-    // fastest (left) to slowest (right) creating a meaningful color gradient.
+    // ── Surface curtains — per-algo vertical ribbons dropping to y=0 ──────────
+    // For each algorithm, for each consecutive n-pair, draw a quad:
+    //   top-left  : actual data point (x, y, z)
+    //   bottom-left: floor projection (x, 0, z)
+    //   bottom-right: next floor (x', 0, z')
+    //   top-right : next data point (x', y', z')
+    // Painter's algorithm across all quads from all algos.
     if (showSurface && pts3d.length > 0) {
-      const algoOrder = [...algos]
-        .filter(id => pts3d.some(p => p.id === id))
-        .sort((a, b) => {
-          const avg = (id: string) => {
-            const ps = pts3d.filter(p => p.id === id);
-            return ps.reduce((s, p) => s + p.y, 0) / (ps.length || 1);
-          };
-          return avg(a) - avg(b);
-        });
+      type CurtainQuad = { depth: number; pts: [number,number][]; color: string };
+      const quads: CurtainQuad[] = [];
 
-      // Build per-algo lookup: n → Chart3DPoint
-      const lookup = new Map<string, Map<number, Chart3DPoint>>();
-      for (const id of algoOrder) {
-        const m = new Map<number, Chart3DPoint>();
-        for (const p of pts3d.filter(p => p.id === id)) m.set(p.n, p);
-        lookup.set(id, m);
-      }
-
-      // All unique n values (sorted) across all algos
-      const allNs = [...new Set(pts3d.map(p => p.n))].sort((a, b) => a - b);
-
-      // Accumulate quads with their painter's depth
-      type Quad = { depth: number; pts: [number,number][]; colA: string; colB: string };
-      const quads: Quad[] = [];
-
-      for (let ai = 0; ai < algoOrder.length - 1; ai++) {
-        const idA = algoOrder[ai], idB = algoOrder[ai + 1];
-        const colA = ALGO_COLORS[idA] ?? "#888";
-        const colB = ALGO_COLORS[idB] ?? "#888";
-        const lookA = lookup.get(idA)!, lookB = lookup.get(idB)!;
-
-        for (let ni = 0; ni < allNs.length - 1; ni++) {
-          const n0 = allNs[ni], n1 = allNs[ni + 1];
-          const pA0 = lookA.get(n0), pA1 = lookA.get(n1);
-          const pB0 = lookB.get(n0), pB1 = lookB.get(n1);
-          if (!pA0 || !pA1 || !pB0 || !pB1) continue;
-
-          // Project corners: A-near, B-near, B-far, A-far (winding)
-          const [xA0,yA0] = pr(pA0.x, pA0.y, pA0.z);
-          const [xB0,yB0] = pr(pB0.x, pB0.y, pB0.z);
-          const [xB1,yB1] = pr(pB1.x, pB1.y, pB1.z);
-          const [xA1,yA1] = pr(pA1.x, pA1.y, pA1.z);
-
-          // Average view-space depth (back-to-front sort: smallest depth first)
+      for (const id of algos) {
+        const color = ALGO_COLORS[id] ?? "#888";
+        const sorted = pts3d.filter(p => p.id === id).sort((a, b) => a.n - b.n);
+        for (let ni = 0; ni < sorted.length - 1; ni++) {
+          const p0 = sorted[ni], p1 = sorted[ni + 1];
+          // top-left, bottom-left, bottom-right, top-right
+          const [xtl, ytl] = pr(p0.x, p0.y, p0.z);
+          const [xbl, ybl] = pr(p0.x, 0,    p0.z);
+          const [xbr, ybr] = pr(p1.x, 0,    p1.z);
+          const [xtr, ytr] = pr(p1.x, p1.y, p1.z);
           const depth = (
-            viewDepth(pA0.x, pA0.y, pA0.z) + viewDepth(pA1.x, pA1.y, pA1.z) +
-            viewDepth(pB0.x, pB0.y, pB0.z) + viewDepth(pB1.x, pB1.y, pB1.z)
+            viewDepth(p0.x, p0.y, p0.z) + viewDepth(p0.x, 0, p0.z) +
+            viewDepth(p1.x, 0,    p1.z) + viewDepth(p1.x, p1.y, p1.z)
           ) / 4;
-
-          quads.push({
-            depth,
-            pts: [[xA0,yA0],[xB0,yB0],[xB1,yB1],[xA1,yA1]],
-            colA, colB,
-          });
+          quads.push({ depth, pts: [[xtl,ytl],[xbl,ybl],[xbr,ybr],[xtr,ytr]], color });
         }
       }
 
-      // Painter's algorithm: draw farthest first
+      // Painter's algorithm: farthest first
       quads.sort((a, b) => a.depth - b.depth);
 
+      const SURFACE_ALPHA = highlight ? 0.22 : 0.42;
       for (const q of quads) {
         const [[x0,y0],[x1,y1],[x2,y2],[x3,y3]] = q.pts;
-
-        // Linear gradient from algo-A edge to algo-B edge, blending their hex colors
-        const lx = (x0 + x3) / 2, ly = (y0 + y3) / 2; // A-side midpoint
-        const rx = (x1 + x2) / 2, ry = (y1 + y2) / 2; // B-side midpoint
-
-        // Avoid degenerate gradient (points too close)
-        const gradLen = Math.hypot(rx - lx, ry - ly);
-        const SURFACE_ALPHA = highlight ? 0.28 : 0.52;
+        // Vertical gradient: brighter at top (data curve), dimmer at floor
+        const gradLen = Math.hypot((x0+x3)/2 - (x1+x2)/2, (y0+y3)/2 - (y1+y2)/2);
         if (gradLen > 0.5) {
-          const grad = ctx.createLinearGradient(lx, ly, rx, ry);
-          grad.addColorStop(0, hexAlpha(q.colA, SURFACE_ALPHA));
-          grad.addColorStop(1, hexAlpha(q.colB, SURFACE_ALPHA));
+          const grad = ctx.createLinearGradient((x0+x3)/2, (y0+y3)/2, (x1+x2)/2, (y1+y2)/2);
+          grad.addColorStop(0, hexAlpha(q.color, SURFACE_ALPHA));
+          grad.addColorStop(1, hexAlpha(q.color, SURFACE_ALPHA * 0.3));
           ctx.fillStyle = grad;
         } else {
-          ctx.fillStyle = blendHex(q.colA, q.colB, 0.5, SURFACE_ALPHA);
+          ctx.fillStyle = hexAlpha(q.color, SURFACE_ALPHA);
         }
-
         ctx.beginPath();
         ctx.moveTo(x0, y0); ctx.lineTo(x1, y1);
         ctx.lineTo(x2, y2); ctx.lineTo(x3, y3);
         ctx.closePath();
         ctx.fill();
-
-        // Subtle grid lines on the surface
-        ctx.strokeStyle = "rgba(255,255,255,0.07)"; ctx.lineWidth = 0.4;
+        ctx.strokeStyle = hexAlpha(q.color, 0.12); ctx.lineWidth = 0.3;
         ctx.stroke();
       }
     }
@@ -681,6 +855,31 @@ function Chart3D({
         ctx.globalAlpha = 1;
       }
 
+      // Vertical drop lines: each data point → floor (y=0), always shown
+      ctx.globalAlpha = isHl ? 0.35 : 0.08;
+      for (const p of sorted) {
+        const [px, py] = pr(p.x, p.y, p.z);
+        const [fx, fy] = pr(p.x, 0,    p.z);
+        ctx.strokeStyle = color; ctx.lineWidth = 0.7;
+        ctx.setLineDash([2, 3]);
+        ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(fx, fy); ctx.stroke();
+        // Floor dot
+        ctx.fillStyle = color;
+        ctx.beginPath(); ctx.arc(fx, fy, 1.5, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+
+      // Cumulative-work rings on floor — circle radius ∝ ∫f dn at each n
+      for (const p of sorted) {
+        if (p.work == null) continue;
+        const [fx, fy] = pr(p.x, 0, p.z);
+        const ringR = 3 + normWork(p.work) * 9;
+        ctx.globalAlpha = isHl ? 0.28 : 0.06;
+        ctx.strokeStyle = color; ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.arc(fx, fy, ringR, 0, Math.PI * 2); ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+
       // Curve line — brighter when surface is shown so it reads above the mesh
       ctx.strokeStyle = color;
       ctx.lineWidth = isHl ? (showSurface ? 2.2 : 1.8) : 0.8;
@@ -689,15 +888,17 @@ function Chart3D({
       sorted.forEach((p, i) => { const [px,py] = pr(p.x,p.y,p.z); i===0?ctx.moveTo(px,py):ctx.lineTo(px,py); });
       ctx.stroke(); ctx.globalAlpha = 1;
 
-      // Dots
+      // Dots — radius encodes cumulative work (larger = more work done up to that n)
       for (const p of sorted) {
         const [px,py] = pr(p.x,p.y,p.z);
+        const baseR = isHl ? 2.5 : 1.5;
+        const r = p.work != null ? baseR + normWork(p.work) * (isHl ? 5 : 2) : baseR;
         ctx.fillStyle = color; ctx.globalAlpha = isHl ? 1 : 0.25;
-        ctx.beginPath(); ctx.arc(px, py, isHl ? 3.5 : 1.5, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI*2); ctx.fill();
         // White outline on dots so they pop over surface
         if (isHl && showSurface) {
           ctx.strokeStyle = "rgba(255,255,255,0.5)"; ctx.lineWidth = 0.8;
-          ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI*2); ctx.stroke();
+          ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI*2); ctx.stroke();
         }
         ctx.globalAlpha = 1;
         newHits.push({ ...p, sx: px, sy: py });
@@ -706,23 +907,32 @@ function Chart3D({
 
     // ── Measure tooltip ────────────────────────────────────────────────────────
     if (hoverInfo && tool === "measure") {
-      const { sx, sy, id, n, t, s } = hoverInfo;
+      const { sx, sy, id, n, t, s, work } = hoverInfo;
       ctx.strokeStyle = "#fff"; ctx.lineWidth = 2.5;
       ctx.beginPath(); ctx.arc(sx, sy, 7, 0, Math.PI*2); ctx.stroke();
-      const lines = [ALGO_NAMES[id] ?? id, `n = ${fmtN(n)}`, `t = ${fmtTime(t)}`, `s = ${fmtBytes(s)}`];
-      const bW = 100, bH = lines.length * 13 + 8;
-      const bx = Math.min(sx + 12, W - bW - 4), by = Math.max(sy - bH - 8, 4);
-      ctx.fillStyle = "rgba(10,10,10,0.92)";
-      ctx.strokeStyle = "rgba(255,255,255,0.15)"; ctx.lineWidth = 0.5;
-      ctx.beginPath(); ctx.rect(bx, by, bW, bH); ctx.fill(); ctx.stroke();
-      ctx.fillStyle = ALGO_COLORS[id] ?? "#fff"; ctx.font = "bold 9px monospace";
-      ctx.fillText(lines[0], bx + 6, by + 12);
-      ctx.fillStyle = "#ccc"; ctx.font = "8px monospace";
-      lines.slice(1).forEach((line, i) => ctx.fillText(line, bx + 6, by + 12 + (i+1)*13));
+      const fmtWork = (w: number) => w >= 1000 ? `${(w/1000).toFixed(2)}s·n` : `${w.toFixed(2)}ms·n`;
+      const lines = [
+        ALGO_NAMES[id] ?? id,
+        `n = ${fmtN(n)}`,
+        `t = ${fmtTime(t)}`,
+        `s = ${fmtBytes(s)}`,
+        ...(work != null ? [`∫ = ${fmtWork(work)}`] : []),
+      ];
+      const LINE_H = 16, PAD = 10;
+      const bW = 160, bH = lines.length * LINE_H + PAD * 1.5;
+      const bx = Math.min(sx + 14, W - bW - 4), by = Math.max(sy - bH - 10, 4);
+      ctx.fillStyle = "rgba(10,10,10,0.94)";
+      ctx.strokeStyle = "rgba(255,255,255,0.18)"; ctx.lineWidth = 0.7;
+      ctx.beginPath(); ctx.roundRect?.(bx, by, bW, bH, 5) ?? ctx.rect(bx, by, bW, bH);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = ALGO_COLORS[id] ?? "#fff"; ctx.font = "bold 12px monospace";
+      ctx.fillText(lines[0], bx + PAD, by + PAD + 8);
+      ctx.fillStyle = "#ddd"; ctx.font = "11px monospace";
+      lines.slice(1).forEach((line, i) => ctx.fillText(line, bx + PAD, by + PAD + 8 + (i + 1) * LINE_H));
     }
 
     hitRef.current = newHits;
-  }, [pts3d, ranges, rotX, rotY, zoom, highlight, tool, hoverInfo, showSurface, project, viewDepth]);
+  }, [pts3d, ranges, rotX, rotY, zoom, highlight, tool, hoverInfo, showSurface, project, viewDepth, normWork]);
 
   const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (tool === "orbit")
@@ -777,7 +987,7 @@ function Chart3D({
         {/* Surface toggle */}
         <button
           onClick={() => setShowSurface(s => !s)}
-          title="Toggle interpolated surface mesh — quads are spanned between adjacent algorithms and color-blended between their hex colors"
+          title="Toggle vertical curtains — each algorithm's curve drops a filled ribbon down to the time-axis floor"
           style={{
             padding: "2px 8px", fontSize: 9, borderRadius: 4, cursor: "pointer",
             background: showSurface ? "rgba(100,181,246,0.15)" : "var(--color-surface-1)",
@@ -791,36 +1001,33 @@ function Chart3D({
           padding: "2px 8px", fontSize: 9, borderRadius: 4, cursor: "pointer",
           background: "var(--color-surface-1)", border: "1px solid var(--color-border)", color: "var(--color-muted)",
         }}>⟲ Reset</button>
+        <button onClick={() => {
+          const c = canvasRef.current; if (!c) return;
+          const a = document.createElement("a");
+          a.href = c.toDataURL("image/png");
+          a.download = "benchmark-3d.png";
+          a.click();
+        }} style={{
+          padding: "2px 8px", fontSize: 9, borderRadius: 4, cursor: "pointer",
+          background: "var(--color-surface-1)", border: "1px solid var(--color-border)", color: "var(--color-muted)",
+        }}>↓ PNG</button>
         <span style={{ fontSize: 8, color: "var(--color-muted)", marginLeft: "auto", fontFamily: "monospace" }}>
-          X = n · Y = time · Z = space (log₁₀)
+          X=n · Y=time · Z=space (log₁₀) · dot size &amp; ring = ∫f dn cumulative work
         </span>
       </div>
       <canvas
-        ref={canvasRef} width={800} height={420}
-        style={{ width: "100%", height: "auto", display: "block", touchAction: "none",
-          cursor: tool === "orbit" ? "grab" : tool === "measure" ? "crosshair" : "default" }}
+        ref={canvasRef} width={800} height={307}
+        style={{ width: "100%", height: "auto", aspectRatio: "800 / 307", display: "block", touchAction: "none",
+          cursor: tool === "orbit" ? "grab" : tool === "measure" ? (hoverInfo ? "pointer" : "crosshair") : "default" }}
         onMouseDown={onMouseDown} onMouseMove={onMouseMove}
         onMouseUp={onMouseUp} onMouseLeave={() => { dragRef.current = null; setHoverInfo(null); }}
         onWheel={onWheel}
       />
-      {/* Color legend for the surface */}
-      {showSurface && algos.length > 1 && (
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 8, color: "var(--color-muted)", fontFamily: "monospace" }}>surface →</span>
-          {[...algos]
-            .filter(id => pts3d.some(p => p.id === id))
-            .sort((a, b) => {
-              const avg = (id: string) => { const ps = pts3d.filter(p => p.id === id); return ps.reduce((s, p) => s + p.y, 0) / (ps.length || 1); };
-              return avg(a) - avg(b);
-            })
-            .map(id => (
-              <span key={id} style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 8, fontFamily: "monospace", color: ALGO_COLORS[id] ?? "#888" }}>
-                <span style={{ width: 7, height: 7, borderRadius: 1, background: ALGO_COLORS[id] ?? "#888", display: "inline-block" }} />
-                {ALGO_NAMES[id]}
-              </span>
-            ))}
-          <span style={{ fontSize: 8, color: "var(--color-muted)", fontFamily: "monospace" }}>ordered fastest → slowest</span>
-        </div>
+      {/* Curtain hint */}
+      {showSurface && (
+        <p style={{ fontSize: 8, color: "var(--color-muted)", fontFamily: "monospace", marginTop: 4 }}>
+          curtains drop to the time-axis floor · rings on the floor = ∫f dn (larger = more cumulative work) · use ⊕ Measure to inspect any point
+        </p>
       )}
     </div>
   );
@@ -1024,7 +1231,7 @@ function CurveChart({
   highlight?: string | null;
   activeN?: number | null;
   onNChange?: (n: number | null) => void;
-  mode?: "time" | "space" | "ratio";
+  mode?: "time" | "space" | "ratio" | "space-ratio";
 }) {
   const [locked, setLocked] = useState(true);
   const [expanded, setExpanded] = useState(false);
@@ -1086,12 +1293,23 @@ function CurveChart({
   };
 
   const getValue = (p: CurvePoint) =>
-    mode === "space" ? (p.spaceBytes ?? 0) :
-    mode === "ratio" ? (p.n > 1 ? p.timeMs / (p.n * Math.log2(p.n)) : 0) :
+    mode === "space"       ? (p.spaceBytes ?? 0) :
+    mode === "ratio"       ? (p.n > 1 ? p.timeMs / (p.n * Math.log2(p.n)) : 0) :
+    mode === "space-ratio" ? (p.n > 1 ? (p.spaceBytes ?? 0) / (p.n * Math.log2(p.n)) : 0) :
     p.timeMs;
   const fmtY =
     mode === "space" ? fmtBytes :
-    mode === "ratio" ? (v: number) => `${(v * 1e6).toFixed(1)}ns` :
+    mode === "ratio" ? (v: number) => {
+      const ns = v * 1e6;
+      if (ns >= 1000) return `${(ns / 1000).toFixed(1)}µs`;
+      if (ns >= 0.1)  return `${ns.toFixed(ns >= 10 ? 0 : 1)}ns`;
+      return `${(ns * 1000).toFixed(0)}ps`;
+    } :
+    mode === "space-ratio" ? (v: number) => {
+      if (v >= 1)    return `${v.toFixed(1)}B`;
+      if (v >= 0.01) return `${(v * 1000).toFixed(0)}mB`;
+      return `${(v * 1e6).toFixed(0)}µB`;
+    } :
     fmtTime;
 
   // Pre-compute one fit per algo — reused for y-scale extension and tail drawing.
@@ -1352,12 +1570,49 @@ function CurveChart({
         </g>
       ))}
 
+      {/* ── Worst-case zone shading ── */}
+      {mode === "time" && (() => {
+        const slowAlgos = algos.filter(id => SLOW_IDS.has(id));
+        if (slowAlgos.length === 0 || visSizes.length < 2) return null;
+        // Find the x pixel at SLOW_THRESHOLD or the first visible n past it
+        const threshN = visSizes.find(n => n >= SLOW_THRESHOLD) ?? visSizes[visSizes.length - 1];
+        const x0 = xAt(threshN);
+        const x1 = pL + iW;
+        if (x1 - x0 < 4) return null;
+        return (
+          <g style={{ pointerEvents: "none" }}>
+            <rect x={x0} y={pT} width={x1 - x0} height={iH}
+              fill="rgba(239,68,68,0.06)" clipPath="url(#inner-plot-clip)" />
+            <text x={Math.max(x0 + 2, (x0 + x1) / 2)} y={pT + 10} textAnchor="middle" fontSize={7.5}
+              fontFamily="monospace" fill="rgba(239,68,68,0.5)" style={{ pointerEvents: "none" }}>
+              O(n²) slow zone
+            </text>
+          </g>
+        );
+      })()}
+      {/* Best-case zone: very small n where even O(n²) is fine */}
+      {mode === "time" && visSizes.length >= 2 && (() => {
+        const fastBound = visSizes.find(n => n >= 1000) ?? visSizes[visSizes.length - 1];
+        const x1 = xAt(fastBound);
+        if (x1 - pL < 4) return null;
+        return (
+          <g style={{ pointerEvents: "none" }}>
+            <rect x={pL} y={pT} width={x1 - pL} height={iH}
+              fill="rgba(78,124,82,0.05)" clipPath="url(#inner-plot-clip)" />
+            <text x={pL + (x1 - pL) / 2} y={pT + 10} textAnchor="middle" fontSize={7.5}
+              fontFamily="monospace" fill="rgba(78,124,82,0.4)" style={{ pointerEvents: "none" }}>
+              all algos fast
+            </text>
+          </g>
+        );
+      })()}
+
       {/* axes */}
       <line x1={pL} y1={pT} x2={pL} y2={pT + iH} stroke="var(--color-border)" strokeWidth={0.8} />
       <line x1={pL} y1={pT + iH} x2={VW - pR} y2={pT + iH} stroke="var(--color-border)" strokeWidth={0.8} />
 
       {/* Big-O reference curves — calibrated to actual data, labeled with predicted values */}
-      {mode !== "ratio" && visSizes.length >= 1 && bigOCalibC > 0 && (() => {
+      {mode !== "ratio" && mode !== "space-ratio" && visSizes.length >= 1 && bigOCalibC > 0 && (() => {
         const maxN  = visSizes[visSizes.length - 1];
         const STEPS = 80;
         const lx    = pL + iW + extraZoneW + 5;
@@ -1501,8 +1756,18 @@ function CurveChart({
       <text x={pL + iW / 2} y={VH - 3} textAnchor="middle" fontSize={9}
         fill="var(--color-muted)" fontStyle="italic">input size (n)</text>
 
+      {/* y-axis title — rotated */}
+      <text
+        x={0} y={0}
+        transform={`translate(9, ${pT + iH / 2}) rotate(-90)`}
+        textAnchor="middle" fontSize={8}
+        fill="var(--color-muted)" fontStyle="italic" fontFamily="monospace"
+      >
+        {mode === "ratio" ? "t / (n · log₂n)" : mode === "space" ? "memory" : "time"}
+      </text>
+
       {/* Crossover annotations — n where algo A's fitted curve overtakes algo B */}
-      {mode !== "ratio" && (() => {
+      {mode !== "ratio" && mode !== "space-ratio" && (() => {
         const ids = algos.filter(id => extraFits.get(id) != null);
         if (ids.length < 2) return null;
         const annotations: { n: number; idA: string; idB: string }[] = [];
@@ -2408,6 +2673,7 @@ function cacheLevel(id: string, n: number): { label: string; color: string } {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function BenchmarkVisualizer() {
+  const { has } = useLevel();
   const [pulseEnabled, setPulseEnabled] = useState<boolean>(() => {
     try { return localStorage.getItem("cc-pulse") !== "off"; } catch { return true; }
   });
@@ -2449,7 +2715,7 @@ export default function BenchmarkVisualizer() {
   type SortCol = "name" | "speed" | "time" | "tvsb" | "tbigo" | "fit" | "space" | "svsb" | "sbigo";
   const [sortCol, setSortCol] = useState<SortCol>("time");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
-  const [chartMode, setChartMode] = useState<"time" | "space" | "ratio" | "3d">("time");
+  const [chartMode, setChartMode] = useState<"time" | "space" | "ratio" | "space-ratio" | "3d" | "memory">("time");
   const [miniCardSort, setMiniCardSort] = useState<"space" | "time">("space");
   const [customInput, setCustomInput] = useState("");
   const [pendingCustomN, setPendingCustomN] = useState<number | null>(null);
@@ -2511,6 +2777,24 @@ export default function BenchmarkVisualizer() {
     const dupsVal = Number(params.get("dups"));
     if (dupsVal >= 0 && dupsVal <= 100) setCustomDuplicates(dupsVal);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Encode current config into URL so Share button copies a valid link
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams();
+    if (selected.size) params.set("algos", [...selected].join(","));
+    if (selectedSizes.size) params.set("sizes", [...selectedSizes].join(","));
+    const sc = [...scenarios];
+    if (sc.length && !(sc.length === 1 && sc[0] === "random")) params.set("sc", sc.join(","));
+    if (rounds !== 3) params.set("rounds", String(rounds));
+    if (warmup !== 1) params.set("warmup", String(warmup));
+    if (quickPivot !== "median3") params.set("pivot", quickPivot);
+    if (shellGaps !== "ciura") params.set("gaps", shellGaps);
+    if (customPreSorted !== 0) params.set("preSorted", String(customPreSorted));
+    if (customDuplicates !== 0) params.set("dups", String(customDuplicates));
+    const q = params.toString();
+    window.history.replaceState(null, "", q ? "?" + q : window.location.pathname);
+  }, [selected, selectedSizes, scenarios, rounds, warmup, quickPivot, shellGaps, customPreSorted, customDuplicates]);
 
   // Slow algos are disabled if the largest selected size exceeds the threshold
   const maxSelectedSize = selectedSizes.size > 0 ? Math.max(...selectedSizes) : 0;
@@ -2702,8 +2986,10 @@ export default function BenchmarkVisualizer() {
         customPreSorted > 0 || customDuplicates > 0
           ? { preSortedPct: customPreSorted, duplicatePct: customDuplicates }
           : undefined;
+      // Build weighted pool: "sorted" appears once, all others three times — so it's rare in the mix.
+      const weightedScenarios = scenarioList.flatMap(sc => sc === "sorted" ? [sc] : [sc, sc, sc]);
       const roundInputs = Array.from({ length: rounds }, () => {
-        const sc = scenarioList[Math.floor(Math.random() * scenarioList.length)];
+        const sc = weightedScenarios[Math.floor(Math.random() * weightedScenarios.length)];
         return generateBenchmarkInput(sz, sc, customDist);
       });
 
@@ -2828,7 +3114,7 @@ export default function BenchmarkVisualizer() {
       saveHistory(next);
       return next;
     });
-  }, [selected, selectedSizes, scenarios, rounds, warmup, customPreSorted, customDuplicates, quickPivot, shellGaps]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selected, selectedSizes, scenarios, rounds, warmup, customPreSorted, customDuplicates, quickPivot, shellGaps, logosParams]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const stop = () => { stopRef.current = true; };
 
@@ -2886,11 +3172,22 @@ export default function BenchmarkVisualizer() {
   const largestDone = completedNs.size > 0 ? Math.max(...completedNs) : null;
   const summaryResults: SummaryResult[] = largestDone !== null
     ? chartAlgos
-        .filter(id => curveDataExt[id]?.some(p => p.n === largestDone && !p.timedOut))
+        .filter(id => id !== "timsort-js" && curveDataExt[id]?.some(p => p.n === largestDone && !p.timedOut))
         .map(id => ({
           id,
           timeMs: curveDataExt[id]!.find(p => p.n === largestDone)!.timeMs,
         }))
+        .sort((a, b) => a.timeMs - b.timeMs)
+        .map((r, i) => ({ ...r, rank: i + 1 }))
+    : [];
+
+  const summarySpaceResults: SummaryResult[] = largestDone !== null
+    ? chartAlgos
+        .filter(id => id !== "timsort-js" && curveDataExt[id]?.some(p => p.n === largestDone && !p.timedOut))
+        .map(id => {
+          const pt = curveDataExt[id]!.find(p => p.n === largestDone)!;
+          return { id, timeMs: pt.spaceBytes ?? theoreticalSpaceBytes(id, largestDone) };
+        })
         .sort((a, b) => a.timeMs - b.timeMs)
         .map((r, i) => ({ ...r, rank: i + 1 }))
     : [];
@@ -2979,7 +3276,7 @@ export default function BenchmarkVisualizer() {
       </div>
 
       {/* Body: single scroll on mobile, 50/50 split on desktop */}
-      <div className="flex-1 overflow-y-auto lg:overflow-hidden flex flex-col lg:flex-row">
+      <div className="flex-1 overflow-y-auto lg:overflow-hidden flex flex-col lg:flex-row pb-20 lg:pb-0">
 
         {/* ── Left pane: config ── */}
         <div
@@ -3237,7 +3534,7 @@ export default function BenchmarkVisualizer() {
                   })}
                 </div>
 
-                {logosSettingsOpen && (
+                {logosSettingsOpen && has("advanced") && (
                   <div className="mt-3 rounded-lg p-3 flex flex-col gap-2.5" style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)" }}>
                     <div className="flex items-center justify-between">
                       <p className="text-xs font-semibold" style={{ color: "var(--color-text)" }}>Logos Sort — parameters</p>
@@ -3301,7 +3598,7 @@ export default function BenchmarkVisualizer() {
               </div>
 
               {/* Advanced */}
-              <div className="print:hidden mb-4">
+              {has("advanced") && <div className="print:hidden mb-4">
                 <button
                   onClick={() => setAdvancedOpen(o => !o)}
                   className="flex items-center gap-1"
@@ -3344,6 +3641,7 @@ export default function BenchmarkVisualizer() {
                                 style={{ accentColor: "var(--color-accent)" }}
                               />
                               {s.label}
+                              {s.rare && <span style={{ fontSize: 9, padding: "0 4px", borderRadius: 3, background: "var(--color-surface-3)", color: "var(--color-muted)", fontStyle: "italic" }}>rare</span>}
                               <span style={{ color: "var(--color-muted)", fontSize: 10 }}>— {s.desc}</span>
                             </label>
                           );
@@ -3453,7 +3751,7 @@ export default function BenchmarkVisualizer() {
                     </div>
                   </div>
                 )}
-              </div>
+              </div>}
 
               {/* Buttons */}
               {status !== "running" && (
@@ -3539,7 +3837,7 @@ export default function BenchmarkVisualizer() {
                     ...chartAlgosBase.map(id => prerunSteps[id]?.length ?? 0), 1
                   );
                   return (
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-2">
                       {sortedCards.map(id => (
                         <AlgoMiniCard
                           key={id}
@@ -3547,7 +3845,7 @@ export default function BenchmarkVisualizer() {
                           steps={prerunSteps[id] ?? null}
                           benchData={curveDataExt[id] ?? null}
                           isActive={status === "running" && currentAlgo === id}
-                          rank={summaryResults.find(r => r.id === id)?.rank ?? null}
+                          rank={(miniCardSort === "space" ? summarySpaceResults : summaryResults).find(r => r.id === id)?.rank ?? null}
                           loop={status === "running"}
                           maxSpaceBytes={maxSpaceBytes}
                           maxTotalSteps={maxTotalSteps}
@@ -3659,17 +3957,19 @@ export default function BenchmarkVisualizer() {
                     <div className="print:hidden" style={{ display: "flex", justifyContent: "center", marginBottom: 4, marginTop: 15 }}>
                     <div className="flex rounded overflow-hidden" style={{ border: "1px solid var(--color-border)" }}>
                       {([
-                        { id: "time",  label: "time",    title: undefined },
-                        { id: "space", label: "space",   title: undefined },
-                        { id: "ratio", label: "t/n㏒n", title: "Normalize by n·log₂n — flat = O(n log n); slope up = super-linear" },
-                        { id: "3d",    label: "3D",      title: "Interactive 3D: time × space × n (drag to orbit, scroll to zoom)" },
-                      ] as const).map(m => (
+                        { id: "time",         label: "time",        title: undefined,                                                              minLevel: "basic" },
+                        { id: "space",        label: "space",       title: undefined,                                                              minLevel: "advanced" },
+                        { id: "ratio",        label: "t / n·log n", title: "Normalize time by n·log₂n — flat = O(n log n)",                       minLevel: "advanced" },
+                        { id: "space-ratio",  label: "s / n·log n", title: "Normalize space by n·log₂n — flat = O(n log n) space",                minLevel: "advanced" },
+                        { id: "3d",           label: "3D",          title: "Interactive 3D: time × space × n (drag to orbit, scroll to zoom)",    minLevel: "research" },
+                        { id: "memory",       label: "Memory",      title: "Peak vs average theoretical memory usage per algorithm",                minLevel: "advanced" },
+                      ] as const).filter(m => has(m.minLevel as Parameters<typeof has>[0])).map(m => (
                         <button
                           key={m.id}
                           onClick={() => setChartMode(m.id)}
                           title={m.title}
                           style={btn(chartMode === m.id ? "primary" : "ghost", {
-                            padding: "2px 10px", fontSize: 10, borderRadius: 0,
+                            padding: "2px 8px", fontSize: 10, borderRadius: 0,
                             background: chartMode === m.id ? "var(--color-accent)" : "var(--color-surface-1)",
                           })}
                         >
@@ -3679,8 +3979,13 @@ export default function BenchmarkVisualizer() {
                     </div>
                     </div>{/* end centering wrapper */}
 
-                    {/* 3D chart or 2D curve chart */}
-                    {chartMode === "3d" ? (
+                    {/* 3D chart, memory chart, or 2D curve chart */}
+                    {chartMode === "memory" ? (
+                      <MemoryChart
+                        algos={chartAlgos.filter(id => id !== "timsort-js")}
+                        n={largestDone ?? (chartSizes[chartSizes.length - 1] ?? 1000)}
+                      />
+                    ) : chartMode === "3d" ? (
                       <Chart3D
                         data={curveDataExt}
                         algos={chartAlgos}
@@ -3693,10 +3998,10 @@ export default function BenchmarkVisualizer() {
                           highlight={activeProofAlgo}
                           activeN={hoverN}
                           onNChange={progressLocked && status === "running" ? undefined : setHoverN}
-                          mode={chartMode as "time" | "space" | "ratio"}
+                          mode={chartMode as "time" | "space" | "ratio" | "space-ratio"}
                         />
-                        {/* Big-O reference legend — hidden in ratio mode */}
-                        {chartMode !== "ratio" && (
+                        {/* Big-O reference legend — hidden in normalized modes */}
+                        {chartMode !== "ratio" && chartMode !== "space-ratio" && (
                           <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1" style={{ paddingLeft: 60 }}>
                             {(chartMode === "space" ? SPACE_BIG_O_REFS : BIG_O_REFS).map(ref => (
                               <div key={ref.id} className="flex items-center gap-1">
@@ -3716,14 +4021,15 @@ export default function BenchmarkVisualizer() {
                             )}
                           </div>
                         )}
-                        {chartMode === "ratio" && (
+                        {(chartMode === "ratio" || chartMode === "space-ratio") && (
                           <p style={{ fontSize: 9, color: "var(--color-muted)", fontFamily: "monospace", paddingLeft: 60, marginTop: 4 }}>
-                            flat = O(n log n) · rising = super-linear · falling = sub-linear · units: ns per element·log₂n
+                            flat = O(n log n) · rising = super-linear · falling = sub-linear
+                            {chartMode === "ratio" ? " · units: ns per element·log₂n" : " · units: bytes per element·log₂n"}
                           </p>
                         )}
 
                         {/* Mathematical analysis panel — shown below time and space charts */}
-                        {(chartMode === "time" || chartMode === "space") && status === "done" && (
+                        {has("research") && (chartMode === "time" || chartMode === "space") && status === "done" && (
                           <MathPanel
                             data={curveDataExt}
                             algos={chartAlgos.filter(id => id !== "timsort-js")}
@@ -3744,7 +4050,7 @@ export default function BenchmarkVisualizer() {
                 )}
 
                 {/* Proof slider */}
-                {Object.keys(sampleProofs).length > 0 && (
+                {has("research") && Object.keys(sampleProofs).length > 0 && (
                   <div className="print:hidden">
                     <ProofSlider
                       proofs={sampleProofs} algos={chartAlgos}
@@ -4087,7 +4393,7 @@ export default function BenchmarkVisualizer() {
                                     <span style={{ fontSize: 8, color: "var(--color-muted)", fontWeight: 400 }}>JS estimate</span>
                                   )}
                                   {/* Adversarial input shortcut */}
-                                  {row.id !== "timsort-js" && largestDone != null && (
+                                  {has("research") && row.id !== "timsort-js" && largestDone != null && (
                                     <button
                                       title={`Load worst-case input for ${ALGO_NAMES[row.id]}`}
                                       onClick={() => {
@@ -4136,7 +4442,13 @@ export default function BenchmarkVisualizer() {
                                 {/* Comparison/swap counts at n=2000 */}
                                 {(() => {
                                   const ops = opCounts[row.id];
-                                  const fmtOps = (n: number) => n >= 1_000_000 ? `${(n/1e6).toFixed(1)}M` : n >= 1_000 ? `${(n/1e3).toFixed(0)}K` : String(n);
+                                  const fmtOps = (n: number) => {
+                                    const f = (v: number) => v % 1 === 0 ? v.toFixed(0) : v.toPrecision(3).replace(/\.?0+$/, "");
+                                    if (n >= 1_000_000_000) return `${f(n / 1_000_000_000)}B`;
+                                    if (n >= 1_000_000)     return `${f(n / 1_000_000)}M`;
+                                    if (n >= 1_000)         return `${f(n / 1_000)}K`;
+                                    return String(n);
+                                  };
                                   return (
                                     <>
                                       <div style={cell("var(--color-muted)", 1)} title={ops ? `${ops.comparisons.toLocaleString()} comparisons at n=2,000` : "Only available for insertion/bubble/selection/shell/merge/quick/heap"}>
@@ -4159,7 +4471,7 @@ export default function BenchmarkVisualizer() {
                                   );
                                 })()}
                                 <div style={{ ...cell("var(--color-text)", 1), opacity: 0.75 }} title={ALGO_SPACE[row.id]}>
-                                  {canDl ? (
+                                  {canDl && has("research") ? (
                                     <a onClick={handleDl} style={{ color: "var(--color-accent)", cursor: "pointer", textDecoration: "underline", fontFamily: "monospace" }} title={`Download space proof (${fmtBytes(spaceVal ?? 0)})`}>{spaceStr}</a>
                                   ) : spaceStr}
                                 </div>
@@ -4188,7 +4500,7 @@ export default function BenchmarkVisualizer() {
         </div>
 
         {/* ── Run history ────────────────────────────────────────────────────── */}
-        {runHistory.length > 0 && (
+        {has("research") && runHistory.length > 0 && (
           <div className="mt-6 print:hidden">
             <button
               onClick={() => setHistoryOpen(h => !h)}
@@ -4237,6 +4549,38 @@ export default function BenchmarkVisualizer() {
         )}
 
       </div>
+
+      {/* ── Mobile sticky run/stop bar ── */}
+      <div
+        className="lg:hidden print:hidden fixed bottom-0 left-0 right-0 flex gap-2 px-4 py-3"
+        style={{
+          background: "var(--color-surface-1)",
+          borderTop: "1px solid var(--color-border)",
+          zIndex: 40,
+          paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))",
+        }}
+      >
+        {status === "running" ? (
+          <button onClick={stop} style={btn("danger", { flex: 1, justifyContent: "center", padding: "6px 0" })}>
+            <Square size={13} strokeWidth={2} fill="currentColor" /> Stop
+          </button>
+        ) : (
+          <button
+            onClick={run}
+            disabled={!canRun}
+            style={btn("primary", { flex: 1, justifyContent: "center", padding: "6px 0", opacity: canRun ? 1 : 0.5, cursor: canRun ? "pointer" : "not-allowed" })}
+          >
+            <Play size={13} strokeWidth={2} />
+            {status === "done" ? "Re-run" : "Run benchmark"}
+          </button>
+        )}
+        {status === "done" && (
+          <button onClick={reset} style={btn("secondary", { padding: "6px 14px" })}>
+            <RotateCcw size={12} strokeWidth={1.75} />
+          </button>
+        )}
+      </div>
+
     </div>
   );
 }

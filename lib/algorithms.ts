@@ -24,6 +24,8 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
       "    if arr[j] > arr[j+1]:",
       "      swap(arr[j], arr[j+1])",
     ],
+    leetcode: "https://leetcode.com/problems/sort-an-array/",
+    comparisonNote: "Made {comparisons} comparisons on {n} elements — always Θ(n²) since every adjacent pair is checked in each of n passes.",
   },
   selection: {
     name: "Selection Sort",
@@ -41,6 +43,8 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
       "      minIdx = j",
       "  swap(arr[i], arr[minIdx])",
     ],
+    leetcode: "https://leetcode.com/problems/sort-an-array/",
+    comparisonNote: "Made {comparisons} comparisons but only {swaps} swaps — selection sort always does exactly n(n−1)/2 comparisons yet only O(n) swaps, making it optimal when writes are expensive.",
   },
   insertion: {
     name: "Insertion Sort",
@@ -59,6 +63,8 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
       "    j = j − 1",
       "  arr[j+1] = key",
     ],
+    leetcode: "https://leetcode.com/problems/insertion-sort-list/",
+    comparisonNote: "Made {comparisons} comparisons — proportional to the number of inversions in the input. Nearly-sorted data approaches O(n); worst case (reverse-sorted) is O(n²).",
   },
   merge: {
     name: "Merge Sort",
@@ -67,6 +73,8 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     spaceComplexity: "O(n)",
     stable: true,
     description: "Divides the array in half recursively, then merges sorted halves. Guarantees O(n log n) in all cases.",
+    leetcode: "https://leetcode.com/problems/sort-list/",
+    comparisonNote: "Made {comparisons} comparisons — merge sort always uses between n·log₂n/2 and n·log₂n comparisons regardless of input order, giving it its guaranteed O(n log n) bound.",
     pseudocode: [
       "mergeSort(arr, l, r):",
       "  if l >= r: return",
@@ -83,6 +91,8 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     spaceComplexity: "O(log n)",
     stable: false,
     description: "Selects a pivot, partitions the array around it, then recurses on both halves. Average O(n log n) with excellent cache performance.",
+    leetcode: "https://leetcode.com/problems/sort-an-array/",
+    comparisonNote: "Made {comparisons} comparisons — pivot quality determines performance. Well-chosen pivots split work evenly (O(n log n)); a worst-case pivot (always min/max) would give O(n²).",
     pseudocode: [
       "quickSort(arr, lo, hi):",
       "  if lo >= hi: return",
@@ -101,6 +111,8 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     spaceComplexity: "O(1)",
     stable: false,
     description: "Builds a max-heap from the array, then repeatedly extracts the max element to produce the sorted output in-place.",
+    leetcode: "https://leetcode.com/problems/sort-an-array/",
+    comparisonNote: "Made {comparisons} comparisons — heap sort guarantees O(n log n) in all cases. The heapify phase costs O(n) and each of the n extractions costs O(log n).",
     pseudocode: [
       "buildMaxHeap(arr)",
       "  for i = n/2−1 down to 0: heapify(arr, n, i)",
@@ -117,6 +129,7 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     spaceComplexity: "O(1)",
     stable: false,
     description: "A generalization of insertion sort that allows swapping of elements far apart. Uses a decreasing gap sequence to progressively sort the array.",
+    comparisonNote: "Made {comparisons} comparisons — large gaps early eliminate long-range inversions cheaply, so the final gap-1 (insertion) pass has almost nothing left to do.",
     pseudocode: [
       "gap = n / 2",
       "while gap > 0:",
@@ -136,6 +149,7 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     spaceComplexity: "O(k)",
     stable: true,
     description: "Counts occurrences of each value, computes prefix sums, then places each element at its correct position. Only works for integer keys in a known range.",
+    comparisonNote: "Made {comparisons} comparisons — counting sort doesn't compare elements at all! It counts and places, so the 'comparisons' here reflect the range scan, not element comparisons.",
     pseudocode: [
       "count[0..k] = 0",
       "for x in arr: count[x]++",
@@ -152,6 +166,7 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     spaceComplexity: "O(n + k)",
     stable: true,
     description: "Sorts integers digit by digit from least significant to most significant, using a stable sort (counting sort) at each digit position.",
+    comparisonNote: "Made {comparisons} comparisons — radix sort makes zero element comparisons. Each digit pass is O(n + 10) counting sort. Total cost is O(n · digits), independent of element order.",
     pseudocode: [
       "for exp = 1; max/exp > 0; exp *= 10:",
       "  countingSortByDigit(arr, exp)",
@@ -168,6 +183,7 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     spaceComplexity: "O(n)",
     stable: true,
     description: "Distributes elements into a fixed number of buckets, sorts each bucket (using insertion sort), then concatenates the buckets.",
+    comparisonNote: "Made {comparisons} comparisons — with uniform input each bucket gets ~n/k elements. Insertion sort per bucket costs O((n/k)²), so total is O(n + n²/k). With k=n buckets this approaches O(n).",
     pseudocode: [
       "create n empty buckets",
       "for each x in arr:",
@@ -182,6 +198,7 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     timeComplexity: "O(n log n)",
     spaceComplexity: "O(log n)",
     stable: false,
+    comparisonNote: "Made {comparisons} comparisons — Logos uses the golden ratio to place pivots near the natural distribution of values, targeting fewer imbalanced partitions than random or fixed-pivot quicksort.",
     quote: {
       text: 'In the beginning was the Logos.',
       attribution: 'John 1:1',
@@ -208,6 +225,7 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     timeComplexity: "O(n²)",
     spaceComplexity: "O(1)",
     stable: true,
+    comparisonNote: "Made {comparisons} comparisons — bidirectional passes shrink the unsorted window from both ends simultaneously, halving the number of passes needed vs. bubble sort on partially-sorted data.",
     description: "A bidirectional bubble sort that alternates forward and backward passes. Each forward pass bubbles the largest unsorted element right; each backward pass bubbles the smallest left. Eliminates the 'turtle' problem — small values near the end that standard bubble sort moves agonizingly slowly.",
     pseudocode: [
       "left = 0; right = n−1",
@@ -226,6 +244,7 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     timeComplexity: "O(n²)",
     spaceComplexity: "O(1)",
     stable: false,
+    comparisonNote: "Made {comparisons} comparisons — large gaps early eliminate 'turtle' inversions (small values near the end) in one shot, dramatically reducing the work left for the bubble-sort final passes.",
     description: "Improves bubble sort by comparing elements separated by a shrinking gap (initial gap ≈ n, shrink factor 1.3) rather than only adjacent pairs. Long-range comparisons eliminate large inversions early; the gap shrinks until it reaches 1 at which point it becomes standard bubble sort. Shrink factor 1.3 is empirically optimal — gaps 9 and 10 are traditionally skipped.",
     pseudocode: [
       "gap = n; shrink = 1.3",
@@ -242,6 +261,7 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     timeComplexity: "O(n²)",
     spaceComplexity: "O(1)",
     stable: true,
+    comparisonNote: "Made {comparisons} comparisons — equal to the number of inversions in the input, since the gnome walks back exactly one step per inversion it finds.",
     description: "The simplest possible sorting algorithm — a single pointer advances if the current pair is in order, or swaps and retreats if not. Named for a Dutch garden gnome sorting flower pots by walking backward until finding the right spot. No nested loops, no auxiliary structures. Online: handles elements appended to the end.",
     pseudocode: [
       "pos = 0",
@@ -259,6 +279,8 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     timeComplexity: "O(n²)",
     spaceComplexity: "O(1)",
     stable: false,
+    leetcode: "https://leetcode.com/problems/pancake-sorting/",
+    comparisonNote: "Made {comparisons} comparisons and {swaps} flips — each round places the next-largest element using at most 2 prefix reversals, for a total of at most 2(n−1) flips.",
     description: "The only allowed operation is flip(k) — reversing the prefix arr[0..k]. To place each maximum: scan for it, flip it to position 0, then flip it down to its final position. At most 2(n−1) flips total. Posed by Jacob Goodman in 1975; analyzed by Gates and Papadimitriou in 1979. Dramatic prefix reversals make it the most visually striking simple sort.",
     pseudocode: [
       "for size = n downto 2:",
@@ -276,6 +298,7 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     timeComplexity: "O(n²)",
     spaceComplexity: "O(1)",
     stable: false,
+    comparisonNote: "Made {comparisons} comparisons but only {swaps} writes — cycle sort performs the theoretical minimum number of writes by tracing permutation cycles. Every element is written to its final position exactly once.",
     description: "Minimizes array writes by exploiting permutation cycle theory. Any permutation decomposes into disjoint cycles; cycle sort traces each cycle and writes each element directly to its correct position exactly once — achieving the theoretical minimum number of writes. Originally published in 1986 in Byte Magazine as 'An Efficient Algorithm for Sorting with Minimal Writing.'",
     pseudocode: [
       "for cycleStart = 0 to n−2:",
@@ -296,6 +319,7 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     timeComplexity: "O(n²)",
     spaceComplexity: "O(1)",
     stable: true,
+    comparisonNote: "Made {comparisons} comparisons — on parallel hardware each odd/even phase runs in O(1) time simultaneously across all pairs, giving O(n) total. Sequentially each phase is O(n), hence O(n²) overall.",
     description: "Alternates between two phases — odd phase compares pairs (arr[1],arr[2]), (arr[3],arr[4])..., even phase compares (arr[0],arr[1]), (arr[2],arr[3]).... On parallel hardware each phase runs in O(1), giving O(n) total. Sequentially O(n²). Developed by Habermann in 1972 for systolic array architectures. Also called brick sort for its staggered comparison pattern.",
     pseudocode: [
       "while not sorted:",
@@ -308,6 +332,28 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
       "    if arr[i] > arr[i+1]: swap; sorted = false",
     ],
   },
+  introsort: {
+    name: "Introsort",
+    slug: "introsort",
+    timeComplexity: "O(n log n)",
+    spaceComplexity: "O(log n)",
+    stable: false,
+    description:
+      "Hybrid sort that starts with quicksort (median-of-3 pivot) and monitors recursion depth. When depth exceeds 2·log₂n it switches to heapsort to guarantee O(n log n) worst case. For small subarrays (≤16) it finishes with insertion sort. This is the basis of std::sort in C++.",
+    comparisonNote: "Made {comparisons} comparisons — introsort stays within O(n log n) by design, switching from quicksort to heapsort if recursion depth exceeds 2·log₂n.",
+    pseudocode: [
+      "maxDepth = 2 · floor(log₂(n))",
+      "introsort(arr, lo, hi, depth):",
+      "  if size ≤ 16: insertionSort(lo..hi)",
+      "  else if depth == 0: heapSort(lo..hi)",
+      "  else:",
+      "    pivot = medianOf3(lo, mid, hi)",
+      "    partition around pivot",
+      "    introsort(left,  depth−1)",
+      "    introsort(right, depth−1)",
+    ],
+    quote: { text: "Make the worst case impossible, not just unlikely.", attribution: "David Musser, 1997" },
+  },
   timsort: {
     name: "Tim Sort",
     slug: "timsort",
@@ -315,6 +361,7 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     spaceComplexity: "O(n)",
     stable: true,
     description: "Hybrid sort combining insertion sort and merge sort. Detects natural ascending/descending runs, extends short ones via binary insertion sort to a computed minRun (32–64), then merges with galloping mode. Used in Python and Java's standard libraries.",
+    comparisonNote: "Made {comparisons} comparisons — timsort exploits existing order. On nearly-sorted data it can approach O(n); on random data it falls back to O(n log n) merge behavior.",
     pseudocode: [
       "minRun = minRunLength(n)  // 32–64",
       "while lo < n:",
@@ -1725,6 +1772,137 @@ export function getOddEvenSortSteps(arr: number[]): SortStep[] {
   return steps;
 }
 
+/*
+ * Introsort: quicksort + heapsort + insertion sort hybrid.
+ *
+ * Starts as median-of-3 quicksort. If the recursion depth exceeds
+ * 2·⌊log₂n⌋ (a sign of pathological input), it switches to heapsort
+ * to guarantee O(n log n) worst case. Subarrays of ≤ 16 elements are
+ * finished with insertion sort, which has low overhead at small n.
+ * This is the strategy behind std::sort in libstdc++.
+ */
+export function getIntroSortSteps(arr: number[]): SortStep[] {
+  const steps: SortStep[] = [];
+  const a = [...arr];
+  const n = a.length;
+  const sorted = new Set<number>();
+  let cmp = 0, swp = 0;
+
+  const maxDepth = n <= 1 ? 0 : 2 * Math.floor(Math.log2(n));
+
+  function push(overrides: Partial<Record<number, BarState>>, desc: string, line: number) {
+    steps.push({ array: [...a], states: makeStates(n, sorted, overrides), description: desc, comparisons: cmp, swaps: swp, pseudocodeLine: line });
+  }
+
+  function insertionSort(lo: number, hi: number) {
+    for (let i = lo + 1; i <= hi; i++) {
+      const key = a[i];
+      let j = i - 1;
+      while (j >= lo) {
+        cmp++;
+        push({ [j]: "comparing", [j + 1]: "comparing" }, `Insertion: comparing ${a[j]} ≥ ${key}?`, 2);
+        if (a[j] <= key) break;
+        a[j + 1] = a[j];
+        swp++;
+        push({ [j]: "swapping", [j + 1]: "swapping" }, `Insertion: shifted ${a[j + 1]} right`, 2);
+        j--;
+      }
+      a[j + 1] = key;
+    }
+  }
+
+  function heapify(heapEnd: number, root: number, base: number) {
+    let largest = root;
+    const l = 2 * root + 1;
+    const r = 2 * root + 2;
+    if (l < heapEnd) {
+      cmp++;
+      push({ [base + largest]: "minimum", [base + l]: "comparing" }, `Heapify: ${a[base + l]} vs ${a[base + largest]}`, 3);
+      if (a[base + l] > a[base + largest]) largest = l;
+    }
+    if (r < heapEnd) {
+      cmp++;
+      push({ [base + largest]: "minimum", [base + r]: "comparing" }, `Heapify: ${a[base + r]} vs ${a[base + largest]}`, 3);
+      if (a[base + r] > a[base + largest]) largest = r;
+    }
+    if (largest !== root) {
+      swp++;
+      [a[base + root], a[base + largest]] = [a[base + largest], a[base + root]];
+      push({ [base + root]: "swapping", [base + largest]: "swapping" }, `Heapify: swapped → O(n log n) guaranteed`, 3);
+      heapify(heapEnd, largest, base);
+    }
+  }
+
+  function heapSort(lo: number, hi: number) {
+    const len = hi - lo + 1;
+    push({}, `Depth limit hit — switching to heapsort for [${lo}..${hi}]`, 3);
+    for (let i = Math.floor(len / 2) - 1; i >= 0; i--) heapify(len, i, lo);
+    for (let i = len - 1; i > 0; i--) {
+      swp++;
+      [a[lo], a[lo + i]] = [a[lo + i], a[lo]];
+      sorted.add(lo + i);
+      push({ [lo]: "swapping", [lo + i]: "swapping" }, `Heap: placed ${a[lo + i]} at position ${lo + i}`, 3);
+      heapify(i, 0, lo);
+    }
+    sorted.add(lo);
+  }
+
+  function medianOf3(lo: number, mid: number, hi: number): number {
+    if (a[lo] > a[mid]) [a[lo], a[mid]] = [a[mid], a[lo]];
+    if (a[lo] > a[hi]) [a[lo], a[hi]] = [a[hi], a[lo]];
+    if (a[mid] > a[hi]) [a[mid], a[hi]] = [a[hi], a[mid]];
+    return mid;
+  }
+
+  function introsort(lo: number, hi: number, depth: number) {
+    const size = hi - lo + 1;
+    if (size <= 1) return;
+
+    if (size <= 16) {
+      push({}, `Small subarray [${lo}..${hi}] — finishing with insertion sort`, 2);
+      insertionSort(lo, hi);
+      return;
+    }
+
+    if (depth === 0) {
+      heapSort(lo, hi);
+      return;
+    }
+
+    const mid = Math.floor((lo + hi) / 2);
+    const pivotIdx = medianOf3(lo, mid, hi);
+    const pivot = a[pivotIdx];
+    [a[pivotIdx], a[hi - 1]] = [a[hi - 1], a[pivotIdx]];
+    push({ [hi - 1]: "pivot" }, `Pivot = ${pivot} (median of ${a[lo]},${a[mid]},${a[hi]}) partitioning [${lo}..${hi}]`, 5);
+
+    let i = lo;
+    let j = hi - 2;
+    while (true) {
+      while (i <= hi - 1 && a[i] < pivot) { cmp++; push({ [i]: "comparing", [hi - 1]: "pivot" }, `${a[i]} < ${pivot}, advance left pointer`, 6); i++; }
+      while (j >= lo && a[j] > pivot) { cmp++; push({ [j]: "comparing", [hi - 1]: "pivot" }, `${a[j]} > ${pivot}, advance right pointer`, 6); j--; }
+      if (i >= j) break;
+      swp++;
+      [a[i], a[j]] = [a[j], a[i]];
+      push({ [i]: "swapping", [j]: "swapping", [hi - 1]: "pivot" }, `Swapped ${a[i]} ↔ ${a[j]}`, 6);
+      i++; j--;
+    }
+    [a[i], a[hi - 1]] = [a[hi - 1], a[i]];
+    swp++;
+    sorted.add(i);
+    push({ [i]: "sorted" }, `Pivot ${pivot} placed at index ${i}`, 7);
+
+    introsort(lo, i - 1, depth - 1);
+    introsort(i + 1, hi, depth - 1);
+  }
+
+  push({}, "Introsort: begin (quicksort with depth guard)", 0);
+  introsort(0, n - 1, maxDepth);
+
+  for (let i = 0; i < n; i++) sorted.add(i);
+  steps.push({ array: [...a], states: Array(n).fill("sorted"), description: "Array fully sorted!", comparisons: cmp, swaps: swp, pseudocodeLine: -1 });
+  return steps;
+}
+
 export function getSteps(algorithm: SortAlgorithm, arr: number[]): SortStep[] {
   switch (algorithm) {
     case "bubble":
@@ -1750,7 +1928,10 @@ export function getSteps(algorithm: SortAlgorithm, arr: number[]): SortStep[] {
     case "timsort":
       return getTimSortSteps(arr);
     case "logos":
-      return getLogosSortSteps(arr);
+      // Use visualizer-friendly params: lower BASE so recursive partitioning is visible
+      // (default BASE=48 would skip straight to insertion sort for typical small arrays),
+      // and lower countingMult so counting sort only fires when values are truly dense.
+      return getLogosSortSteps(arr, { ...DEFAULT_LOGOS_PARAMS, base: 10, countingMult: 0.75 });
     case "cocktail":
       return getCocktailSortSteps(arr);
     case "comb":
@@ -1763,6 +1944,8 @@ export function getSteps(algorithm: SortAlgorithm, arr: number[]): SortStep[] {
       return getCycleSortSteps(arr);
     case "oddeven":
       return getOddEvenSortSteps(arr);
+    case "introsort":
+      return getIntroSortSteps(arr);
   }
 }
 

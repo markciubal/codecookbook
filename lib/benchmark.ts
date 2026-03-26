@@ -1,4 +1,4 @@
-export type BenchmarkScenario = "random" | "nearlySorted" | "reversed" | "duplicates";
+export type BenchmarkScenario = "random" | "nearlySorted" | "reversed" | "duplicates" | "sorted";
 
 /** Tunable constants for Logos Sort. */
 export interface LogosParams {
@@ -52,6 +52,11 @@ export function generateBenchmarkInput(
     case "duplicates":
       arr = Array.from({ length: n }, () => Math.floor(Math.random() * Math.ceil(n / 5)));
       break;
+    case "sorted":
+      arr = Array.from({ length: n }, (_, i) => i + 1);
+      break;
+    default:
+      arr = Array.from({ length: n }, () => Math.floor(Math.random() * 10_000));
   }
 
   if (custom) {
@@ -842,8 +847,61 @@ function oddEvenSort(input: number[]): number[] {
   return arr;
 }
 
+function introSort(input: number[]): number[] {
+  const arr = [...input];
+  const n = arr.length;
+  const maxDepth = n <= 1 ? 0 : 2 * Math.floor(Math.log2(n));
+  function ins(lo: number, hi: number) {
+    for (let i = lo + 1; i <= hi; i++) {
+      const k = arr[i]; let j = i - 1;
+      while (j >= lo && arr[j] > k) { arr[j + 1] = arr[j]; j--; }
+      arr[j + 1] = k;
+    }
+  }
+  function hpfy(end: number, root: number, base: number) {
+    let lg = root;
+    const l = 2 * root + 1, r = 2 * root + 2;
+    if (l < end && arr[base + l] > arr[base + lg]) lg = l;
+    if (r < end && arr[base + r] > arr[base + lg]) lg = r;
+    if (lg !== root) { [arr[base + root], arr[base + lg]] = [arr[base + lg], arr[base + root]]; hpfy(end, lg, base); }
+  }
+  function hp(lo: number, hi: number) {
+    const len = hi - lo + 1;
+    for (let i = Math.floor(len / 2) - 1; i >= 0; i--) hpfy(len, i, lo);
+    for (let i = len - 1; i > 0; i--) { [arr[lo], arr[lo + i]] = [arr[lo + i], arr[lo]]; hpfy(i, 0, lo); }
+  }
+  function med3(lo: number, mid: number, hi: number) {
+    if (arr[lo] > arr[mid]) [arr[lo], arr[mid]] = [arr[mid], arr[lo]];
+    if (arr[lo] > arr[hi]) [arr[lo], arr[hi]] = [arr[hi], arr[lo]];
+    if (arr[mid] > arr[hi]) [arr[mid], arr[hi]] = [arr[hi], arr[mid]];
+    return mid;
+  }
+  function sort(lo: number, hi: number, depth: number) {
+    if (hi - lo < 1) return;
+    if (hi - lo + 1 <= 16) { ins(lo, hi); return; }
+    if (depth === 0) { hp(lo, hi); return; }
+    const mid = (lo + hi) >> 1;
+    const pi = med3(lo, mid, hi);
+    const pv = arr[pi];
+    [arr[pi], arr[hi - 1]] = [arr[hi - 1], arr[pi]];
+    let i = lo, j = hi - 2;
+    while (true) {
+      while (i <= hi - 1 && arr[i] < pv) i++;
+      while (j >= lo && arr[j] > pv) j--;
+      if (i >= j) break;
+      [arr[i], arr[j]] = [arr[j], arr[i]]; i++; j--;
+    }
+    [arr[i], arr[hi - 1]] = [arr[hi - 1], arr[i]];
+    sort(lo, i - 1, depth - 1);
+    sort(i + 1, hi, depth - 1);
+  }
+  sort(0, n - 1, maxDepth);
+  return arr;
+}
+
 export const SORT_FNS: Record<string, (arr: number[]) => number[]> = {
   logos:     logosSort,
+  introsort: introSort,
   timsort:   (arr) => [...arr].sort((a, b) => a - b),
   merge:     mergeSort,
   quick:     quickSort,

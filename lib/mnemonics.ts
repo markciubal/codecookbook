@@ -169,6 +169,21 @@ export const MNEMONICS: Record<string, Mnemonic[]> = {
     },
   ],
 
+  introsort: [
+    {
+      headline: "Quicksort with a parachute",
+      body: "Introsort starts as a standard median-of-3 quicksort — fast in practice. But it tracks recursion depth. When depth exceeds 2·log₂n (a sign that partitioning is going badly), it pulls the parachute cord and switches to heapsort, which is slower but guaranteed O(n log n). You get quicksort speed on average, heapsort safety in the worst case.",
+    },
+    {
+      headline: "Three algorithms, one sort",
+      body: "Introsort is actually three algorithms stitched together: quicksort for large subarrays (fast cache-friendly partitioning), heapsort when depth budget runs out (worst-case safety), and insertion sort for small chunks ≤ 16 (very low overhead at tiny n). std::sort in C++ uses exactly this strategy.",
+    },
+    {
+      headline: "The depth counter is the key",
+      body: "The maxDepth = 2·⌊log₂n⌋ limit is carefully chosen: it's enough room for quicksort to do its best work (O(log n) ideal depth), but tight enough to catch the O(n) depth blowup of degenerate partitioning before it becomes expensive. Think of it as a circuit breaker: most inputs never trip it.",
+    },
+  ],
+
   logos: [
     {
       headline: "Two golden pivots, not one",

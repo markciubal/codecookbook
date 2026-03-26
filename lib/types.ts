@@ -17,7 +17,7 @@ export interface SortStep {
   pseudocodeLine?: number;
 }
 
-export type SortAlgorithm = "bubble" | "selection" | "insertion" | "merge" | "quick" | "heap" | "shell" | "counting" | "radix" | "bucket" | "timsort" | "logos" | "cocktail" | "comb" | "gnome" | "pancake" | "cycle" | "oddeven";
+export type SortAlgorithm = "bubble" | "selection" | "insertion" | "merge" | "quick" | "heap" | "shell" | "counting" | "radix" | "bucket" | "timsort" | "logos" | "cocktail" | "comb" | "gnome" | "pancake" | "cycle" | "oddeven" | "introsort";
 
 export interface AlgorithmMeta {
   name: string;
@@ -29,6 +29,10 @@ export interface AlgorithmMeta {
   pseudocode: string[];
   /** Optional epigraph shown beneath the algorithm name */
   quote?: { text: string; attribution: string };
+  /** LeetCode problem URL for practice */
+  leetcode?: string;
+  /** One-sentence explanation of why this algorithm made the comparisons it did, shown on sort completion */
+  comparisonNote?: string;
 }
 
 export interface CyNodeDef {
