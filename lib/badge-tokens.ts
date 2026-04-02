@@ -3,7 +3,7 @@
  * Import here to stay consistent across nav, cards, and info badges.
  */
 
-import { Clock, Database, CheckCircle, Shuffle, Wifi, WifiOff } from "lucide-react";
+import { Gauge, Database, ShieldCheck, ShieldX, Wifi, WifiOff } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 export type BadgeToken = {
@@ -12,33 +12,33 @@ export type BadgeToken = {
   bg: string;
 };
 
-// ── Time complexity ── warm amber
+// ── Time complexity ── warm amber  (Gauge = speedometer / performance)
 export const TIME_TOKEN: BadgeToken = {
-  icon: Clock,
+  icon: Gauge,
   color: "#d97706",
   bg: "rgba(217,119,6,0.12)",
 };
 
-// ── Space complexity ── cool indigo
+// ── Space complexity ── cool indigo  (Database = data / memory)
 export const SPACE_TOKEN: BadgeToken = {
   icon: Database,
   color: "#818cf8",
   bg: "rgba(129,140,248,0.12)",
 };
 
-// ── Stability ── green / red
+// ── Stability ── green / red  (ShieldCheck / ShieldX — same base shape)
 export const STABLE_TOKEN: BadgeToken = {
-  icon: CheckCircle,
+  icon: ShieldCheck,
   color: "#4e7c52",
   bg: "rgba(78,124,82,0.12)",
 };
 export const UNSTABLE_TOKEN: BadgeToken = {
-  icon: Shuffle,
+  icon: ShieldX,
   color: "#b03020",
   bg: "rgba(176,48,32,0.12)",
 };
 
-// ── Online / offline ── teal / muted gray
+// ── Online / offline ── teal / muted gray  (Wifi / WifiOff — same base shape)
 export const ONLINE_TOKEN: BadgeToken = {
   icon: Wifi,
   color: "#2a8080",

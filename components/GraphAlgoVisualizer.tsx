@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Network } from "lucide-react";
 import PlaybackControls from "./PlaybackControls";
+import CustomGraphBuilder from "./CustomGraphBuilder";
 import {
   getGraphSteps,
   generateRandomGraph,
@@ -631,6 +632,7 @@ export default function GraphAlgoVisualizer({ algorithm }: Props) {
 
   const [customNodes, setCustomNodes] = useState<GraphNode[] | null>(null);
   const [customEdges, setCustomEdges] = useState<GraphEdge[] | null>(null);
+  const [isBuilderOpen, setIsBuilderOpen] = useState(false);
   const [sourceNode, setSourceNode] = useState("A");
   const [steps, setSteps] = useState<GraphStep[]>([]);
   const [stepIdx, setStepIdx] = useState(0);
@@ -802,6 +804,18 @@ export default function GraphAlgoVisualizer({ algorithm }: Props) {
               >
                 Randomize Graph
               </button>
+              <button
+                onClick={() => setIsBuilderOpen(true)}
+                className="text-xs font-mono rounded px-2 py-1"
+                style={{
+                  background: "var(--color-surface-3)",
+                  border: "1px solid var(--color-accent)",
+                  color: "var(--color-accent)",
+                  cursor: "pointer",
+                }}
+              >
+                Edit Graph
+              </button>
               {(customNodes !== null) && (
                 <button
                   onClick={resetGraph}
@@ -883,6 +897,22 @@ export default function GraphAlgoVisualizer({ algorithm }: Props) {
           </div>
         </div>
       </div>
+
+      {/* Feature 3: Custom Graph Builder modal */}
+      {isBuilderOpen && (
+        <CustomGraphBuilder
+          nodes={nodes}
+          edges={edges}
+          directed={directed}
+          onApply={(newNodes, newEdges) => {
+            setCustomNodes(newNodes);
+            setCustomEdges(newEdges);
+            if (newNodes.length > 0) setSourceNode(newNodes[0].id);
+            setIsBuilderOpen(false);
+          }}
+          onClose={() => setIsBuilderOpen(false)}
+        />
+      )}
     </div>
   );
 }

@@ -74,7 +74,43 @@ export type GraphAlgoEntry = {
   blurb: string;
 };
 
-export type CatalogEntry = SortingEntry | DSEntry | BenchmarkEntry | CustomSortEntry | CompareEntry | ToolEntry | SearchEntry | GraphAlgoEntry;
+export type DPEntry = {
+  kind: "dp";
+  name: string;
+  path: string;
+  time: string;
+  space: string;
+  blurb: string;
+};
+
+export type StringAlgoEntry = {
+  kind: "string-algo";
+  name: string;
+  path: string;
+  time: string;
+  space: string;
+  blurb: string;
+};
+
+export type GeometryEntry = {
+  kind: "geometry";
+  name: string;
+  path: string;
+  time: string;
+  space: string;
+  blurb: string;
+};
+
+export type MathEntry = {
+  kind: "math";
+  name: string;
+  path: string;
+  time: string;
+  space: string;
+  blurb: string;
+};
+
+export type CatalogEntry = SortingEntry | DSEntry | BenchmarkEntry | CustomSortEntry | CompareEntry | ToolEntry | SearchEntry | GraphAlgoEntry | DPEntry | StringAlgoEntry | GeometryEntry | MathEntry;
 
 export const SEARCHING_ALGORITHMS: SearchEntry[] = [
   { kind: "search", name: "Linear Search",      path: "/search/linear",        time: "O(n)",       space: "O(1)", blurb: "Scans every element left to right until the target is found. Works on unsorted arrays." },
@@ -147,7 +183,49 @@ export const CONCERT: ToolEntry = {
   icon: "Music",
 };
 
-export const TOOLS: ToolEntry[] = [CHEATSHEET, FLASHCARDS, PICKER, CALCULATOR, PATHFINDING, CONCERT];
+export const COMPLEXITY_QUIZ: ToolEntry = {
+  kind: "tool",
+  name: "Complexity Quiz",
+  path: "/quiz",
+  description: "Test your knowledge of algorithm time and space complexities",
+  blurb: "40+ questions, streaks, timer, and a local high score. See an algorithm, guess its Big-O. Covers sorting, data structures, searching, and graph algorithms.",
+  icon: "BrainCircuit",
+};
+
+export const SORTING_NETWORK: ToolEntry = {
+  kind: "tool",
+  name: "Sorting Network",
+  path: "/tools/sorting-network",
+  description: "Visualize comparator networks that sort in parallel",
+  blurb: "See how bitonic sort uses a fixed network of comparators to sort in O(log² n) parallel stages with no branching.",
+  icon: "GitMerge",
+};
+
+export const TOOLS: ToolEntry[] = [CHEATSHEET, FLASHCARDS, PICKER, CALCULATOR, PATHFINDING, CONCERT, COMPLEXITY_QUIZ, SORTING_NETWORK];
+
+export const DP_ALGORITHMS: DPEntry[] = [
+  { kind: "dp", name: "LCS",           path: "/dp/lcs",           time: "O(mn)",    space: "O(mn)",  blurb: "Finds the longest common subsequence between two strings using a 2D DP table with backtracking." },
+  { kind: "dp", name: "Edit Distance", path: "/dp/edit-distance", time: "O(mn)",    space: "O(mn)",  blurb: "Minimum insertions, deletions, and replacements to transform one string into another (Levenshtein)." },
+  { kind: "dp", name: "Knapsack",      path: "/dp/knapsack",      time: "O(nW)",    space: "O(nW)",  blurb: "0/1 Knapsack: pick items to maximize value without exceeding weight capacity, using a 2D DP table." },
+  { kind: "dp", name: "Coin Change",   path: "/dp/coin-change",   time: "O(n·amt)", space: "O(amt)", blurb: "Minimum coins to make an amount, built bottom-up. Classic unbounded knapsack variant." },
+];
+
+export const STRING_ALGORITHMS: StringAlgoEntry[] = [
+  { kind: "string-algo", name: "KMP",          path: "/strings/kmp",         time: "O(n+m)",  space: "O(m)", blurb: "Knuth-Morris-Pratt: builds a failure function to skip redundant comparisons during pattern search." },
+  { kind: "string-algo", name: "Rabin-Karp",   path: "/strings/rabin-karp",  time: "O(n+m)",  space: "O(1)", blurb: "Rolling hash window: compute pattern hash once, slide it over the text in O(1) per step." },
+  { kind: "string-algo", name: "Boyer-Moore",  path: "/strings/boyer-moore", time: "O(n/m)",  space: "O(σ)", blurb: "Scans right-to-left and uses a bad-character table to skip large sections of text on mismatch." },
+];
+
+export const GEOMETRY_ALGORITHMS: GeometryEntry[] = [
+  { kind: "geometry", name: "Convex Hull (Graham)",  path: "/geometry/convex-hull",   time: "O(n log n)", space: "O(n)", blurb: "Graham scan: sort points by polar angle, then sweep with a stack to build the convex hull." },
+  { kind: "geometry", name: "Convex Hull (Jarvis)",  path: "/geometry/jarvis-march",  time: "O(nh)",      space: "O(h)", blurb: "Jarvis march: gift-wrapping algorithm that pivots around the hull one point at a time." },
+];
+
+export const MATH_ALGORITHMS: MathEntry[] = [
+  { kind: "math", name: "Sieve of Eratosthenes", path: "/math/sieve",    time: "O(n log log n)", space: "O(n)", blurb: "Cross out multiples of each prime up to √n. The classic algorithm for finding all primes ≤ n." },
+  { kind: "math", name: "Euclidean GCD",          path: "/math/gcd",      time: "O(log min(a,b))", space: "O(1)", blurb: "Repeatedly replace (a, b) with (b, a mod b) until b = 0. The remainder is the GCD." },
+  { kind: "math", name: "Fast Exponentiation",    path: "/math/fast-exp", time: "O(log n)",       space: "O(1)", blurb: "Square-and-multiply: compute aⁿ in O(log n) multiplications by decomposing the exponent in binary." },
+];
 
 export const CUSTOM_SORT: CustomSortEntry = {
   kind: "custom",

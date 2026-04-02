@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { RotateCcw, Settings, Volume2, VolumeX, BrainCircuit, BarChart2 } from "lucide-react";
+import { RotateCcw, Settings, Volume2, VolumeX, BrainCircuit, BarChart2, Link, Pencil, Brain, X, Check } from "lucide-react";
 import PlaybackControls from "./PlaybackControls";
 import {
   generateArray,
@@ -13,6 +13,9 @@ import type { SortAlgorithm, SortStep } from "@/lib/types";
 import { MNEMONICS } from "@/lib/mnemonics";
 import CodePanel from "./CodePanel";
 import CodeModal from "./CodeModal";
+import MultiLangPanel from "./MultiLangPanel";
+import WhyItWorks from "./WhyItWorks";
+import { ALGORITHM_IMPLEMENTATIONS } from "@/lib/algorithm-implementations";
 import PanelModal from "./PanelModal";
 import LevelGate from "./LevelGate";
 import { useProgress } from "@/hooks/useProgress";
@@ -45,8 +48,9 @@ export default function SortingVisualizer({ algorithm }: Props) {
   const meta = ALGORITHM_META[algorithm];
   const { markVisited } = useProgress();
 
-  // Logos Sort needs more elements to show its recursive dual-pivot structure
-  const defaultSize = algorithm === "logos" ? 60 : 28;
+  // Logos Sort: 25 elements is enough to show dual-pivot recursion without
+  // generating hundreds of steps (base=10 visualizer params → ~100 steps vs ~400 for 60 elements).
+  const defaultSize = algorithm === "logos" ? 25 : 28;
 
   // Read size/speed from URL params on first mount (permalink support)
   const [size, setSize] = useState(() => {
@@ -55,10 +59,12 @@ export default function SortingVisualizer({ algorithm }: Props) {
     return v >= 5 && v <= 200 ? v : defaultSize;
   });
   const [maxVal, setMaxVal] = useState(100);
+  // Logos Sort generates ~100 steps for 25 elements — default faster so it completes in ~3s
+  const defaultSpeed = algorithm === "logos" ? 30 : 220;
   const [speed, setSpeed] = useState(() => {
-    if (typeof window === "undefined") return 220;
+    if (typeof window === "undefined") return defaultSpeed;
     const v = Number(new URLSearchParams(window.location.search).get("speed"));
-    return v >= 10 && v <= 2000 ? v : 220;
+    return v >= 10 && v <= 2000 ? v : defaultSpeed;
   });
   const [steps, setSteps] = useState<SortStep[]>([]);
   const [stepIdx, setStepIdx] = useState(0);
@@ -70,6 +76,18 @@ export default function SortingVisualizer({ algorithm }: Props) {
   const [isShortcutOpen, setIsShortcutOpen] = useState(false);
   const [customArray, setCustomArray] = useState<number[] | null>(null);
   const [isRecording, setIsRecording] = useState(false);
+  // Feature 1: Shareable step links
+  const [shareCopied, setShareCopied] = useState(false);
+  // Feature 2: Annotation mode
+  const [annotateMode, setAnnotateMode] = useState(false);
+  const [annotations, setAnnotations] = useState<Record<number, string>>({});
+  const [pendingAnnotation, setPendingAnnotation] = useState<number | null>(null);
+  const [annotationInput, setAnnotationInput] = useState("");
+  // Feature 4: Predict-next-step mode
+  const [predictMode, setPredictMode] = useState(false);
+  const [predictOptions, setPredictOptions] = useState<{ text: string; correct: boolean }[]>([]);
+  const [predictResult, setPredictResult] = useState<"correct" | "wrong" | null>(null);
+  const [predictScore, setPredictScore] = useState({ correct: 0, attempted: 0 });
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -170,6 +188,71 @@ export default function SortingVisualizer({ algorithm }: Props) {
     window.history.replaceState(null, "", "?" + params.toString());
   }, [size, speed]);
 
+  // Feature 1: Sync algo+step into URL (debounced 500ms)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const t = setTimeout(() => {
+      const params = new URLSearchParams(window.location.search);
+      params.set("algo", algorithm);
+      params.set("step", String(stepIdx));
+      window.history.replaceState(null, "", "?" + params.toString());
+    }, 500);
+    return () => clearTimeout(t);
+  }, [algorithm, stepIdx]);
+
+  // Feature 1: Share button handler
+  const handleShare = useCallback(() => {
+    navigator.clipboard.writeText(window.location.href).then(() => {
+      setShareCopied(true);
+      setTimeout(() => setShareCopied(false), 1500);
+    });
+  }, []);
+
+  // Feature 4: Generate predict options when predict mode is on and not playing
+  useEffect(() => {
+    if (!predictMode || isPlaying || stepIdx >= steps.length - 1) {
+      setPredictOptions([]);
+      setPredictResult(null);
+      return;
+    }
+    const correct = steps[stepIdx + 1]?.description ?? "";
+    const distractorIndices: number[] = [];
+    const range = Math.min(30, Math.floor(steps.length / 2));
+    const candidates: number[] = [];
+    for (let offset = 1; offset <= range; offset++) {
+      const lo = stepIdx - offset;
+      const hi = stepIdx + 1 + offset;
+      if (lo >= 0 && lo !== stepIdx + 1) candidates.push(lo);
+      if (hi < steps.length && hi !== stepIdx + 1) candidates.push(hi);
+    }
+    // shuffle candidates and pick 3
+    for (let i = candidates.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+    }
+    const uniqueTexts = new Set<string>([correct]);
+    for (const idx of candidates) {
+      if (uniqueTexts.size >= 4) break;
+      const t = steps[idx]?.description ?? "";
+      if (t && !uniqueTexts.has(t)) {
+        uniqueTexts.add(t);
+        distractorIndices.push(idx);
+      }
+    }
+    const opts: { text: string; correct: boolean }[] = [
+      { text: correct, correct: true },
+      ...distractorIndices.slice(0, 3).map((idx) => ({ text: steps[idx].description, correct: false })),
+    ];
+    // Fisher-Yates shuffle opts
+    for (let i = opts.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [opts[i], opts[j]] = [opts[j], opts[i]];
+    }
+    setPredictOptions(opts);
+    setPredictResult(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [predictMode, stepIdx, isPlaying]);
+
   // Playback loop
   useEffect(() => {
     if (!isPlaying) return;
@@ -266,6 +349,49 @@ export default function SortingVisualizer({ algorithm }: Props) {
           <Badge text={meta.timeComplexity} accent />
           <Badge text={meta.stable ? "stable" : "unstable"} color={meta.stable ? "green" : "red"} />
           <div className="ml-auto flex gap-2">
+            {/* Feature 1: Share button */}
+            <button
+              onClick={handleShare}
+              title="Copy link to this step"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-mono transition-colors"
+              style={{
+                background: shareCopied ? "var(--color-state-sorted)" : "var(--color-surface-3)",
+                border: "1px solid var(--color-border)",
+                color: shareCopied ? "#fff" : "var(--color-muted)",
+                cursor: "pointer",
+              }}
+            >
+              {shareCopied ? <Check size={13} strokeWidth={1.75} /> : <Link size={13} strokeWidth={1.75} />}
+              {shareCopied ? "Copied!" : "Share"}
+            </button>
+            {/* Feature 2: Annotate toggle */}
+            <button
+              onClick={() => { setAnnotateMode((p) => !p); setPendingAnnotation(null); }}
+              title="Annotate bars"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-mono transition-colors"
+              style={{
+                background: annotateMode ? "var(--color-accent)" : "var(--color-surface-3)",
+                border: "1px solid var(--color-border)",
+                color: annotateMode ? "#fff" : "var(--color-muted)",
+                cursor: "pointer",
+              }}
+            >
+              <Pencil size={13} strokeWidth={1.75} /> Annotate
+            </button>
+            {/* Feature 4: Predict toggle */}
+            <button
+              onClick={() => { setPredictMode((p) => !p); setPredictResult(null); }}
+              title="Predict next step"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-mono transition-colors"
+              style={{
+                background: predictMode ? "var(--color-accent)" : "var(--color-surface-3)",
+                border: "1px solid var(--color-border)",
+                color: predictMode ? "#fff" : "var(--color-muted)",
+                cursor: "pointer",
+              }}
+            >
+              <Brain size={13} strokeWidth={1.75} /> Predict
+            </button>
             <button
               onClick={() => setIsMuted((p) => !p)}
               title={isMuted ? "Unmute" : "Mute"}
@@ -421,12 +547,17 @@ export default function SortingVisualizer({ algorithm }: Props) {
             >
               <div
                 className="w-full h-full flex items-end gap-px p-3"
-                style={{ boxSizing: "border-box" }}
+                style={{ boxSizing: "border-box", position: "relative" }}
               >
                 {step.array.map((val, i) => (
                   <div
                     key={i}
                     title={String(val)}
+                    onClick={() => {
+                      if (!annotateMode) return;
+                      setPendingAnnotation(i);
+                      setAnnotationInput(annotations[i] ?? "");
+                    }}
                     style={{
                       flex: 1,
                       height: `${(val / peak) * 100}%`,
@@ -435,8 +566,90 @@ export default function SortingVisualizer({ algorithm }: Props) {
                       background: BAR_COLORS[step.states[i]],
                       borderRadius: "2px 2px 0 0",
                       transition: "height 0.08s ease, background-color 0.12s ease",
+                      position: "relative",
+                      cursor: annotateMode ? "crosshair" : "default",
                     }}
-                  />
+                  >
+                    {/* Annotation badge */}
+                    {annotations[i] && (
+                      <span
+                        style={{
+                          position: "absolute",
+                          top: -22,
+                          left: "50%",
+                          transform: "translateX(-50%)",
+                          background: "var(--color-accent)",
+                          color: "#fff",
+                          fontSize: 9,
+                          fontFamily: "monospace",
+                          padding: "1px 4px",
+                          borderRadius: 4,
+                          whiteSpace: "nowrap",
+                          pointerEvents: "none",
+                          zIndex: 10,
+                        }}
+                      >
+                        {annotations[i]}
+                      </span>
+                    )}
+                    {/* Inline annotation input */}
+                    {pendingAnnotation === i && (
+                      <div
+                        style={{
+                          position: "absolute",
+                          top: -52,
+                          left: "50%",
+                          transform: "translateX(-50%)",
+                          zIndex: 20,
+                          background: "var(--color-surface-1)",
+                          border: "1px solid var(--color-accent)",
+                          borderRadius: 6,
+                          padding: "2px 4px",
+                          display: "flex",
+                          gap: 2,
+                          alignItems: "center",
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <input
+                          autoFocus
+                          type="text"
+                          value={annotationInput}
+                          onChange={(e) => setAnnotationInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              if (annotationInput.trim()) {
+                                setAnnotations((prev) => ({ ...prev, [i]: annotationInput.trim() }));
+                              } else {
+                                setAnnotations((prev) => { const n = { ...prev }; delete n[i]; return n; });
+                              }
+                              setPendingAnnotation(null);
+                            } else if (e.key === "Escape") {
+                              setPendingAnnotation(null);
+                            }
+                          }}
+                          onBlur={() => {
+                            if (annotationInput.trim()) {
+                              setAnnotations((prev) => ({ ...prev, [i]: annotationInput.trim() }));
+                            } else {
+                              setAnnotations((prev) => { const n = { ...prev }; delete n[i]; return n; });
+                            }
+                            setPendingAnnotation(null);
+                          }}
+                          placeholder="label"
+                          style={{
+                            width: 60,
+                            fontSize: 10,
+                            background: "transparent",
+                            border: "none",
+                            outline: "none",
+                            color: "var(--color-text)",
+                            fontFamily: "monospace",
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
                 ))}
               </div>
             </div>
@@ -466,6 +679,22 @@ export default function SortingVisualizer({ algorithm }: Props) {
                 onReset={reset}
               />
 
+              {/* Feature 2: Clear annotations */}
+              {Object.keys(annotations).length > 0 && (
+                <button
+                  onClick={() => setAnnotations({})}
+                  className="text-xs font-mono rounded px-2 py-1 flex items-center gap-1"
+                  style={{
+                    background: "var(--color-surface-3)",
+                    border: "1px solid var(--color-border)",
+                    color: "var(--color-muted)",
+                    cursor: "pointer",
+                  }}
+                >
+                  <X size={11} strokeWidth={1.75} /> Clear annotations
+                </button>
+              )}
+
               {/* Step description — slides under the shorter (right) column */}
               <div
                 className="rounded-lg px-4 py-3 text-sm min-h-[2.75rem] flex items-center mt-auto"
@@ -475,6 +704,77 @@ export default function SortingVisualizer({ algorithm }: Props) {
               </div>
             </div>
           </div>
+
+          {/* Feature 4: Predict panel */}
+          {predictMode && !isPlaying && stepIdx < steps.length - 1 && predictOptions.length > 0 && (
+            <div
+              className="rounded-lg px-4 py-3"
+              style={{
+                background: "var(--color-surface-2)",
+                border: "1px solid var(--color-border)",
+              }}
+            >
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--color-muted)" }}>
+                  What happens in the next step?
+                </span>
+                <span className="text-xs font-mono" style={{ color: "var(--color-accent)" }}>
+                  Correct: {predictScore.correct} / Attempted: {predictScore.attempted}
+                </span>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                {predictOptions.map((opt, idx) => {
+                  const isSelected = predictResult !== null;
+                  const highlight = isSelected
+                    ? opt.correct
+                      ? "var(--color-state-sorted)"
+                      : predictResult === "wrong" && !opt.correct
+                      ? undefined
+                      : undefined
+                    : undefined;
+                  const bg = isSelected
+                    ? opt.correct
+                      ? "rgba(78,200,120,0.15)"
+                      : "var(--color-surface-3)"
+                    : "var(--color-surface-3)";
+                  const border = isSelected
+                    ? opt.correct
+                      ? "1px solid var(--color-state-sorted)"
+                      : "1px solid var(--color-border)"
+                    : "1px solid var(--color-border)";
+                  return (
+                    <button
+                      key={idx}
+                      disabled={isSelected}
+                      onClick={() => {
+                        if (isSelected) return;
+                        const correct = opt.correct;
+                        setPredictResult(correct ? "correct" : "wrong");
+                        setPredictScore((prev) => ({
+                          correct: prev.correct + (correct ? 1 : 0),
+                          attempted: prev.attempted + 1,
+                        }));
+                        setTimeout(() => {
+                          setStepIdx((p) => Math.min(p + 1, steps.length - 1));
+                          setPredictResult(null);
+                        }, 1000);
+                      }}
+                      className="text-left rounded px-3 py-2 text-xs font-mono transition-colors"
+                      style={{
+                        background: bg,
+                        border,
+                        color: highlight ?? "var(--color-text)",
+                        cursor: isSelected ? "default" : "pointer",
+                        opacity: isSelected && !opt.correct ? 0.5 : 1,
+                      }}
+                    >
+                      {opt.text}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
 
       </div>
@@ -629,7 +929,7 @@ function SettingsPanel({
   isPlaying: boolean;
   algorithmId: string;
 }) {
-  const [tab, setTab] = useState<"settings" | "code">("settings");
+  const [tab, setTab] = useState<"settings" | "code" | "multilang" | "why">("settings");
   const [customInput, setCustomInput] = useState(customArray ? customArray.join(", ") : "");
   const [customError, setCustomError] = useState("");
 
@@ -655,19 +955,24 @@ function SettingsPanel({
     <div>
       {/* Tabs */}
       <div className="flex gap-1 mb-5 p-1 rounded-lg" style={{ background: "var(--color-surface-3)" }}>
-        {(["settings", "code"] as const).map((t) => (
+        {([
+          { id: "settings", label: "Settings" },
+          { id: "code",     label: "Code" },
+          { id: "multilang",label: "Languages" },
+          { id: "why",      label: "Why it works" },
+        ] as const).map((t) => (
           <button
-            key={t}
-            onClick={() => setTab(t)}
-            className="flex-1 py-1.5 rounded-md text-xs font-semibold capitalize transition-colors"
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            className="flex-1 py-1.5 rounded-md text-xs font-semibold transition-colors"
             style={{
-              background: tab === t ? "var(--color-surface-1)" : "transparent",
-              color: tab === t ? "var(--color-text)" : "var(--color-muted)",
+              background: tab === t.id ? "var(--color-surface-1)" : "transparent",
+              color: tab === t.id ? "var(--color-text)" : "var(--color-muted)",
               border: "none",
               cursor: "pointer",
             }}
           >
-            {t}
+            {t.label}
           </button>
         ))}
       </div>
@@ -741,6 +1046,10 @@ function SettingsPanel({
             ))}
           </div>
         </div>
+      ) : tab === "multilang" ? (
+        <MultiLangPanel algorithm={algorithmId} implementations={ALGORITHM_IMPLEMENTATIONS[algorithmId] ?? []} />
+      ) : tab === "why" ? (
+        <WhyItWorks algorithm={algorithmId} />
       ) : (
         <CodePanel id={algorithmId} />
       )}

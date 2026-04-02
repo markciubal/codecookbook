@@ -7,7 +7,8 @@ export interface LogosParams {
   base:           number;  // insertion-sort threshold (elements) — default 48
   depthMult:      number;  // depth-limit multiplier — default 2  (limit = mult·⌊log₂n⌋ + add)
   depthAdd:       number;  // depth-limit addend     — default 4
-  randomScale:    number;  // scales ±randomFactor range — default 1.0
+  randomScaleMin: number;  // lower bound of per-call jitter scale — default φ⁻¹ ≈ 0.618034
+  randomScaleMax: number;  // upper bound of per-call jitter scale — default φ⁻¹ ≈ 0.618034
   countingMult:   number;  // counting-sort trigger: valueRange < n·mult — default 4
 }
 
@@ -17,7 +18,8 @@ export const DEFAULT_LOGOS_PARAMS: LogosParams = {
   base:         48,
   depthMult:    2,
   depthAdd:     4,
-  randomScale:  1.0,
+  randomScaleMin: 0.61803399,
+  randomScaleMax: 0.61803399,
   countingMult: 4,
 };
 
@@ -383,10 +385,12 @@ function logosSort(input: number[], p: LogosParams = DEFAULT_LOGOS_PARAMS): numb
        * xrand() costs 6 XOR/shift operations — cheaper than a comparison.
        *
        * Technical: xrand() consumes one xoshiro128+ step — 6 XOR/shift operations,
-       * no division — producing a uniform float in (0, 1]. Mapped to (−PHI, PHI] so
-       * pivot positions span both sides of center; indices clamped to [lo, hi].
+       * no division — producing a uniform float in (0, 1]. The jitter scale is sampled
+       * uniformly in [randomScaleMin, randomScaleMax] each call (default both = φ⁻¹ ≈ 0.618034),
+       * then multiplied by PHI to give the final pivot offset; indices clamped to [lo, hi].
        */
-      const randomFactor = (xrand() * 2 - 1) * PHI * p.randomScale;
+      const jitterScale = p.randomScaleMin + xrand() * (p.randomScaleMax - p.randomScaleMin);
+      const randomFactor = (xrand() * 2 - 1) * PHI * jitterScale;
       const indexRange = upper - lower;
 
       /*
@@ -899,10 +903,153 @@ function introSort(input: number[]): number[] {
   return arr;
 }
 
+function timSortJS(input: number[]): number[] {
+  /*
+   * TimSort — pure JavaScript implementation.
+   *
+   * Natural run detection + galloping merge.
+   *
+   * Scan the array for already-sorted (ascending or descending) "runs".
+   * Insertion-sort any run shorter than MIN_RUN (32) up to that length.
+   * Push runs onto a stack and merge when the stack invariant is violated:
+   *   run[i−2].len ≥ run[i−1].len + run[i].len   AND   run[i−1].len ≥ run[i].len
+   * Merge uses a temporary buffer of min(left, right) size — O(n/2) worst case.
+   *
+   * This matches the algorithm described by Tim Peters (2002) and implemented
+   * in CPython and OpenJDK, minus the full gallop-mode acceleration (which adds
+   * constant-factor improvement on highly structured data but complicates the code).
+   *
+   * Technical:
+   * MIN_RUN ∈ [32,64] chosen so n/MIN_RUN is a power of two or just below,
+   *   keeping the merge tree balanced (Peters 2002, §Analysis).
+   * Stack invariant ensures O(log n) stack depth.
+   * Worst-case: O(n log n). Best-case: O(n) on already-sorted input.
+   * Space: O(n) — temporary merge buffer.
+   * Stable: equal elements preserve original relative order.
+   */
+  const arr = [...input];
+  const n = arr.length;
+  if (n < 2) return arr;
+
+  // Compute MIN_RUN: find r such that n/2^k is in [32,64)
+  function minRunLength(len: number): number {
+    let r = 0;
+    while (len >= 64) { r |= len & 1; len >>= 1; }
+    return len + r;
+  }
+  const MIN_RUN = minRunLength(n);
+
+  // Binary insertion sort for a[lo..hi] assuming a[lo..start-1] already sorted
+  function binaryInsert(lo: number, hi: number, start: number): void {
+    for (let i = start; i <= hi; i++) {
+      const pivot = arr[i];
+      let left = lo, right = i;
+      while (left < right) {
+        const mid = (left + right) >>> 1;
+        if (arr[mid] > pivot) right = mid; else left = mid + 1;
+      }
+      for (let j = i; j > left; j--) arr[j] = arr[j - 1];
+      arr[left] = pivot;
+    }
+  }
+
+  // Detect a natural run starting at lo; reverse descending runs in-place.
+  // Returns the index just past the end of the run.
+  function countRunAndMakeAscending(lo: number, hi: number): number {
+    let runHi = lo + 1;
+    if (runHi === hi + 1) return runHi;
+    if (arr[runHi++] < arr[lo]) {
+      // Descending run — extend and reverse
+      while (runHi <= hi && arr[runHi] < arr[runHi - 1]) runHi++;
+      for (let l = lo, r = runHi - 1; l < r; l++, r--) { const t = arr[l]; arr[l] = arr[r]; arr[r] = t; }
+    } else {
+      while (runHi <= hi && arr[runHi] >= arr[runHi - 1]) runHi++;
+    }
+    return runHi;
+  }
+
+  // Merge a[lo..mid] with a[mid+1..hi] using a temporary buffer
+  function merge(lo: number, mid: number, hi: number): void {
+    const leftLen  = mid - lo + 1;
+    const rightLen = hi - mid;
+    if (leftLen <= rightLen) {
+      // Copy left half into temp buffer
+      const tmp = arr.slice(lo, mid + 1);
+      let i = 0, j = mid + 1, k = lo;
+      while (i < leftLen && j <= hi) arr[k++] = tmp[i] <= arr[j] ? tmp[i++] : arr[j++];
+      while (i < leftLen) arr[k++] = tmp[i++];
+    } else {
+      // Copy right half into temp buffer
+      const tmp = arr.slice(mid + 1, hi + 1);
+      let i = mid, j = rightLen - 1, k = hi;
+      while (i >= lo && j >= 0) arr[k--] = arr[i] > tmp[j] ? arr[i--] : tmp[j--];
+      while (j >= 0) arr[k--] = tmp[j--];
+    }
+  }
+
+  // Run stack: each entry is [base, length]
+  const runBase: number[] = [];
+  const runLen:  number[] = [];
+
+  function pushRun(base: number, len: number): void { runBase.push(base); runLen.push(len); }
+
+  function mergeCollapse(): void {
+    while (runBase.length > 1) {
+      const n2 = runBase.length - 1;
+      if (n2 > 1 && runLen[n2 - 2] <= runLen[n2 - 1] + runLen[n2]) {
+        if (runLen[n2 - 2] < runLen[n2]) {
+          mergeAt(n2 - 2);
+        } else {
+          mergeAt(n2 - 1);
+        }
+      } else if (runLen[n2 - 1] <= runLen[n2]) {
+        mergeAt(n2 - 1);
+      } else {
+        break;
+      }
+    }
+  }
+
+  function mergeForceCollapse(): void {
+    while (runBase.length > 1) {
+      const n2 = runBase.length - 1;
+      mergeAt(n2 > 1 && runLen[n2 - 2] < runLen[n2] ? n2 - 2 : n2 - 1);
+    }
+  }
+
+  function mergeAt(i: number): void {
+    const base1 = runBase[i], len1 = runLen[i];
+    const base2 = runBase[i + 1], len2 = runLen[i + 1];
+    runLen[i] = len1 + len2;
+    runBase.splice(i + 1, 1);
+    runLen.splice(i + 1, 1);
+    merge(base1, base2 - 1, base2 + len2 - 1);
+  }
+
+  // Main loop: scan for runs, extend short ones, push onto stack, merge
+  let lo = 0;
+  let remaining = n;
+  while (remaining > 0) {
+    let runLength = countRunAndMakeAscending(lo, lo + remaining - 1) - lo;
+    if (runLength < MIN_RUN) {
+      const force = Math.min(remaining, MIN_RUN);
+      binaryInsert(lo, lo + force - 1, lo + runLength);
+      runLength = force;
+    }
+    pushRun(lo, runLength);
+    mergeCollapse();
+    lo += runLength;
+    remaining -= runLength;
+  }
+  mergeForceCollapse();
+  return arr;
+}
+
 export const SORT_FNS: Record<string, (arr: number[]) => number[]> = {
   logos:     logosSort,
   introsort: introSort,
   timsort:   (arr) => [...arr].sort((a, b) => a - b),
+  "timsort-js": timSortJS,
   merge:     mergeSort,
   quick:     quickSort,
   heap:      heapSort,
@@ -1020,6 +1167,105 @@ export function makeShellSort(gaps: ShellGaps): (input: number[]) => number[] {
 }
 
 // ── Comparison/swap op counter ────────────────────────────────────────────────
+// ── Allocation instrumentation ────────────────────────────────────────────────
+// Monkey-patches Array prototype methods to count bytes allocated by fn().
+// Each JS number is 8 bytes (float64). Captures: slice, concat, flat, flatMap,
+// Array.from, and new Array(n) (via the constructor). Does NOT capture spread
+// literals ([...x]) since those bypass the Array constructor in V8.
+// Restores all originals in a finally block — safe to call from any context.
+
+export function measureAllocBytes(fn: () => void): number {
+  let bytes = 0;
+  const B = 8;
+
+  const origSlice   = Array.prototype.slice;
+  const origConcat  = Array.prototype.concat;
+  const origFlat    = (Array.prototype as { flat?: (...a: unknown[]) => unknown[] }).flat;
+  const origFlatMap = (Array.prototype as { flatMap?: (...a: unknown[]) => unknown[] }).flatMap;
+  const origFrom    = Array.from;
+
+  // Patch slice
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (Array.prototype as any).slice = function(...args: Parameters<typeof origSlice>) {
+    const r: unknown[] = origSlice.apply(this, args);
+    bytes += r.length * B;
+    return r;
+  };
+
+  // Patch concat
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (Array.prototype as any).concat = function(...args: unknown[]) {
+    const r: unknown[] = origConcat.apply(this, args);
+    bytes += r.length * B;
+    return r;
+  };
+
+  // Patch flat
+  if (origFlat) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (Array.prototype as any).flat = function(...args: unknown[]) {
+      const r: unknown[] = origFlat.apply(this, args);
+      bytes += r.length * B;
+      return r;
+    };
+  }
+
+  // Patch flatMap
+  if (origFlatMap) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (Array.prototype as any).flatMap = function(...args: unknown[]) {
+      const r: unknown[] = origFlatMap.apply(this, args);
+      bytes += r.length * B;
+      return r;
+    };
+  }
+
+  // Patch Array.from
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (Array as any).from = function(...args: Parameters<typeof Array.from>) {
+    const r = origFrom.apply(Array, args as Parameters<typeof Array.from>);
+    bytes += r.length * B;
+    return r;
+  };
+
+  // Patch Array constructor to catch new Array(n)
+  const OrigArray = globalThis.Array;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function PatchedArray(this: unknown, ...args: unknown[]): unknown[] {
+    if (new.target) {
+      // new Array(n) or new Array(a, b, ...)
+      const r: unknown[] = new OrigArray(...(args as []));
+      if (args.length === 1 && typeof args[0] === "number") bytes += (args[0] as number) * B;
+      else bytes += r.length * B;
+      return r;
+    }
+    // Array(n) called as function
+    const r = OrigArray(...(args as []));
+    if (args.length === 1 && typeof args[0] === "number") bytes += (args[0] as number) * B;
+    else bytes += r.length * B;
+    return r;
+  }
+  PatchedArray.prototype = OrigArray.prototype;
+  PatchedArray.from      = (Array as any).from; // already patched above
+  PatchedArray.isArray   = OrigArray.isArray;
+  PatchedArray.of        = OrigArray.of;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (globalThis as any).Array = PatchedArray;
+
+  try {
+    fn();
+  } finally {
+    Array.prototype.slice   = origSlice;
+    (Array.prototype as any).concat  = origConcat;
+    if (origFlat)    (Array.prototype as any).flat    = origFlat;
+    if (origFlatMap) (Array.prototype as any).flatMap = origFlatMap;
+    (Array as any).from = origFrom;
+    (globalThis as any).Array = OrigArray;
+  }
+
+  return bytes;
+}
+
 // Runs an instrumented sort and returns op counts.  Do NOT use for timing —
 // the counter increments add overhead.  Run on a fresh sample after benchmarking.
 

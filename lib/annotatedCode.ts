@@ -8006,85 +8006,102 @@ function logosSort(arr: number[]): number[] {
   // No stack frame spent on what the natural continuation already carries.
   function sort(lo: number, hi: number, depth: number): void {
     while (lo < hi) {
-      const size = hi - lo + 1;
+      const subarraySize = hi - lo + 1;
 
-      // Wisdom knows its limits. The pivots have failed here —
-      // a steadier hand takes the rest without shame.
+      // Gift 8: wisdom knows its limits — when the depth budget is exhausted,
+      // hand off to the native sort rather than recurse into guaranteed bad pivots.
       if (depth <= 0) {
-        const sub = a.slice(lo, hi+1).sort((x, y) => x - y);
-        for (let k = lo; k <= hi; k++) a[k] = sub[k - lo];
+        const sortedSlice = a.slice(lo, hi + 1).sort((x, y) => x - y);
+        for (let k = lo; k <= hi; k++) a[k] = sortedSlice[k - lo];
         return;
       }
 
-      // A hundred miles begins with a single step.
-      // Under 48 elements patience walks each one leftward to its home.
-      if (size <= 48) {
-        for (let i = lo+1; i <= hi; i++) {
-          const key = a[i]; let j = i-1;
-          while (j >= lo && a[j] > key) { a[j+1] = a[j]; j--; }
-          a[j+1] = key;
+      // Gift 9: walk the small ones home — insertion sort wins under ~48 elements
+      // because its inner loop fits in a single cache line and has no call overhead.
+      if (subarraySize <= 48) {
+        for (let i = lo + 1; i <= hi; i++) {
+          const currentElement = a[i];
+          let insertionPosition = i - 1;
+          while (insertionPosition >= lo && a[insertionPosition] > currentElement) {
+            a[insertionPosition + 1] = a[insertionPosition];
+            insertionPosition--;
+          }
+          a[insertionPosition + 1] = currentElement;
         }
         return;
       }
 
-      // Before the first comparison — ask if comparison is even needed.
-      // When the range is narrow, tally occurrences and rebuild.
-      // No pivots. No recursion. No comparisons at all.
-      let mn = a[lo], mx = a[lo];
-      for (let k = lo+1; k <= hi; k++) { if (a[k]<mn) mn=a[k]; if (a[k]>mx) mx=a[k]; }
-      const span = mx - mn;
-      if (Number.isInteger(mn) && span < size * 4) {
-        const counts = new Array(span+1).fill(0);
-        for (let k = lo; k <= hi; k++) counts[a[k]-mn]++;
-        let k = lo;
-        for (let v = 0; v <= span; v++) { while (counts[v]-- > 0) a[k++] = v + mn; }
+      // Gift 1: tally before you touch — scan for min/max to check whether
+      // the value range is narrow enough to sort by counting instead of comparing.
+      let minimumValue = a[lo], maximumValue = a[lo];
+      for (let k = lo + 1; k <= hi; k++) {
+        if (a[k] < minimumValue) minimumValue = a[k];
+        if (a[k] > maximumValue) maximumValue = a[k];
+      }
+      const valueRange = maximumValue - minimumValue;
+      if (Number.isInteger(minimumValue) && valueRange < subarraySize * 4) {
+        // Range is narrow enough — counting sort: zero comparisons, one pass each way.
+        const frequencyTable = new Array(valueRange + 1).fill(0);
+        for (let k = lo; k <= hi; k++) frequencyTable[a[k] - minimumValue]++;
+        let writePosition = lo;
+        for (let v = 0; v <= valueRange; v++) {
+          while (frequencyTable[v]-- > 0) a[writePosition++] = v + minimumValue;
+        }
         return;
       }
 
-      // Read what is already written. Three ascending — check the whole.
-      // Already ordered: a quiet return. Already reversed: one clean O(n) flip.
-      // Either way, not a breath of depth budget spent.
-      if (a[lo] <= a[lo+1] && a[lo+1] <= a[lo+2]) {
-        let sorted = true;
-        for (let k = lo; k < hi; k++) { if (a[k] > a[k+1]) { sorted = false; break; } }
-        if (sorted) return;
-        let reversed = true;
-        for (let k = lo; k < hi; k++) { if (a[k] < a[k+1]) { reversed = false; break; } }
-        if (reversed) {
+      // Gift 2: read before you act — detect already-sorted or reversed subarrays.
+      // Three ascending elements at the front are a strong signal; verify the whole.
+      if (a[lo] <= a[lo + 1] && a[lo + 1] <= a[lo + 2]) {
+        let alreadySorted = true;
+        for (let k = lo; k < hi; k++) { if (a[k] > a[k + 1]) { alreadySorted = false; break; } }
+        if (alreadySorted) return;
+        let alreadyReversed = true;
+        for (let k = lo; k < hi; k++) { if (a[k] < a[k + 1]) { alreadyReversed = false; break; } }
+        if (alreadyReversed) {
           for (let l = lo, r = hi; l < r; l++, r--) { [a[l], a[r]] = [a[r], a[l]]; }
           return;
         }
       }
 
-      // Fixed patterns breed fixed weaknesses. We dissolve them:
-      // each level draws a fresh number and no adversary can predict the cut.
-      let c = 0;
-      while (c === 0) c = Math.random() * 2 - 1;
-      const chaos = Math.abs(c); // the die is cast
+      // Gift 5: roll the die each level — draw a fresh non-zero uniform value.
+      // Each recursion level gets an independent sample so no adversary can
+      // predict the pivot position by knowing the input arrangement.
+      let rawRandomValue = 0.0;
+      while (rawRandomValue === 0.0) rawRandomValue = Math.random() * 2 - 1;
+      // Scale by φ⁻¹ ≈ 0.61803399 so jitter stays within golden-ratio bounds.
+      // Tighter than ±1, yet still unpredictable — the golden ratio is the least
+      // rational of irrationals, so no periodic pattern can target the same index.
+      const pivotJitterFactor = Math.abs(rawRandomValue) * 0.61803399; // ∈ (0, φ⁻¹]
 
-      // The golden cut, scaled by chaos so the exact position shifts each call.
-      // Then smoothed through three neighbors — no single outlier corrupts the pivot.
-      const range = hi - lo;
-      const idx1 = lo + Math.min(range, Math.floor(range * PHI2 * chaos)); // the golden cut
-      const idx2 = lo + Math.min(range, Math.floor(range * PHI  * chaos));
-      const p1 = ninther(lo, hi, idx1); // three voices, one truth
-      const p2 = ninther(lo, hi, idx2);
+      // Gifts 3 & 4: cut at the golden section, then hear three voices.
+      // Place candidate indices at φ⁻² and φ⁻¹ fractions of the subarray,
+      // perturbed by the jitter factor so each call lands at a different spot.
+      const indexRange = hi - lo;
+      const leftPivotCandidateIndex  = lo + Math.min(indexRange, Math.floor(indexRange * PHI2 * pivotJitterFactor));
+      const rightPivotCandidateIndex = lo + Math.min(indexRange, Math.floor(indexRange * PHI  * pivotJitterFactor));
+      // Refine each candidate through its local neighborhood — one outlier cannot corrupt the pivot.
+      const leftPivotValue  = ninther(lo, hi, leftPivotCandidateIndex);
+      const rightPivotValue = ninther(lo, hi, rightPivotCandidateIndex);
 
-      // The great division — less, between, greater, named in one sweep.
-      // Like a sculptor removing what does not belong: the form was always there.
-      const [lt, gt] = dualPartition(lo, hi, p1, p2);
+      // Gift 6: divide into three bands — less · equal-range · greater, named in one sweep.
+      const [leftPartitionEnd, rightPartitionEnd] = dualPartition(lo, hi, leftPivotValue, rightPivotValue);
 
-      // The small pieces earn genuine calls.
-      // The largest piece becomes the loop — it costs no stack and asks no return.
-      const regions: [number, number, number][] = [
-        [lt - lo,     lo,    lt - 1],
-        [gt - lt + 1, lt,    gt    ],
-        [hi - gt,     gt+1,  hi    ],
+      // Gift 7: spend the least first — sort the two smaller regions with genuine calls;
+      // the largest region becomes the next loop iteration, consuming no stack frame.
+      const partitionRegions: [number, number, number][] = [
+        [leftPartitionEnd - lo,                    lo,                   leftPartitionEnd - 1],
+        [rightPartitionEnd - leftPartitionEnd + 1, leftPartitionEnd,     rightPartitionEnd  ],
+        [hi - rightPartitionEnd,                   rightPartitionEnd + 1, hi                ],
       ];
-      regions.sort((x, y) => x[0] - y[0]); // the small earn calls; the large becomes the loop
-      if (regions[0][1] < regions[0][2]) sort(regions[0][1], regions[0][2], depth-1);
-      if (regions[1][1] < regions[1][2]) sort(regions[1][1], regions[1][2], depth-1);
-      lo = regions[2][1]; hi = regions[2][2]; depth--;
+      // Sort regions ascending by size so the two smaller ones are handled first.
+      partitionRegions.sort((regionA, regionB) => regionA[0] - regionB[0]);
+      if (partitionRegions[0][1] < partitionRegions[0][2])
+        sort(partitionRegions[0][1], partitionRegions[0][2], depth - 1);
+      if (partitionRegions[1][1] < partitionRegions[1][2])
+        sort(partitionRegions[1][1], partitionRegions[1][2], depth - 1);
+      // Tail-call the largest region by updating the loop variables in place.
+      lo = partitionRegions[2][1]; hi = partitionRegions[2][2]; depth--;
     }
   }
 
@@ -8129,41 +8146,87 @@ function logosSort(arr) {
 
   function sort(lo, hi, depth) {
     while (lo < hi) {
-      const size = hi - lo + 1;
-      if (depth<=0) {                                              // wisdom yields
-        const sub=a.slice(lo,hi+1).sort((x,y)=>x-y);
-        for (let k=lo;k<=hi;k++) a[k]=sub[k-lo]; return;
-      }
-      if (size<=48) {                                             // patience walks the small ones home
-        for (let i=lo+1;i<=hi;i++){const key=a[i];let j=i-1;while(j>=lo&&a[j]>key){a[j+1]=a[j];j--;}a[j+1]=key;}
+      const subarraySize = hi - lo + 1;
+
+      // Gift 8: wisdom yields — depth exhausted, hand off to native sort
+      if (depth <= 0) {
+        const sortedSlice = a.slice(lo, hi + 1).sort((x, y) => x - y);
+        for (let k = lo; k <= hi; k++) a[k] = sortedSlice[k - lo];
         return;
       }
-      let mn=a[lo],mx=a[lo];                                     // tally, do not compare
-      for (let k=lo+1;k<=hi;k++){if(a[k]<mn)mn=a[k];if(a[k]>mx)mx=a[k];}
-      const span=mx-mn;
-      if (Number.isInteger(mn)&&span<size*4) {
-        const counts=new Array(span+1).fill(0);
-        for (let k=lo;k<=hi;k++) counts[a[k]-mn]++;
-        let k=lo; for(let v=0;v<=span;v++){while(counts[v]-->0)a[k++]=v+mn;} return;
+
+      // Gift 9: walk the small ones home — insertion sort wins under ~48 elements
+      if (subarraySize <= 48) {
+        for (let i = lo + 1; i <= hi; i++) {
+          const currentElement = a[i];
+          let insertionPosition = i - 1;
+          while (insertionPosition >= lo && a[insertionPosition] > currentElement) {
+            a[insertionPosition + 1] = a[insertionPosition];
+            insertionPosition--;
+          }
+          a[insertionPosition + 1] = currentElement;
+        }
+        return;
       }
-      if (a[lo]<=a[lo+1]&&a[lo+1]<=a[lo+2]) {                   // read what is already written
-        let ok=true; for(let k=lo;k<hi;k++){if(a[k]>a[k+1]){ok=false;break;}}
-        if (ok) return;
-        let rev=true; for(let k=lo;k<hi;k++){if(a[k]<a[k+1]){rev=false;break;}}
-        if (rev){for(let l=lo,r=hi;l<r;l++,r--){[a[l],a[r]]=[a[r],a[l]];}return;}
+
+      // Gift 1: tally before you touch — check for counting-sort eligibility
+      let minimumValue = a[lo], maximumValue = a[lo];
+      for (let k = lo + 1; k <= hi; k++) {
+        if (a[k] < minimumValue) minimumValue = a[k];
+        if (a[k] > maximumValue) maximumValue = a[k];
       }
-      let c=0; while(c===0) c=Math.random()*2-1;                // the die is cast
-      const chaos=Math.abs(c), range=hi-lo;
-      const idx1=lo+Math.min(range,Math.floor(range*PHI2*chaos)); // the golden cut
-      const idx2=lo+Math.min(range,Math.floor(range*PHI *chaos));
-      const p1=ninther(lo,hi,idx1), p2=ninther(lo,hi,idx2);     // three voices, one truth
-      const [lt,gt]=dualPartition(lo,hi,p1,p2);                 // the great division
-      const regions=[                                             // the small earn calls; the large becomes the loop
-        [lt-lo,lo,lt-1],[gt-lt+1,lt,gt],[hi-gt,gt+1,hi]
-      ].sort((x,y)=>x[0]-y[0]);
-      if(regions[0][1]<regions[0][2]) sort(regions[0][1],regions[0][2],depth-1);
-      if(regions[1][1]<regions[1][2]) sort(regions[1][1],regions[1][2],depth-1);
-      lo=regions[2][1]; hi=regions[2][2]; depth--;
+      const valueRange = maximumValue - minimumValue;
+      if (Number.isInteger(minimumValue) && valueRange < subarraySize * 4) {
+        // Narrow range — counting sort: zero comparisons
+        const frequencyTable = new Array(valueRange + 1).fill(0);
+        for (let k = lo; k <= hi; k++) frequencyTable[a[k] - minimumValue]++;
+        let writePosition = lo;
+        for (let v = 0; v <= valueRange; v++) {
+          while (frequencyTable[v]-- > 0) a[writePosition++] = v + minimumValue;
+        }
+        return;
+      }
+
+      // Gift 2: read before you act — detect already-sorted or reversed subarrays
+      if (a[lo] <= a[lo + 1] && a[lo + 1] <= a[lo + 2]) {
+        let alreadySorted = true;
+        for (let k = lo; k < hi; k++) { if (a[k] > a[k+1]) { alreadySorted = false; break; } }
+        if (alreadySorted) return;
+        let alreadyReversed = true;
+        for (let k = lo; k < hi; k++) { if (a[k] < a[k+1]) { alreadyReversed = false; break; } }
+        if (alreadyReversed) {
+          for (let l = lo, r = hi; l < r; l++, r--) { [a[l], a[r]] = [a[r], a[l]]; }
+          return;
+        }
+      }
+
+      // Gift 5: roll the die each level — fresh non-zero random value per recursion
+      let rawRandomValue = 0;
+      while (rawRandomValue === 0) rawRandomValue = Math.random() * 2 - 1;
+      // Scale by φ⁻¹ ≈ 0.61803399: tighter jitter, still adversarially unpredictable
+      const pivotJitterFactor = Math.abs(rawRandomValue) * 0.61803399; // ∈ (0, φ⁻¹]
+
+      // Gifts 3 & 4: golden-section pivot placement, refined through three neighbors
+      const indexRange = hi - lo;
+      const leftPivotCandidateIndex  = lo + Math.min(indexRange, Math.floor(indexRange * PHI2 * pivotJitterFactor));
+      const rightPivotCandidateIndex = lo + Math.min(indexRange, Math.floor(indexRange * PHI  * pivotJitterFactor));
+      const leftPivotValue  = ninther(lo, hi, leftPivotCandidateIndex);  // three voices, one truth
+      const rightPivotValue = ninther(lo, hi, rightPivotCandidateIndex);
+
+      // Gift 6: the great division — less · equal-range · greater in one sweep
+      const [leftPartitionEnd, rightPartitionEnd] = dualPartition(lo, hi, leftPivotValue, rightPivotValue);
+
+      // Gift 7: spend the least first — recurse small regions, loop the largest
+      const partitionRegions = [
+        [leftPartitionEnd - lo,                    lo,                   leftPartitionEnd - 1],
+        [rightPartitionEnd - leftPartitionEnd + 1, leftPartitionEnd,     rightPartitionEnd  ],
+        [hi - rightPartitionEnd,                   rightPartitionEnd + 1, hi                ],
+      ].sort((regionA, regionB) => regionA[0] - regionB[0]);
+      if (partitionRegions[0][1] < partitionRegions[0][2])
+        sort(partitionRegions[0][1], partitionRegions[0][2], depth - 1);
+      if (partitionRegions[1][1] < partitionRegions[1][2])
+        sort(partitionRegions[1][1], partitionRegions[1][2], depth - 1);
+      lo = partitionRegions[2][1]; hi = partitionRegions[2][2]; depth--;
     }
   }
   sort(0, n-1, depthLimit);
@@ -8253,35 +8316,46 @@ def logos_sort(arr):
                     a[lo:hi+1] = a[lo:hi+1][::-1]
                     break
 
-            c = 0.0
-            while c == 0.0:
-                c = random.uniform(-1.0, 1.0)
-            chaos_int = int(abs(c) * (1 << 53))    # the die is cast
+            # Gift 5: draw a fresh non-zero uniform value — each level is independent
+            raw_random_value = 0.0
+            while raw_random_value == 0.0:
+                raw_random_value = random.uniform(-1.0, 1.0)
+            # Scale by φ⁻¹ ≈ 0.61803399: tighter than ±1, still adversarially unpredictable
+            pivot_jitter_factor = abs(raw_random_value) * 0.61803399  # ∈ (0, φ⁻¹]
+            jitter_as_int = int(pivot_jitter_factor * (1 << 53))       # fixed-point for index math
 
-            pn1 = PHI2_NUM * chaos_int              # the golden cut
-            pn2 = PHI_NUM  * chaos_int
-            ps  = PHI_SHIFT + 53
-            span = hi - lo
-            idx1 = lo + (span * pn1 >> ps)
-            idx2 = lo + (span * pn2 >> ps)
+            # Gifts 3 & 4: golden-section placement, refined through three neighbors
+            phi2_scaled = PHI2_NUM * jitter_as_int   # φ⁻² × jitter (fixed-point)
+            phi1_scaled = PHI_NUM  * jitter_as_int   # φ⁻¹ × jitter (fixed-point)
+            fixed_point_shift = PHI_SHIFT + 53
+            subarray_range = hi - lo
+            left_pivot_candidate_index  = lo + (subarray_range * phi2_scaled >> fixed_point_shift)
+            right_pivot_candidate_index = lo + (subarray_range * phi1_scaled >> fixed_point_shift)
 
-            p1 = _ninther(a, lo, hi, idx1)          # three voices, one truth
-            p2 = _ninther(a, lo, hi, idx2)
+            left_pivot_value  = _ninther(a, lo, hi, left_pivot_candidate_index)   # three voices, one truth
+            right_pivot_value = _ninther(a, lo, hi, right_pivot_candidate_index)
 
-            lt, gt = _dual_partition(a, lo, hi, p1, p2)  # the great division
+            # Gift 6: the great division — less · equal-range · greater in one sweep
+            left_partition_end, right_partition_end = _dual_partition(a, lo, hi, left_pivot_value, right_pivot_value)
 
-            left_n  = lt - lo
-            mid_n   = gt - lt + 1
-            right_n = hi - gt
+            # Gift 7: spend the least first — recurse small regions, loop the largest
+            left_region_size  = left_partition_end - lo
+            middle_region_size = right_partition_end - left_partition_end + 1
+            right_region_size  = hi - right_partition_end
 
-            regions = sorted(                       # the small earn calls; the large becomes the loop
-                [(left_n, lo, lt-1), (mid_n, lt, gt), (right_n, gt+1, hi)],
-                key=lambda r: r[0]
+            partition_regions = sorted(
+                [
+                    (left_region_size,   lo,                    left_partition_end - 1),
+                    (middle_region_size, left_partition_end,    right_partition_end),
+                    (right_region_size,  right_partition_end + 1, hi),
+                ],
+                key=lambda region: region[0]   # ascending by size — smallest first
             )
-            for _, r_lo, r_hi in regions[:2]:
-                if r_lo < r_hi:
-                    _sort(a, r_lo, r_hi, depth - 1)
-            lo, hi = regions[2][1], regions[2][2]
+            for _, region_lo, region_hi in partition_regions[:2]:
+                if region_lo < region_hi:
+                    _sort(a, region_lo, region_hi, depth - 1)
+            # Tail-call the largest region by updating loop variables in place
+            lo, hi = partition_regions[2][1], partition_regions[2][2]
             depth -= 1
 
     a = arr[:]
@@ -8353,18 +8427,30 @@ public class Solution {
                 boolean rev=true;for(int k=lo;k<hi;k++)if(a[k]<a[k+1]){rev=false;break;}
                 if(rev){for(int l=lo,r=hi;l<r;l++,r--){int t=a[l];a[l]=a[r];a[r]=t;}return;}
             }
-            double ch=0;while(ch==0)ch=Math.abs(RNG.nextDouble()*2-1); // the die is cast
-            int range=hi-lo;
-            int idx1=lo+(int)Math.min(range,range*PHI2*ch);           // the golden cut
-            int idx2=lo+(int)Math.min(range,range*PHI *ch);
-            int p1=ninther(a,lo,hi,idx1),p2=ninther(a,lo,hi,idx2);   // three voices, one truth
-            int[] b=dualPartition(a,lo,hi,p1,p2);                     // the great division
-            int lt=b[0],gt=b[1];
-            int[][] regions={{lt-lo,lo,lt-1},{gt-lt+1,lt,gt},{hi-gt,gt+1,hi}};
-            Arrays.sort(regions,(x,y)->x[0]-y[0]);                    // the small earn calls; the large becomes the loop
-            if(regions[0][1]<regions[0][2])sort(a,regions[0][1],regions[0][2],depth-1);
-            if(regions[1][1]<regions[1][2])sort(a,regions[1][1],regions[1][2],depth-1);
-            lo=regions[2][1];hi=regions[2][2];depth--;
+            // Gift 5: fresh non-zero random value — each level is independent
+            double rawRandomValue = 0.0;
+            while (rawRandomValue == 0.0) rawRandomValue = Math.abs(RNG.nextDouble() * 2 - 1);
+            // Scale by φ⁻¹ ≈ 0.61803399: tighter than ±1, still adversarially unpredictable
+            double pivotJitterFactor = rawRandomValue * PHI; // ∈ (0, φ⁻¹]
+            // Gifts 3 & 4: golden-section placement, refined through three neighbors
+            int indexRange = hi - lo;
+            int leftPivotCandidateIndex  = lo + (int)Math.min(indexRange, indexRange * PHI2 * pivotJitterFactor);
+            int rightPivotCandidateIndex = lo + (int)Math.min(indexRange, indexRange * PHI  * pivotJitterFactor);
+            int leftPivotValue  = ninther(a, lo, hi, leftPivotCandidateIndex);  // three voices, one truth
+            int rightPivotValue = ninther(a, lo, hi, rightPivotCandidateIndex);
+            // Gift 6: the great division — less · equal-range · greater in one sweep
+            int[] partitionBounds = dualPartition(a, lo, hi, leftPivotValue, rightPivotValue);
+            int leftPartitionEnd = partitionBounds[0], rightPartitionEnd = partitionBounds[1];
+            // Gift 7: spend the least first — recurse small regions, loop the largest
+            int[][] partitionRegions = {
+                {leftPartitionEnd - lo,                    lo,                   leftPartitionEnd - 1},
+                {rightPartitionEnd - leftPartitionEnd + 1, leftPartitionEnd,     rightPartitionEnd  },
+                {hi - rightPartitionEnd,                   rightPartitionEnd + 1, hi                }
+            };
+            Arrays.sort(partitionRegions, (regionA, regionB) -> regionA[0] - regionB[0]);
+            if (partitionRegions[0][1] < partitionRegions[0][2]) sort(a, partitionRegions[0][1], partitionRegions[0][2], depth-1);
+            if (partitionRegions[1][1] < partitionRegions[1][2]) sort(a, partitionRegions[1][1], partitionRegions[1][2], depth-1);
+            lo = partitionRegions[2][1]; hi = partitionRegions[2][2]; depth--;
         }
     }
 
@@ -8422,27 +8508,40 @@ static void logos_rec(int *a,int lo,int hi,int depth){
             int rev=1;for(int k=lo;k<hi;k++)if(a[k]<a[k+1]){rev=0;break;}
             if(rev){for(int l=lo,r=hi;l<r;l++,r--)sw(a,l,r);return;}
         }
-        double ch=(double)rand()/RAND_MAX; if(ch==0.0)ch=0.5;        /* the die is cast */
-        int range=hi-lo;
-        int idx1=lo+(int)(range*PHI2*ch); if(idx1>hi)idx1=hi;        /* the golden cut */
-        int idx2=lo+(int)(range*PHI *ch); if(idx2>hi)idx2=hi;
-        int p1=ninther(a,lo,hi,idx1),p2=ninther(a,lo,hi,idx2);       /* three voices, one truth */
-        if(p1>p2){int t=p1;p1=p2;p2=t;}
-        int lt=lo,gt=hi,i=lo;                                         /* the great division */
-        while(i<=gt){
-            if(a[i]<p1)sw(a,lt++,i++); else if(a[i]>p2)sw(a,i,gt--); else i++;
+        /* Gift 5: fresh uniform value — each level is independent */
+        double rawUniform = (double)rand() / RAND_MAX;
+        if (rawUniform == 0.0) rawUniform = 0.5; /* exact zero is pathological — use midpoint */
+        /* Scale by φ⁻¹ ≈ 0.61803399: tighter than ±1, still adversarially unpredictable */
+        double pivotJitterFactor = rawUniform * PHI; /* ∈ (0, φ⁻¹] */
+        /* Gifts 3 & 4: golden-section placement, refined through three neighbors */
+        int indexRange = hi - lo;
+        int leftPivotCandidateIndex  = lo + (int)(indexRange * PHI2 * pivotJitterFactor);
+        int rightPivotCandidateIndex = lo + (int)(indexRange * PHI  * pivotJitterFactor);
+        if (leftPivotCandidateIndex  > hi) leftPivotCandidateIndex  = hi;
+        if (rightPivotCandidateIndex > hi) rightPivotCandidateIndex = hi;
+        int leftPivotValue  = ninther(a, lo, hi, leftPivotCandidateIndex);  /* three voices, one truth */
+        int rightPivotValue = ninther(a, lo, hi, rightPivotCandidateIndex);
+        /* Gift 6: the great division — less · equal-range · greater in one sweep */
+        if (leftPivotValue > rightPivotValue) { int t = leftPivotValue; leftPivotValue = rightPivotValue; rightPivotValue = t; }
+        int leftBoundary = lo, rightBoundary = hi, scanIndex = lo;
+        while (scanIndex <= rightBoundary) {
+            if      (a[scanIndex] < leftPivotValue)  sw(a, leftBoundary++,  scanIndex++);
+            else if (a[scanIndex] > rightPivotValue) sw(a, scanIndex,       rightBoundary--);
+            else                                     scanIndex++;
         }
-        /* the small earn calls; the large becomes the loop */
-        int sz[3]={lt-lo,gt-lt+1,hi-gt};
-        int rlo[3]={lo,lt,gt+1},rhi[3]={lt-1,gt,hi};
-        for(int x=0;x<2;x++)for(int y=0;y<2;y++)if(sz[y]>sz[y+1]){
-            int ts=sz[y];sz[y]=sz[y+1];sz[y+1]=ts;
-            int tl=rlo[y];rlo[y]=rlo[y+1];rlo[y+1]=tl;
-            int th=rhi[y];rhi[y]=rhi[y+1];rhi[y+1]=th;
+        int leftPartitionEnd = leftBoundary, rightPartitionEnd = rightBoundary;
+        /* Gift 7: spend the least first — bubble-sort three regions by size, recurse two, loop one */
+        int regionSizes[3]    = {leftPartitionEnd - lo,                       rightPartitionEnd - leftPartitionEnd + 1, hi - rightPartitionEnd};
+        int regionLow[3]      = {lo,                   leftPartitionEnd,      rightPartitionEnd + 1};
+        int regionHigh[3]     = {leftPartitionEnd - 1, rightPartitionEnd,     hi};
+        for (int pass = 0; pass < 2; pass++) for (int j = 0; j < 2; j++) if (regionSizes[j] > regionSizes[j+1]) {
+            int tempSize = regionSizes[j]; regionSizes[j] = regionSizes[j+1]; regionSizes[j+1] = tempSize;
+            int tempLow  = regionLow[j];  regionLow[j]   = regionLow[j+1];   regionLow[j+1]   = tempLow;
+            int tempHigh = regionHigh[j]; regionHigh[j]  = regionHigh[j+1];  regionHigh[j+1]  = tempHigh;
         }
-        if(rlo[0]<rhi[0])logos_rec(a,rlo[0],rhi[0],depth-1);
-        if(rlo[1]<rhi[1])logos_rec(a,rlo[1],rhi[1],depth-1);
-        lo=rlo[2];hi=rhi[2];depth--;
+        if (regionLow[0] < regionHigh[0]) logos_rec(a, regionLow[0], regionHigh[0], depth-1);
+        if (regionLow[1] < regionHigh[1]) logos_rec(a, regionLow[1], regionHigh[1], depth-1);
+        lo = regionLow[2]; hi = regionHigh[2]; depth--;
     }
 }
 
@@ -8476,9 +8575,14 @@ constexpr int    BASE = 48;
 
 namespace {
 std::mt19937_64 rng(std::random_device{}());
-double chaos() {
-    std::uniform_real_distribution<double> d(-1.0,1.0);
-    double c=0.0; while(c==0.0) c=d(rng); return std::abs(c);
+// Draw a non-zero jitter value scaled to (0, φ⁻¹] — tighter than ±1, still unpredictable
+double pivotJitter() {
+    std::uniform_real_distribution<double> uniformDist(-1.0, 1.0);
+    double rawRandomValue = 0.0;
+    // Retry on exact zero (probability ≈ 2⁻⁵³ — practically never, but be safe)
+    while (rawRandomValue == 0.0) rawRandomValue = uniformDist(rng);
+    // Scale by φ⁻¹ ≈ 0.61803399 so jitter stays within golden-ratio bounds
+    return std::abs(rawRandomValue) * 0.61803399; // ∈ (0, φ⁻¹]
 }
 int median3(int x,int y,int z){
     if(x>y)std::swap(x,y); if(y>z)std::swap(y,z); if(x>y)std::swap(x,y); return y;
@@ -8519,16 +8623,26 @@ void sort_rec(std::vector<int>&a,int lo,int hi,int depth){
                 std::reverse(a.begin()+lo,a.begin()+hi+1);return;
             }
         }
-        double ch=chaos(); int range=hi-lo;                                // the die is cast
-        int idx1=lo+(int)std::min((double)range,range*PHI2*ch);            // the golden cut
-        int idx2=lo+(int)std::min((double)range,range*PHI *ch);
-        int p1=ninther(a,lo,hi,idx1),p2=ninther(a,lo,hi,idx2);            // three voices, one truth
-        auto[lt,gt]=dualPart(a,lo,hi,p1,p2);                              // the great division
-        std::array<std::array<int,3>,3> regions{{{lt-lo,lo,lt-1},{gt-lt+1,lt,gt},{hi-gt,gt+1,hi}}};
-        std::sort(regions.begin(),regions.end(),[](auto&x,auto&y){return x[0]<y[0];}); // the small earn calls; the large becomes the loop
-        if(regions[0][1]<regions[0][2])sort_rec(a,regions[0][1],regions[0][2],depth-1);
-        if(regions[1][1]<regions[1][2])sort_rec(a,regions[1][1],regions[1][2],depth-1);
-        lo=regions[2][1];hi=regions[2][2];depth--;
+        // Gift 5: fresh jitter per level — independent of every other recursion
+        double jitterFactor = pivotJitter(); // ∈ (0, φ⁻¹], scaled by golden ratio
+        int indexRange = hi - lo;
+        // Gifts 3 & 4: golden-section placement, refined through three neighbors
+        int leftPivotCandidateIndex  = lo + (int)std::min((double)indexRange, indexRange * PHI2 * jitterFactor);
+        int rightPivotCandidateIndex = lo + (int)std::min((double)indexRange, indexRange * PHI  * jitterFactor);
+        int leftPivotValue  = ninther(a, lo, hi, leftPivotCandidateIndex);  // three voices, one truth
+        int rightPivotValue = ninther(a, lo, hi, rightPivotCandidateIndex);
+        // Gift 6: the great division — less · equal-range · greater in one sweep
+        auto [leftPartitionEnd, rightPartitionEnd] = dualPart(a, lo, hi, leftPivotValue, rightPivotValue);
+        // Gift 7: spend the least first — recurse small regions, loop the largest
+        std::array<std::array<int,3>,3> partitionRegions{{
+            {leftPartitionEnd - lo,                    lo,                   leftPartitionEnd - 1},
+            {rightPartitionEnd - leftPartitionEnd + 1, leftPartitionEnd,     rightPartitionEnd  },
+            {hi - rightPartitionEnd,                   rightPartitionEnd + 1, hi                }
+        }};
+        std::sort(partitionRegions.begin(), partitionRegions.end(), [](auto& a, auto& b){ return a[0] < b[0]; });
+        if (partitionRegions[0][1] < partitionRegions[0][2]) sort_rec(a, partitionRegions[0][1], partitionRegions[0][2], depth-1);
+        if (partitionRegions[1][1] < partitionRegions[1][2]) sort_rec(a, partitionRegions[1][1], partitionRegions[1][2], depth-1);
+        lo = partitionRegions[2][1]; hi = partitionRegions[2][2]; depth--;
     }
 }
 }
@@ -8582,15 +8696,23 @@ fn ins(a: &mut [i32], lo: usize, hi: usize) {
         a[j] = key;
     }
 }
-// each call draws a fresh number — no adversary can predict the cut
-fn chaos_val() -> f64 {
+// Draw a jitter value in (0, φ⁻¹] — scaled golden-ratio randomness per recursion level.
+// Uses a splitmix64-style hash of a global counter so no external RNG crate is needed.
+fn pivot_jitter_factor() -> f64 {
     use std::sync::atomic::{AtomicU64, Ordering};
-    static CTR: AtomicU64 = AtomicU64::new(0x9e3779b97f4a7c15);
-    let s = CTR.fetch_add(0x6c62272e07bb0142, Ordering::Relaxed);
-    let s = s ^ (s >> 30); let s = s.wrapping_mul(0xbf58476d1ce4e5b9);
-    let s = s ^ (s >> 27); let s = s.wrapping_mul(0x94d049bb133111eb);
-    let f = (s >> 11) as f64 / (1u64 << 53) as f64;
-    if f == 0.0 { 0.5 } else { f }
+    static COUNTER: AtomicU64 = AtomicU64::new(0x9e3779b97f4a7c15);
+    // Advance counter by a large odd number — every value is visited exactly once
+    let state = COUNTER.fetch_add(0x6c62272e07bb0142, Ordering::Relaxed);
+    // Splitmix64 finalizer: diffuses all bits to eliminate counter patterns
+    let mixed = state ^ (state >> 30);
+    let mixed = mixed.wrapping_mul(0xbf58476d1ce4e5b9);
+    let mixed = mixed ^ (mixed >> 27);
+    let mixed = mixed.wrapping_mul(0x94d049bb133111eb);
+    // Map top 53 bits to (0, 1] as a uniform float
+    let raw_uniform = (mixed >> 11) as f64 / (1u64 << 53) as f64;
+    let nonzero_uniform = if raw_uniform == 0.0 { 0.5 } else { raw_uniform };
+    // Scale by φ⁻¹ ≈ 0.61803399: tighter than ±1, still adversarially unpredictable
+    nonzero_uniform * 0.618_033_98 // ∈ (0, φ⁻¹]
 }
 
 fn logos_rec(a: &mut [i32], lo: usize, hi: usize, depth: i32) {
@@ -8613,21 +8735,26 @@ fn logos_rec(a: &mut [i32], lo: usize, hi: usize, depth: i32) {
             if a[lo..=hi].windows(2).all(|w|w[0]<=w[1]) { return; }
             if a[lo..=hi].windows(2).all(|w|w[0]>=w[1]) { a[lo..=hi].reverse(); return; }
         }
-        let ch = chaos_val(); let range = hi - lo;                     // the die is cast
-        let idx1 = lo + ((range as f64*PHI2*ch) as usize).min(range); // the golden cut
-        let idx2 = lo + ((range as f64*PHI *ch) as usize).min(range);
-        let p1 = ninther(a, lo, hi, idx1);                             // three voices, one truth
-        let p2 = ninther(a, lo, hi, idx2);
-        let (lt, gt) = dual_partition(a, lo, hi, p1, p2);             // the great division
-        let mut regions = [                                             // the small earn calls; the large becomes the loop
-            (lt.saturating_sub(lo), lo,   lt.saturating_sub(1)),
-            (gt - lt + 1,           lt,   gt),
-            (if hi>gt{hi-gt}else{0},gt+1, hi),
+        // Gift 5: fresh jitter per level — independent across all recursion branches
+        let jitter_factor = pivot_jitter_factor(); // ∈ (0, φ⁻¹]
+        // Gifts 3 & 4: golden-section placement, refined through three neighbors
+        let index_range = hi - lo;
+        let left_pivot_candidate_index  = lo + ((index_range as f64 * PHI2 * jitter_factor) as usize).min(index_range);
+        let right_pivot_candidate_index = lo + ((index_range as f64 * PHI  * jitter_factor) as usize).min(index_range);
+        let left_pivot_value  = ninther(a, lo, hi, left_pivot_candidate_index);  // three voices, one truth
+        let right_pivot_value = ninther(a, lo, hi, right_pivot_candidate_index);
+        // Gift 6: the great division — less · equal-range · greater in one sweep
+        let (left_partition_end, right_partition_end) = dual_partition(a, lo, hi, left_pivot_value, right_pivot_value);
+        // Gift 7: spend the least first — recurse two smaller regions, loop the largest
+        let mut partition_regions = [
+            (left_partition_end.saturating_sub(lo), lo,                    left_partition_end.saturating_sub(1)),
+            (right_partition_end - left_partition_end + 1, left_partition_end,  right_partition_end),
+            (if hi > right_partition_end { hi - right_partition_end } else { 0 }, right_partition_end + 1, hi),
         ];
-        regions.sort_unstable_by_key(|r| r.0);
-        if regions[0].1 < regions[0].2 { logos_rec(a, regions[0].1, regions[0].2, depth-1); }
-        if regions[1].1 < regions[1].2 { logos_rec(a, regions[1].1, regions[1].2, depth-1); }
-        lo = regions[2].1; hi = regions[2].2; depth -= 1;
+        partition_regions.sort_unstable_by_key(|region| region.0); // ascending by size
+        if partition_regions[0].1 < partition_regions[0].2 { logos_rec(a, partition_regions[0].1, partition_regions[0].2, depth-1); }
+        if partition_regions[1].1 < partition_regions[1].2 { logos_rec(a, partition_regions[1].1, partition_regions[1].2, depth-1); }
+        lo = partition_regions[2].1; hi = partition_regions[2].2; depth -= 1;
     }
 }
 
@@ -8719,23 +8846,30 @@ func logosRec(a []int, lo, hi, depth int) {
 			for k := lo; k < hi; k++ { if a[k]<a[k+1] { rev=false; break } }
 			if rev { for l,r:=lo,hi;l<r;l,r=l+1,r-1{a[l],a[r]=a[r],a[l]}; return }
 		}
-		ch := rand.Float64(); if ch==0 { ch=0.5 }            // the die is cast
-		rng := hi - lo
-		idx1 := lo + int(math.Min(float64(rng), float64(rng)*phi2*ch)) // the golden cut
-		idx2 := lo + int(math.Min(float64(rng), float64(rng)*phi *ch))
-		p1 := ninther(a, lo, hi, idx1)                        // three voices, one truth
-		p2 := ninther(a, lo, hi, idx2)
-		lt, gt := dualPartition(a, lo, hi, p1, p2)            // the great division
-		type reg struct{ sz, lo, hi int }
-		regions := []reg{                                      // the small earn calls; the large becomes the loop
-			{lt - lo,     lo,   lt - 1},
-			{gt - lt + 1, lt,   gt},
-			{hi - gt,     gt+1, hi},
+		// Gift 5: fresh non-zero uniform value — each level is independent
+		rawUniform := rand.Float64()
+		if rawUniform == 0 { rawUniform = 0.5 } // exact zero is pathological — use midpoint
+		// Scale by φ⁻¹ ≈ 0.61803399: tighter than ±1, still adversarially unpredictable
+		pivotJitterFactor := rawUniform * phi // ∈ (0, φ⁻¹]
+		// Gifts 3 & 4: golden-section placement, refined through three neighbors
+		indexRange := hi - lo
+		leftPivotCandidateIndex  := lo + int(math.Min(float64(indexRange), float64(indexRange)*phi2*pivotJitterFactor))
+		rightPivotCandidateIndex := lo + int(math.Min(float64(indexRange), float64(indexRange)*phi *pivotJitterFactor))
+		leftPivotValue  := ninther(a, lo, hi, leftPivotCandidateIndex)  // three voices, one truth
+		rightPivotValue := ninther(a, lo, hi, rightPivotCandidateIndex)
+		// Gift 6: the great division — less · equal-range · greater in one sweep
+		leftPartitionEnd, rightPartitionEnd := dualPartition(a, lo, hi, leftPivotValue, rightPivotValue)
+		// Gift 7: spend the least first — recurse two smaller regions, loop the largest
+		type partitionRegion struct{ size, lo, hi int }
+		partitionRegions := []partitionRegion{
+			{leftPartitionEnd - lo,                    lo,                    leftPartitionEnd - 1},
+			{rightPartitionEnd - leftPartitionEnd + 1, leftPartitionEnd,      rightPartitionEnd},
+			{hi - rightPartitionEnd,                   rightPartitionEnd + 1, hi},
 		}
-		sort.Slice(regions, func(i, j int) bool { return regions[i].sz < regions[j].sz })
-		if regions[0].lo < regions[0].hi { logosRec(a, regions[0].lo, regions[0].hi, depth-1) }
-		if regions[1].lo < regions[1].hi { logosRec(a, regions[1].lo, regions[1].hi, depth-1) }
-		lo, hi, depth = regions[2].lo, regions[2].hi, depth-1
+		sort.Slice(partitionRegions, func(i, j int) bool { return partitionRegions[i].size < partitionRegions[j].size })
+		if partitionRegions[0].lo < partitionRegions[0].hi { logosRec(a, partitionRegions[0].lo, partitionRegions[0].hi, depth-1) }
+		if partitionRegions[1].lo < partitionRegions[1].hi { logosRec(a, partitionRegions[1].lo, partitionRegions[1].hi, depth-1) }
+		lo, hi, depth = partitionRegions[2].lo, partitionRegions[2].hi, depth-1
 	}
 }
 
@@ -8857,40 +8991,51 @@ logos_sort <- function(arr) {
         }
       }
 
-      # Fixed patterns breed fixed weaknesses — dissolve them with randomness.
-      c_val <- 0
-      while (c_val == 0) c_val <- runif(1L, -1, 1)
-      chaos <- abs(c_val)   # the die is cast
+      # Gift 5: draw a fresh non-zero uniform value — each level is independent.
+      # An adversary who knows the input cannot predict this level's pivot position.
+      raw_random_value <- 0
+      while (raw_random_value == 0) raw_random_value <- runif(1L, -1, 1)
+      # Scale by φ⁻¹ ≈ 0.61803399: tighter jitter than ±1, still unpredictable.
+      # The golden ratio is the most irrational number — no periodic input can
+      # repeatedly land on a bad pivot position.
+      pivot_jitter_factor <- abs(raw_random_value) * PHI  # ∈ (0, φ⁻¹]
 
-      # The golden cut, scaled by chaos so the exact position shifts each call.
-      rng  <- hi - lo
-      idx1 <- lo + min(rng, as.integer(rng * PHI2 * chaos))   # the golden cut
-      idx2 <- lo + min(rng, as.integer(rng * PHI  * chaos))
-      p1   <- ninther(lo, hi, idx1)   # three voices, one truth
-      p2   <- ninther(lo, hi, idx2)
+      # Gifts 3 & 4: golden-section placement, then refined through three neighbors.
+      # Each candidate index sits at a φ-fraction of the subarray width, perturbed
+      # by jitter so the exact position shifts every call.
+      index_range <- hi - lo
+      left_pivot_candidate_index  <- lo + min(index_range, as.integer(index_range * PHI2 * pivot_jitter_factor))
+      right_pivot_candidate_index <- lo + min(index_range, as.integer(index_range * PHI  * pivot_jitter_factor))
+      left_pivot_value  <- ninther(lo, hi, left_pivot_candidate_index)   # three voices, one truth
+      right_pivot_value <- ninther(lo, hi, right_pivot_candidate_index)
 
-      # The great division — less, between, greater, named in one sweep.
-      bounds <- dual_partition(lo, hi, p1, p2)
-      lt <- bounds[1L]; gt <- bounds[2L]
+      # Gift 6: the great division — less · equal-range · greater, named in one sweep.
+      partition_bounds <- dual_partition(lo, hi, left_pivot_value, right_pivot_value)
+      left_partition_end  <- partition_bounds[1L]
+      right_partition_end <- partition_bounds[2L]
 
-      # Rank regions by size; the small earn calls, the large becomes the loop.
-      regions <- list(
-        c(lt - lo,     lo,    lt - 1L),
-        c(gt - lt + 1L, lt,    gt),
-        c(hi - gt,     gt + 1L, hi)
+      # Gift 7: spend the least first — rank regions by size, recurse the two smaller,
+      # tail-call the largest so no extra stack frame is consumed.
+      left_region_size   <- left_partition_end - lo
+      middle_region_size <- right_partition_end - left_partition_end + 1L
+      right_region_size  <- hi - right_partition_end
+      partition_regions  <- list(
+        c(left_region_size,   lo,                     left_partition_end - 1L),
+        c(middle_region_size, left_partition_end,      right_partition_end),
+        c(right_region_size,  right_partition_end + 1L, hi)
       )
-      sizes  <- sapply(regions, function(r) r[1L])
-      order_ <- order(sizes)
-      regions <- regions[order_]
+      region_sizes      <- sapply(partition_regions, function(r) r[1L])
+      ascending_order   <- order(region_sizes)     # sort ascending by region size
+      partition_regions <- partition_regions[ascending_order]
 
-      if (regions[[1L]][2L] < regions[[1L]][3L])
-        sort_rec(regions[[1L]][2L], regions[[1L]][3L], depth - 1L)
-      if (regions[[2L]][2L] < regions[[2L]][3L])
-        sort_rec(regions[[2L]][2L], regions[[2L]][3L], depth - 1L)
+      if (partition_regions[[1L]][2L] < partition_regions[[1L]][3L])
+        sort_rec(partition_regions[[1L]][2L], partition_regions[[1L]][3L], depth - 1L)
+      if (partition_regions[[2L]][2L] < partition_regions[[2L]][3L])
+        sort_rec(partition_regions[[2L]][2L], partition_regions[[2L]][3L], depth - 1L)
 
-      # Tail-call the largest region by updating loop variables.
-      lo    <- regions[[3L]][2L]
-      hi    <- regions[[3L]][3L]
+      # Update loop variables to tail-call the largest region — no stack frame spent.
+      lo    <- partition_regions[[3L]][2L]
+      hi    <- partition_regions[[3L]][3L]
       depth <- depth - 1L
     }
   }

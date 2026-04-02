@@ -447,7 +447,6 @@ export default function CompareVisualizer() {
 
   // Track finish order: algId -> 0-based rank
   const [finishOrder, setFinishOrder] = useState<Map<SortAlgorithm, number>>(new Map());
-  const finishCountRef = useRef(0);
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -476,7 +475,6 @@ export default function CompareVisualizer() {
     setSharedArray(buildArray(size, arrayType));
     setOpIdx(0);
     setFinishOrder(new Map());
-    finishCountRef.current = 0;
   }, [size, arrayType]);
 
   // When selected algorithms or array params change, reset
@@ -499,19 +497,22 @@ export default function CompareVisualizer() {
     }
   }, [selected, size, arrayType, reset]);
 
-  // Detect when individual algorithms finish to record their rank
+  // Detect when individual algorithms finish to record their rank.
+  // Uses functional setState so the updater always sees the latest finishOrder,
+  // even when multiple timer ticks fire before React commits a render.
+  // Rank = Map.size at the moment an algorithm is inserted (= number of already-finished algos).
   useEffect(() => {
-    const newOrder = new Map(finishOrder);
-    let changed = false;
-    for (const { id, totalOps } of allAlgData) {
-      if (!newOrder.has(id) && opIdx >= totalOps) {
-        newOrder.set(id, finishCountRef.current);
-        finishCountRef.current += 1;
-        changed = true;
+    setFinishOrder(prev => {
+      const newOrder = new Map(prev);
+      let changed = false;
+      for (const { id, totalOps } of allAlgData) {
+        if (!newOrder.has(id) && opIdx >= totalOps) {
+          newOrder.set(id, newOrder.size);
+          changed = true;
+        }
       }
-    }
-    if (changed) setFinishOrder(newOrder);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+      return changed ? newOrder : prev;
+    });
   }, [opIdx, allAlgData]);
 
   // Playback timer

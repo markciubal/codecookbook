@@ -1535,10 +1535,11 @@ export function getLogosSortSteps(arr: number[], p: LogosParams = DEFAULT_LOGOS_
       /*
        * PRNG draw — fresh randomness at each level scales the φ-pivot positions differently,
        * so no fixed input pattern can force the same pivot twice.
-       * randomFactor ∈ (−PHI, PHI] = (−(φ−1), φ−1]: centered on zero, scaled by φ⁻¹ ≈ ±0.618.
-       * Algorithmically: xrand() ∈ (0,1] → (xrand()*2−1)*PHI ∈ (−PHI, PHI].
+       * Jitter scale sampled uniformly in [randomScaleMin, randomScaleMax] each call;
+       * randomFactor = (xrand()*2−1) * PHI * jitterScale ∈ (−PHI·max, PHI·max].
        */
-      const randomFactor = (xrand() * 2 - 1) * PHI * p.randomScale;
+      const jitterScale = p.randomScaleMin + xrand() * (p.randomScaleMax - p.randomScaleMin);
+      const randomFactor = (xrand() * 2 - 1) * PHI * jitterScale;
       const range = upper - lower;
 
       /*

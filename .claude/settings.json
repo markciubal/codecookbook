@@ -5,7 +5,23 @@
       "Bash(find c:/Users/markc/OneDrive/Coding/codecookbook/node_modules/next/dist/docs/01-app/02-guides/upgrading -name *.md)",
       "Bash(grep -E \"\\\\.\\(tsx?|json\\)$\")",
       "Bash(node scripts/trinity-bench.mjs)",
-      "Bash(grep -n \"go: \\\\`package main\" \"C:/Users/markc/OneDrive/Coding/codecookbook/lib/annotatedCode.ts\")"
+      "Bash(grep -n \"go: \\\\`package main\" \"C:/Users/markc/OneDrive/Coding/codecookbook/lib/annotatedCode.ts\")",
+      "Bash(for wt:*)",
+      "Bash(do echo:*)",
+      "Bash(git -C \"$wt\" diff HEAD --name-only)",
+      "Bash(git -C \"$wt\" status --short)",
+      "Bash(done)",
+      "Bash(git -C /c/Users/markc/Coding/codecookbook/.claude/worktrees/agent-a44e4dce status --short)",
+      "Bash(git -C /c/Users/markc/Coding/codecookbook/.claude/worktrees/agent-a3d67747 diff HEAD -- components/BenchmarkVisualizer.tsx)",
+      "Bash(git -C /c/Users/markc/Coding/codecookbook/.claude/worktrees/agent-a4de6347 diff HEAD -- components/SortingVisualizer.tsx)",
+      "Bash(git -C /c/Users/markc/Coding/codecookbook/.claude/worktrees/agent-a4de6347 diff HEAD -- components/GraphAlgoVisualizer.tsx)",
+      "Bash(git apply:*)",
+      "Bash(python3 -c \":*)",
+      "Bash(node -e \":*)",
+      "Bash(grep -r \"runBenchmark\\\\|performance.now\\\\|Date.now\\\\|Worker\" /c/Users/markc/Coding/codecookbook --include=*.ts --include=*.tsx --include=*.js)"
+    ],
+    "additionalDirectories": [
+      "\\tmp"
     ]
   }
 }

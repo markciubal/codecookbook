@@ -17,8 +17,12 @@ import {
   Search,
   ScanSearch,
   Network,
+  BrainCircuit,
+  Type,
+  Hexagon,
+  Calculator,
 } from "lucide-react";
-import { BENCHMARK, COMPARE, CUSTOM_SORT, SORTING_ALGORITHMS, DATA_STRUCTURES, TOOLS, SEARCHING_ALGORITHMS, GRAPH_ALGORITHMS } from "@/lib/catalog";
+import { BENCHMARK, COMPARE, CUSTOM_SORT, SORTING_ALGORITHMS, DATA_STRUCTURES, TOOLS, SEARCHING_ALGORITHMS, GRAPH_ALGORITHMS, DP_ALGORITHMS, STRING_ALGORITHMS, GEOMETRY_ALGORITHMS, MATH_ALGORITHMS } from "@/lib/catalog";
 import AlgoBadge from "@/components/AlgoBadge";
 import ThemeToggle from "@/components/ThemeToggle";
 import LevelSelector from "@/components/LevelSelector";
@@ -65,6 +69,42 @@ const NAV_ITEMS = [
       name: g.name,
       path: g.path,
       badge: g.time,
+    })),
+  },
+  {
+    group: "Dynamic Programming",
+    icon: <BrainCircuit size={14} />,
+    items: DP_ALGORITHMS.map((d) => ({
+      name: d.name,
+      path: d.path,
+      badge: d.time,
+    })),
+  },
+  {
+    group: "Strings",
+    icon: <Type size={14} />,
+    items: STRING_ALGORITHMS.map((s) => ({
+      name: s.name,
+      path: s.path,
+      badge: s.time,
+    })),
+  },
+  {
+    group: "Geometry",
+    icon: <Hexagon size={14} />,
+    items: GEOMETRY_ALGORITHMS.map((g) => ({
+      name: g.name,
+      path: g.path,
+      badge: g.time,
+    })),
+  },
+  {
+    group: "Math",
+    icon: <Calculator size={14} />,
+    items: MATH_ALGORITHMS.map((m) => ({
+      name: m.name,
+      path: m.path,
+      badge: m.time,
     })),
   },
   {
