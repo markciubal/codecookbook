@@ -1497,6 +1497,10 @@ export function getLogosSortSteps(arr: number[], p: LogosParams = DEFAULT_LOGOS_
       for (let k = lower + 1; k <= upper; k++) { if (arr2[k] < minValue) minValue = arr2[k]; if (arr2[k] > maxValue) maxValue = arr2[k]; }
       const valSpan = maxValue - minValue;
       if (Number.isInteger(minValue) && valSpan < subSize * p.countingMult) {
+        // Charge the range scan to comparisons so this step has opCount > 0 — without this,
+        // both the "trigger" step (unsorted) and "result" step (sorted) have opCount=0, causing
+        // findStepForOp to skip past the unsorted state and show the sorted result at race start.
+        comparisons += subSize - 1;
         const ov: Partial<Record<number, BarState>> = {};
         for (let k = lower; k <= upper; k++) ov[k] = "comparing";
         step(`Counting sort: range ${minValue}–${maxValue}, span ${valSpan + 1} < ${subSize * p.countingMult} — values are dense enough to count instead of compare`, 1, ov);

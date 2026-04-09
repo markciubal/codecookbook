@@ -2068,6 +2068,8 @@ type CurveData = Record<string, CurvePoint[]>;
 interface SummaryResult {
   id: string;
   timeMs: number;
+  meanMs?: number;
+  stdDev?: number;
   rank: number;
 }
 
@@ -2319,6 +2321,7 @@ function CurveChart({
   onNChange,
   mode = "time",
   onExportReady,
+  advanced = false,
 }: {
   data: CurveData;
   sizes: number[];
@@ -2328,6 +2331,7 @@ function CurveChart({
   onNChange?: (n: number | null) => void;
   mode?: "time" | "space" | "ratio" | "space-ratio";
   onExportReady?: (fn: () => void) => void;
+  advanced?: boolean;
 }) {
   const [locked, setLocked] = useState(true);
   const [expanded, setExpanded] = useState(false);
@@ -3339,7 +3343,10 @@ function CurveChart({
                 const labelCy = colSize <= 1 ? pT + iH / 2
                   : pT + 5 + (iH - 10) * posInCol / (colSize - 1);
                 const color = ALGO_COLORS[id] ?? "#888";
-                const label = `${ALGO_NAMES[id]}  ${mode === "space" ? fmtBytes(pt.spaceBytes ?? 0) : fmtTime(pt.timeMs)}`;
+                const bestLabel = `${ALGO_NAMES[id]}  ${mode === "space" ? fmtBytes(pt.spaceBytes ?? 0) : fmtTime(pt.timeMs)}`;
+                const meanLabel = advanced && mode !== "space" && pt.meanMs != null
+                  ? `μ ${fmtTime(pt.meanMs)}${pt.stdDev != null ? ` ±${fmtTime(pt.stdDev)}` : ""}` : null;
+                const label = meanLabel ? `${bestLabel}  ${meanLabel}` : bestLabel;
                 const bw = label.length * (fs * 0.58) + PAD;
                 const bx = goRight ? cx + 10 + col * COL_W : cx - 10 - (col + 1) * COL_W;
                 const by = labelCy - BH / 2;
@@ -3350,7 +3357,7 @@ function CurveChart({
                     <rect x={bx} y={by} width={bw} height={BH} rx={2} fill={color} opacity={0.93} />
                     <text x={bx + 3} y={by + BH - 2} fontSize={fs} fontWeight={700}
                       fill="#fff" style={{ letterSpacing: "0.01em" }}>
-                      {label}
+                      {bestLabel}{meanLabel && <tspan opacity={0.75} fontWeight={400}>  {meanLabel}</tspan>}
                     </text>
                     <circle cx={cx} cy={dotCy} r={4} fill={color}
                       stroke="var(--color-surface-2)" strokeWidth={1.5} />
@@ -3374,7 +3381,10 @@ function CurveChart({
               const dotCy = yAt(getValue(pt));
               const labelCy = spreadCy[i];
               const color = ALGO_COLORS[id] ?? "#888";
-              const label = `${ALGO_NAMES[id]}  ${mode === "space" ? fmtBytes(pt.spaceBytes ?? 0) : fmtTime(pt.timeMs)}`;
+              const bestLabel = `${ALGO_NAMES[id]}  ${mode === "space" ? fmtBytes(pt.spaceBytes ?? 0) : fmtTime(pt.timeMs)}`;
+              const meanLabel = advanced && mode !== "space" && pt.meanMs != null
+                ? `μ ${fmtTime(pt.meanMs)}${pt.stdDev != null ? ` ±${fmtTime(pt.stdDev)}` : ""}` : null;
+              const label = meanLabel ? `${bestLabel}  ${meanLabel}` : bestLabel;
               const bw = label.length * (fs * 0.58) + PAD;
               const bx = flipRight ? cx - bw - 10 : cx + 10;
               const by = labelCy - BH / 2;
@@ -3386,7 +3396,7 @@ function CurveChart({
                     fill={color} opacity={0.93} />
                   <text x={bx + 4} y={by + BH - 3} fontSize={fs} fontWeight={700}
                     fill="#fff" style={{ letterSpacing: "0.01em" }}>
-                    {label}
+                    {bestLabel}{meanLabel && <tspan opacity={0.75} fontWeight={400}>  {meanLabel}</tspan>}
                   </text>
                   <circle cx={cx} cy={dotCy} r={4} fill={color}
                     stroke="var(--color-surface-2)" strokeWidth={1.5} />
@@ -3620,6 +3630,7 @@ function ProofSlider({
   revealed: boolean;
   curveData: CurveData;
 }) {
+  const { has } = useLevel();
   const available = algos.filter(id => proofs[id]);
   if (!available.length) return null;
 
@@ -3769,6 +3780,11 @@ function ProofSlider({
                 <span className="text-xs font-mono" style={{ color }}>
                   n={fmtN(p.n)} · {p.timedOut ? ">10 s" : fmtTime(p.timeMs)}
                 </span>
+                {has("advanced") && !p.timedOut && p.meanMs != null && (
+                  <span style={{ fontSize: 8, fontFamily: "monospace", color: "var(--color-muted)", marginTop: 1 }}>
+                    μ {fmtTime(p.meanMs)}{p.stdDev != null ? ` ±${fmtTime(p.stdDev)}` : ""}
+                  </span>
+                )}
                 <span style={{ fontSize: 8, color: "var(--color-muted)", marginTop: 3, fontFamily: "monospace", display: "flex", alignItems: "center", gap: 4 }}>
                   <span title="Time complexity">{ALGO_TIME[currentId] ?? "—"}</span>
                   <span style={{ opacity: 0.4 }}>·</span>
@@ -3881,7 +3897,7 @@ function AlgoMiniCard({
 }: {
   id: string;
   steps: SortStep[] | null;
-  benchData: { n: number; timeMs: number; spaceBytes?: number; timedOut?: boolean }[] | null;
+  benchData: { n: number; timeMs: number; meanMs?: number; stdDev?: number; spaceBytes?: number; timedOut?: boolean }[] | null;
   isActive: boolean;
   rank: number | null;
   spaceRank?: number | null;
@@ -3976,8 +3992,15 @@ function AlgoMiniCard({
         )}
         {bestPoint && (
           <span style={{ display: "inline-flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
-            <span style={{ fontSize: 8, fontFamily: "monospace", color, whiteSpace: "nowrap" }}>
-              {fmtTime(bestPoint.timeMs)} @ n={fmtN(bestPoint.n)}
+            <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 1 }}>
+              <span style={{ fontSize: 8, fontFamily: "monospace", color, whiteSpace: "nowrap" }}>
+                {fmtTime(bestPoint.timeMs)} @ n={fmtN(bestPoint.n)}
+              </span>
+              {bestPoint.meanMs != null && (
+                <span style={{ fontSize: 7, fontFamily: "monospace", color: "var(--color-muted)", whiteSpace: "nowrap" }}>
+                  μ {fmtTime(bestPoint.meanMs)}{bestPoint.stdDev != null ? ` ±${fmtTime(bestPoint.stdDev)}` : ""}
+                </span>
+              )}
             </span>
             {(() => {
               const spaceBytes = bestPoint.spaceBytes ?? 0;
@@ -4735,10 +4758,10 @@ export default function BenchmarkVisualizer() {
   const summaryResults: SummaryResult[] = largestDone !== null
     ? chartAlgos
         .filter(id => curveDataExt[id]?.some(p => p.n === largestDone && !p.timedOut))
-        .map(id => ({
-          id,
-          timeMs: curveDataExt[id]!.find(p => p.n === largestDone)!.timeMs,
-        }))
+        .map(id => {
+          const pt = curveDataExt[id]!.find(p => p.n === largestDone)!;
+          return { id, timeMs: pt.timeMs, meanMs: pt.meanMs, stdDev: pt.stdDev };
+        })
         .sort((a, b) => a.timeMs - b.timeMs)
         .map((r, i) => ({ ...r, rank: i + 1 }))
     : [];
@@ -6139,6 +6162,7 @@ export default function BenchmarkVisualizer() {
                             onNChange={progressLocked && status === "running" ? undefined : setHoverN}
                             mode="time"
                             onExportReady={fn => { exportChartPNGRef.current = fn; }}
+                            advanced={has("advanced")}
                           />
                           <p style={{ fontSize: 9, color: "var(--color-muted)", fontFamily: "monospace", paddingLeft: 60, marginTop: 4 }}>
                             time (ms) × space (bytes) per n — lower = better combined tradeoff · log scale
@@ -6160,6 +6184,7 @@ export default function BenchmarkVisualizer() {
                           onNChange={progressLocked && status === "running" ? undefined : setHoverN}
                           mode={chartMode as "time" | "space" | "ratio" | "space-ratio"}
                           onExportReady={fn => { exportChartPNGRef.current = fn; }}
+                          advanced={has("advanced")}
                         />
                         {/* Big-O reference legend — hidden in normalized modes */}
                         {chartMode !== "ratio" && chartMode !== "space-ratio" && (
@@ -6684,7 +6709,14 @@ export default function BenchmarkVisualizer() {
                                 </div>
                               </div>
                               <div style={{ display: "flex", borderLeft: COL.bl }}>
-                                <div style={cell(rankClr, 0)}>{timeStr}</div>
+                                <div style={cell(rankClr, 0)}>
+                                  <span>{timeStr}</span>
+                                  {has("advanced") && row.meanMs != null && (
+                                    <span style={{ display: "block", fontSize: 7, color: "var(--color-muted)", marginTop: 1 }}>
+                                      μ {fmtTime(row.meanMs)}{row.stdDev != null ? ` ±${fmtTime(row.stdDev)}` : ""}
+                                    </span>
+                                  )}
+                                </div>
                                 <div style={cell("var(--color-muted)", 1)}>{row.rank === 1 ? "—" : `${(row.timeMs / summaryFastest).toFixed(1)}×`}</div>
                                 <div
                                   style={{ ...cell("var(--color-text)", 1), opacity: 0.75, cursor: "default" }}
