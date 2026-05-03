@@ -17,7 +17,7 @@ export interface SortStep {
   pseudocodeLine?: number;
 }
 
-export type SortAlgorithm = "bubble" | "selection" | "insertion" | "merge" | "quick" | "heap" | "shell" | "counting" | "radix" | "bucket" | "timsort" | "logos" | "cocktail" | "comb" | "gnome" | "pancake" | "cycle" | "oddeven" | "introsort";
+export type SortAlgorithm = "bubble" | "selection" | "insertion" | "merge" | "quick" | "heap" | "shell" | "counting" | "radix" | "bucket" | "timsort" | "logos" | "cocktail" | "comb" | "gnome" | "pancake" | "cycle" | "oddeven" | "introsort" | "adaptive";
 
 export interface AlgorithmMeta {
   name: string;

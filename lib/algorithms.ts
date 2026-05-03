@@ -354,6 +354,28 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     ],
     quote: { text: "Make the worst case impossible, not just unlikely.", attribution: "David Musser, 1997" },
   },
+  adaptive: {
+    name: "Adaptive Sort",
+    slug: "adaptive",
+    timeComplexity: "O(n log n)",
+    spaceComplexity: "O(log n)",
+    stable: false,
+    description:
+      "Minimum-memory introsort hybrid that listens to the data before picking a strategy. It first scans for dense integers (triggers counting sort in O(n+span)), then checks for nearly-sorted order via a sampled inversions count (falls to O(n) insertion sort), and finally runs introsort — quicksort with median-of-3, switching to heapsort if recursion depth exceeds 2·log₂n — to guarantee O(n log n) worst case. No auxiliary array is ever allocated on the introsort or insertion-sort paths.",
+    comparisonNote: "Made {comparisons} comparisons — Adaptive Sort reads the data before choosing a path: counting sort for dense integers, insertion sort for nearly-sorted input, introsort otherwise.",
+    pseudocode: [
+      "scan: find min/max, check integers, sample inversions",
+      "if integers && span < 4·n: countingSort  // O(n+span), O(span) space",
+      "if n ≤ 16: insertionSort  // O(n²), O(1)",
+      "if sampledInversionRate ≤ 5%: insertionSort  // O(n), O(1)",
+      "introsort(lo, hi, depth = 2·floor(log₂ n))",
+      "  if size ≤ 16: insertionSort",
+      "  if depth = 0: heapSort  // O(n log n) guarantee",
+      "  pivot = medianOf3(lo, mid, hi)",
+      "  partition; recurse smaller half first (O(log n) stack)",
+    ],
+    quote: { text: "The art of sorting is to do as little work as possible.", attribution: "Jon Bentley" },
+  },
   timsort: {
     name: "Tim Sort",
     slug: "timsort",
@@ -1908,6 +1930,162 @@ export function getIntroSortSteps(arr: number[]): SortStep[] {
   return steps;
 }
 
+export function getAdaptiveSortSteps(arr: number[]): SortStep[] {
+  const steps: SortStep[] = [];
+  const a = [...arr];
+  const n = a.length;
+  const sorted = new Set<number>();
+  let cmp = 0, swp = 0;
+
+  function push(overrides: Partial<Record<number, BarState>>, desc: string, line: number) {
+    steps.push({ array: [...a], states: makeStates(n, sorted, overrides), description: desc, comparisons: cmp, swaps: swp, pseudocodeLine: line });
+  }
+
+  // ── insertion sort ─────────────────────────────────────────────────────────
+  function insertionSort(lo: number, hi: number) {
+    for (let i = lo + 1; i <= hi; i++) {
+      const key = a[i]; let j = i - 1;
+      while (j >= lo) {
+        cmp++;
+        push({ [j]: "comparing", [j + 1]: "comparing" }, `Insertion: ${a[j]} > ${key}?`, 5);
+        if (a[j] <= key) break;
+        a[j + 1] = a[j]; swp++;
+        push({ [j]: "swapping", [j + 1]: "swapping" }, `Insertion: shifted ${a[j + 1]} right`, 5);
+        j--;
+      }
+      a[j + 1] = key;
+    }
+  }
+
+  // ── heapsort ───────────────────────────────────────────────────────────────
+  function heapify(heapEnd: number, root: number, base: number) {
+    let lg = root;
+    const l = 2 * root + 1, r = 2 * root + 2;
+    if (l < heapEnd) { cmp++; push({ [base + lg]: "minimum", [base + l]: "comparing" }, `Heapify: ${a[base + l]} vs ${a[base + lg]}`, 6); if (a[base + l] > a[base + lg]) lg = l; }
+    if (r < heapEnd) { cmp++; push({ [base + lg]: "minimum", [base + r]: "comparing" }, `Heapify: ${a[base + r]} vs ${a[base + lg]}`, 6); if (a[base + r] > a[base + lg]) lg = r; }
+    if (lg !== root) { swp++; [a[base + root], a[base + lg]] = [a[base + lg], a[base + root]]; push({ [base + root]: "swapping", [base + lg]: "swapping" }, `Heapify: swap → O(n log n) guaranteed`, 6); heapify(heapEnd, lg, base); }
+  }
+
+  function heapSort(lo: number, hi: number) {
+    const len = hi - lo + 1;
+    push({}, `Depth limit — switching to heapsort for [${lo}..${hi}]`, 6);
+    for (let i = Math.floor(len / 2) - 1; i >= 0; i--) heapify(len, i, lo);
+    for (let i = len - 1; i > 0; i--) {
+      swp++; [a[lo], a[lo + i]] = [a[lo + i], a[lo]]; sorted.add(lo + i);
+      push({ [lo]: "swapping", [lo + i]: "swapping" }, `Heap: placed ${a[lo + i]} at ${lo + i}`, 6);
+      heapify(i, 0, lo);
+    }
+    sorted.add(lo);
+  }
+
+  // ── introsort kernel ───────────────────────────────────────────────────────
+  function introsort(lo: number, hi: number, depth: number) {
+    while (lo < hi) {
+      const size = hi - lo + 1;
+      if (size <= 16) {
+        push({}, `Small subarray [${lo}..${hi}] — insertion sort`, 5);
+        insertionSort(lo, hi);
+        for (let k = lo; k <= hi; k++) sorted.add(k);
+        return;
+      }
+      if (depth === 0) { heapSort(lo, hi); return; }
+
+      const mid = (lo + hi) >> 1;
+      if (a[lo] > a[mid]) { swp++; [a[lo], a[mid]] = [a[mid], a[lo]]; }
+      if (a[lo] > a[hi])  { swp++; [a[lo], a[hi]]  = [a[hi],  a[lo]]; }
+      if (a[mid] > a[hi]) { swp++; [a[mid], a[hi]]  = [a[hi],  a[mid]]; }
+
+      const pivot = a[mid];
+      swp++; [a[mid], a[hi - 1]] = [a[hi - 1], a[mid]];
+      push({ [hi - 1]: "pivot" }, `Pivot = ${pivot} (median-of-3) — partitioning [${lo}..${hi}]`, 7);
+
+      let i = lo, j = hi - 1;
+      while (true) {
+        while (a[++i] < pivot) { cmp++; push({ [i]: "comparing", [hi - 1]: "pivot" }, `${a[i]} < ${pivot}, advance left`, 7); }
+        while (a[--j] > pivot) { cmp++; push({ [j]: "comparing", [hi - 1]: "pivot" }, `${a[j]} > ${pivot}, advance right`, 7); }
+        if (i >= j) break;
+        swp++; [a[i], a[j]] = [a[j], a[i]];
+        push({ [i]: "swapping", [j]: "swapping", [hi - 1]: "pivot" }, `Swapped ${a[i]} ↔ ${a[j]}`, 7);
+      }
+      swp++; [a[i], a[hi - 1]] = [a[hi - 1], a[i]]; sorted.add(i);
+      push({ [i]: "sorted" }, `Pivot ${pivot} placed at index ${i}`, 8);
+
+      // recurse smaller half, tail-loop larger
+      if (i - lo < hi - i) { introsort(lo, i - 1, depth - 1); lo = i + 1; }
+      else                  { introsort(i + 1, hi, depth - 1); hi = i - 1; }
+      depth--;
+    }
+  }
+
+  // ── phase 1: scan ──────────────────────────────────────────────────────────
+  let mn = a[0], mx = a[0], allInt = true;
+  const ov0: Partial<Record<number, BarState>> = {};
+  for (let i = 0; i < n; i++) {
+    cmp++;
+    if (!Number.isInteger(a[i])) allInt = false;
+    if (a[i] < mn) mn = a[i];
+    if (a[i] > mx) mx = a[i];
+    ov0[i] = "comparing";
+  }
+  push(ov0, `Scan: min=${mn}, max=${mx}, allIntegers=${allInt}, span=${mx - mn}`, 0);
+
+  // ── phase 2: counting sort ─────────────────────────────────────────────────
+  if (allInt && (mx - mn) < n * 4) {
+    push(ov0, `Counting sort: span ${mx - mn} < ${n * 4} — dense integers, no comparisons needed`, 1);
+    const cnt = new Array(mx - mn + 1).fill(0);
+    for (let i = 0; i < n; i++) cnt[a[i] - mn]++;
+    let w = 0;
+    for (let v = 0; v <= mx - mn; v++) {
+      while (cnt[v]-- > 0) {
+        a[w] = v + mn;
+        sorted.add(w);
+        push({ [w]: "sorted" }, `Counting sort: placing ${v + mn} at index ${w}`, 1);
+        w++;
+      }
+    }
+    steps.push({ array: [...a], states: Array(n).fill("sorted"), description: "Array fully sorted!", comparisons: cmp, swaps: swp, pseudocodeLine: -1 });
+    return steps;
+  }
+
+  // ── phase 3: size check ────────────────────────────────────────────────────
+  if (n <= 16) {
+    push({}, `n=${n} ≤ 16 — insertion sort`, 2);
+    insertionSort(0, n - 1);
+    for (let i = 0; i < n; i++) sorted.add(i);
+    steps.push({ array: [...a], states: Array(n).fill("sorted"), description: "Array fully sorted!", comparisons: cmp, swaps: swp, pseudocodeLine: -1 });
+    return steps;
+  }
+
+  // ── phase 4: nearly-sorted sampled check ──────────────────────────────────
+  const step = Math.max(1, Math.floor(n / Math.max(20, Math.floor(n * 0.1))));
+  let inv = 0, checks = 0;
+  const ovSample: Partial<Record<number, BarState>> = {};
+  for (let i = 0; i + step < n; i += step) {
+    cmp++; ovSample[i] = "comparing"; ovSample[i + step] = "comparing";
+    if (a[i] > a[i + step]) inv++;
+    checks++;
+  }
+  const invRate = checks > 0 ? inv / checks : 0;
+  push(ovSample, `Sampled ${checks} pairs: ${inv} inversions (${(invRate * 100).toFixed(0)}%) — ${invRate <= 0.05 ? "nearly sorted → insertion sort" : "disordered → introsort"}`, 3);
+
+  if (invRate <= 0.05) {
+    push({}, "Nearly sorted — insertion sort O(n)", 3);
+    insertionSort(0, n - 1);
+    for (let i = 0; i < n; i++) sorted.add(i);
+    steps.push({ array: [...a], states: Array(n).fill("sorted"), description: "Array fully sorted!", comparisons: cmp, swaps: swp, pseudocodeLine: -1 });
+    return steps;
+  }
+
+  // ── phase 5: introsort ─────────────────────────────────────────────────────
+  const maxDepth = 2 * Math.floor(Math.log2(n));
+  push({}, `General case — introsort (depth limit ${maxDepth})`, 4);
+  introsort(0, n - 1, maxDepth);
+
+  for (let i = 0; i < n; i++) sorted.add(i);
+  steps.push({ array: [...a], states: Array(n).fill("sorted"), description: "Array fully sorted!", comparisons: cmp, swaps: swp, pseudocodeLine: -1 });
+  return steps;
+}
+
 export function getSteps(algorithm: SortAlgorithm, arr: number[]): SortStep[] {
   switch (algorithm) {
     case "bubble":
@@ -1951,6 +2129,8 @@ export function getSteps(algorithm: SortAlgorithm, arr: number[]): SortStep[] {
       return getOddEvenSortSteps(arr);
     case "introsort":
       return getIntroSortSteps(arr);
+    case "adaptive":
+      return getAdaptiveSortSteps(arr);
   }
 }
 

@@ -29,6 +29,7 @@ export interface WorkerResponse {
   timeMs: number;
   meanMs: number;
   stdDev: number;
+  roundTimes?: number[];
   timedOut: boolean;
   error?: string;
 }
@@ -103,6 +104,7 @@ export interface WorkerResponse {
     runId, algoId, n,
     timeMs: best === Infinity ? (postWarmupTimes[0] ?? 0) : best,
     meanMs, stdDev,
+    roundTimes: postWarmupTimes.length > 1 ? postWarmupTimes : undefined,
     timedOut: didTimeout,
   } satisfies WorkerResponse);
 };

@@ -1,4 +1,11 @@
 export type BenchmarkScenario = "random" | "nearlySorted" | "reversed" | "duplicates" | "sorted";
+export type DataType = "integer" | "float" | "string";
+
+/** Algorithms that cannot sort this data type correctly. */
+export const ALGO_INCOMPATIBLE: Record<Exclude<DataType, "integer">, ReadonlySet<string>> = {
+  float:  new Set(["radix", "bucket"]),
+  string: new Set(["counting", "radix", "bucket"]),
+};
 
 /** Tunable constants for Logos Sort. */
 export interface LogosParams {
@@ -79,6 +86,43 @@ export function generateBenchmarkInput(
   }
 
   return arr;
+}
+
+/** Generate float input: same distribution as integer but with a decimal part. */
+export function generateFloatInput(
+  n: number,
+  scenario: BenchmarkScenario,
+  custom?: CustomDistribution,
+): number[] {
+  return generateBenchmarkInput(n, scenario, custom).map(v => v + Math.random());
+}
+
+/** Generate string input: 6-char base-36 strings with the requested distribution. */
+export function generateStringInput(n: number, scenario: BenchmarkScenario): string[] {
+  const pad = (i: number) => i.toString(36).padStart(6, "0");
+  const rand = () => Math.floor(Math.random() * 36 ** 6);
+  switch (scenario) {
+    case "sorted":
+      return Array.from({ length: n }, (_, i) => pad(i));
+    case "reversed":
+      return Array.from({ length: n }, (_, i) => pad(n - 1 - i));
+    case "nearlySorted": {
+      const arr = Array.from({ length: n }, (_, i) => pad(i));
+      const swaps = Math.max(1, Math.floor(n * 0.05));
+      for (let i = 0; i < swaps; i++) {
+        const a = Math.floor(Math.random() * n);
+        const b = Math.floor(Math.random() * n);
+        [arr[a], arr[b]] = [arr[b], arr[a]];
+      }
+      return arr;
+    }
+    case "duplicates": {
+      const pool = Array.from({ length: Math.max(1, Math.ceil(n / 5)) }, () => pad(rand()));
+      return Array.from({ length: n }, () => pool[Math.floor(Math.random() * pool.length)]);
+    }
+    default:
+      return Array.from({ length: n }, () => pad(rand()));
+  }
 }
 
 // ── Pure sort implementations ─────────────────────────────────────────────────
@@ -293,7 +337,7 @@ function logosSort(input: number[], p: LogosParams = DEFAULT_LOGOS_PARAMS): numb
        * The depth limit is the proof, not an optimistic assumption.
        */
       if (depth <= 0) {
-        const fallbackSorted = arr.slice(lower, upper + 1).sort((x, y) => x - y);
+        const fallbackSorted = arr.slice(lower, upper + 1).sort((x, y) => x < y ? -1 : x > y ? 1 : 0);
         for (let scanIndex = lower; scanIndex <= upper; scanIndex++) arr[scanIndex] = fallbackSorted[scanIndex - lower];
         return;
       }
@@ -851,6 +895,92 @@ function oddEvenSort(input: number[]): number[] {
   return arr;
 }
 
+function adaptiveSort(input: number[]): number[] {
+  const arr = [...input];
+  const n = arr.length;
+  if (n <= 1) return arr;
+
+  // Scan: find min/max, check integers, sample inversions
+  let minVal = arr[0], maxVal = arr[0], allInt = true, inversions = 0;
+  for (let i = 0; i < n; i++) {
+    if (arr[i] < minVal) minVal = arr[i];
+    if (arr[i] > maxVal) maxVal = arr[i];
+    if (!Number.isInteger(arr[i])) allInt = false;
+  }
+  const sampleSize = Math.min(n, 40);
+  const step2 = Math.max(1, Math.floor(n / sampleSize));
+  for (let i = 0; i + step2 < n; i += step2) {
+    if (arr[i] > arr[i + step2]) inversions++;
+  }
+  const invRate = inversions / (sampleSize - 1);
+  const span = maxVal - minVal + 1;
+
+  // Counting sort shortcut: integers with small value range
+  if (allInt && span < 4 * n) {
+    const count = new Array(span).fill(0);
+    for (let i = 0; i < n; i++) count[arr[i] - minVal]++;
+    let idx = 0;
+    for (let v = 0; v < span; v++) {
+      while (count[v]-- > 0) arr[idx++] = v + minVal;
+    }
+    return arr;
+  }
+
+  function ins(lo: number, hi: number) {
+    for (let i = lo + 1; i <= hi; i++) {
+      const k = arr[i]; let j = i - 1;
+      while (j >= lo && arr[j] > k) { arr[j + 1] = arr[j]; j--; }
+      arr[j + 1] = k;
+    }
+  }
+
+  // Tiny array or nearly-sorted: use insertion sort
+  if (n <= 16 || invRate <= 0.05) { ins(0, n - 1); return arr; }
+
+  // Introsort with heapsort fallback
+  const maxDepth = 2 * Math.floor(Math.log2(n));
+  function hpfy(end: number, root: number, base: number) {
+    let lg = root;
+    const l = 2 * root + 1, r = 2 * root + 2;
+    if (l < end && arr[base + l] > arr[base + lg]) lg = l;
+    if (r < end && arr[base + r] > arr[base + lg]) lg = r;
+    if (lg !== root) { [arr[base + root], arr[base + lg]] = [arr[base + lg], arr[base + root]]; hpfy(end, lg, base); }
+  }
+  function hp(lo: number, hi: number) {
+    const len = hi - lo + 1;
+    for (let i = Math.floor(len / 2) - 1; i >= 0; i--) hpfy(len, i, lo);
+    for (let i = len - 1; i > 0; i--) { [arr[lo], arr[lo + i]] = [arr[lo + i], arr[lo]]; hpfy(i, 0, lo); }
+  }
+  function med3(lo: number, mid: number, hi: number) {
+    if (arr[lo] > arr[mid]) [arr[lo], arr[mid]] = [arr[mid], arr[lo]];
+    if (arr[lo] > arr[hi]) [arr[lo], arr[hi]] = [arr[hi], arr[lo]];
+    if (arr[mid] > arr[hi]) [arr[mid], arr[hi]] = [arr[hi], arr[mid]];
+    return mid;
+  }
+  function sort(lo: number, hi: number, depth: number) {
+    if (hi - lo < 1) return;
+    if (hi - lo + 1 <= 16) { ins(lo, hi); return; }
+    if (depth === 0) { hp(lo, hi); return; }
+    const mid = (lo + hi) >> 1;
+    const pi = med3(lo, mid, hi);
+    const pv = arr[pi];
+    [arr[pi], arr[hi - 1]] = [arr[hi - 1], arr[pi]];
+    let i = lo, j = hi - 2;
+    while (true) {
+      while (i <= hi - 1 && arr[i] < pv) i++;
+      while (j >= lo && arr[j] > pv) j--;
+      if (i >= j) break;
+      [arr[i], arr[j]] = [arr[j], arr[i]]; i++; j--;
+    }
+    [arr[i], arr[hi - 1]] = [arr[hi - 1], arr[i]];
+    const leftSize = i - lo, rightSize = hi - i;
+    if (leftSize <= rightSize) { sort(lo, i - 1, depth - 1); sort(i + 1, hi, depth - 1); }
+    else { sort(i + 1, hi, depth - 1); sort(lo, i - 1, depth - 1); }
+  }
+  sort(0, n - 1, maxDepth);
+  return arr;
+}
+
 function introSort(input: number[]): number[] {
   const arr = [...input];
   const n = arr.length;
@@ -1047,6 +1177,7 @@ function timSortJS(input: number[]): number[] {
 
 export const SORT_FNS: Record<string, (arr: number[]) => number[]> = {
   logos:     logosSort,
+  adaptive:  adaptiveSort,
   introsort: introSort,
   timsort:   (arr) => [...arr].sort((a, b) => a - b),
   "timsort-js": timSortJS,

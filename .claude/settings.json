@@ -18,7 +18,9 @@
       "Bash(git apply:*)",
       "Bash(python3 -c \":*)",
       "Bash(node -e \":*)",
-      "Bash(grep -r \"runBenchmark\\\\|performance.now\\\\|Date.now\\\\|Worker\" /c/Users/markc/Coding/codecookbook --include=*.ts --include=*.tsx --include=*.js)"
+      "Bash(grep -r \"runBenchmark\\\\|performance.now\\\\|Date.now\\\\|Worker\" /c/Users/markc/Coding/codecookbook --include=*.ts --include=*.tsx --include=*.js)",
+      "Bash(grep -v \"^\\\\s*//\")",
+      "Read(//c/Users/markc/Downloads/**)"
     ],
     "additionalDirectories": [
       "\\tmp"
