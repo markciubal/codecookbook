@@ -119,6 +119,7 @@ const BASE: Record<string, string> = {
   bucket:    "bucket",
   timsort:   "tim",
   logos:     "logos",
+  adaptive:  "adaptive",
 };
 
 export function fnName(algo: string, lang: Language): string {

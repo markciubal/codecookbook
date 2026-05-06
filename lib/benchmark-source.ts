@@ -257,6 +257,97 @@ function timsort(input: number[]): number[] {
   return arr;
 }`,
 
+  adaptive: `function adaptiveSort(input: number[]): number[] {
+  // Adaptive Sort — profiles the input first, then picks the cheapest strategy.
+  //   1. Counting sort: integers with small value range (O(n + span), O(span) space)
+  //   2. Insertion sort: tiny arrays (n ≤ 16) or nearly-sorted (≤5% inversions)
+  //   3. Introsort: median-of-3 quicksort + heapsort fallback at depth 2·log₂n
+  // O(n log n) worst case (heapsort fallback), O(n) on structured input.
+  const arr = [...input];
+  const n = arr.length;
+  if (n <= 1) return arr;
+
+  // ── Profile pass: min/max, integer check, sampled inversion rate ───────────
+  let minVal = arr[0], maxVal = arr[0], allInt = true, inversions = 0;
+  for (let i = 0; i < n; i++) {
+    if (arr[i] < minVal) minVal = arr[i];
+    if (arr[i] > maxVal) maxVal = arr[i];
+    if (!Number.isInteger(arr[i])) allInt = false;
+  }
+  const sampleSize = Math.min(n, 40);
+  const stride = Math.max(1, Math.floor(n / sampleSize));
+  for (let i = 0; i + stride < n; i += stride) {
+    if (arr[i] > arr[i + stride]) inversions++;
+  }
+  const invRate = inversions / Math.max(1, sampleSize - 1);
+  const span = maxVal - minVal + 1;
+
+  // ── Path 1: counting sort for integers with small range ───────────────────
+  if (allInt && span < 4 * n) {
+    const count = new Array(span).fill(0);
+    for (let i = 0; i < n; i++) count[arr[i] - minVal]++;
+    let idx = 0;
+    for (let v = 0; v < span; v++) {
+      while (count[v]-- > 0) arr[idx++] = v + minVal;
+    }
+    return arr;
+  }
+
+  function ins(lo: number, hi: number) {
+    for (let i = lo + 1; i <= hi; i++) {
+      const k = arr[i]; let j = i - 1;
+      while (j >= lo && arr[j] > k) { arr[j + 1] = arr[j]; j--; }
+      arr[j + 1] = k;
+    }
+  }
+
+  // ── Path 2: tiny or nearly-sorted → insertion sort (O(n) on sorted) ───────
+  if (n <= 16 || invRate <= 0.05) { ins(0, n - 1); return arr; }
+
+  // ── Path 3: introsort with heapsort fallback ──────────────────────────────
+  const maxDepth = 2 * Math.floor(Math.log2(n));
+  function hpfy(end: number, root: number, base: number) {
+    let lg = root;
+    const l = 2 * root + 1, r = 2 * root + 2;
+    if (l < end && arr[base + l] > arr[base + lg]) lg = l;
+    if (r < end && arr[base + r] > arr[base + lg]) lg = r;
+    if (lg !== root) { [arr[base + root], arr[base + lg]] = [arr[base + lg], arr[base + root]]; hpfy(end, lg, base); }
+  }
+  function hp(lo: number, hi: number) {
+    const len = hi - lo + 1;
+    for (let i = Math.floor(len / 2) - 1; i >= 0; i--) hpfy(len, i, lo);
+    for (let i = len - 1; i > 0; i--) { [arr[lo], arr[lo + i]] = [arr[lo + i], arr[lo]]; hpfy(i, 0, lo); }
+  }
+  function med3(lo: number, mid: number, hi: number) {
+    if (arr[lo] > arr[mid]) [arr[lo], arr[mid]] = [arr[mid], arr[lo]];
+    if (arr[lo] > arr[hi])  [arr[lo], arr[hi]]  = [arr[hi],  arr[lo]];
+    if (arr[mid] > arr[hi]) [arr[mid], arr[hi]] = [arr[hi], arr[mid]];
+    return mid;
+  }
+  function sort(lo: number, hi: number, depth: number) {
+    if (hi - lo < 1) return;
+    if (hi - lo + 1 <= 16) { ins(lo, hi); return; }
+    if (depth === 0) { hp(lo, hi); return; }
+    const mid = (lo + hi) >> 1;
+    const pi = med3(lo, mid, hi);
+    const pv = arr[pi];
+    [arr[pi], arr[hi - 1]] = [arr[hi - 1], arr[pi]];
+    let i = lo, j = hi - 2;
+    while (true) {
+      while (i <= hi - 1 && arr[i] < pv) i++;
+      while (j >= lo && arr[j] > pv) j--;
+      if (i >= j) break;
+      [arr[i], arr[j]] = [arr[j], arr[i]]; i++; j--;
+    }
+    [arr[i], arr[hi - 1]] = [arr[hi - 1], arr[i]];
+    // Recurse smaller half first → O(log n) stack depth bound
+    if (i - lo <= hi - i) { sort(lo, i - 1, depth - 1); sort(i + 1, hi, depth - 1); }
+    else { sort(i + 1, hi, depth - 1); sort(lo, i - 1, depth - 1); }
+  }
+  sort(0, n - 1, maxDepth);
+  return arr;
+}`,
+
   introsort: `function introSort(input: number[]): number[] {
   // Introsort: quicksort with heapsort fallback at depth 2·⌊log₂n⌋.
   // Guarantees O(n log n) worst case, O(log n) stack space.
@@ -677,6 +768,7 @@ export const BENCHMARK_SOURCE_LABEL: Record<string, string> = {
   logos:     "TypeScript (benchmark.ts)",
   timsort:      "TypeScript (native .sort())",
   "timsort-js": "TypeScript (benchmark.ts)",
+  adaptive:  "TypeScript (benchmark.ts)",
   introsort: "TypeScript (benchmark.ts)",
   merge:     "TypeScript (benchmark.ts)",
   quick:     "TypeScript (benchmark.ts)",

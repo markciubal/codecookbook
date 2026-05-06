@@ -21,8 +21,9 @@ import {
   Type,
   Hexagon,
   Calculator,
+  GraduationCap,
 } from "lucide-react";
-import { BENCHMARK, COMPARE, CUSTOM_SORT, SORTING_ALGORITHMS, DATA_STRUCTURES, TOOLS, SEARCHING_ALGORITHMS, GRAPH_ALGORITHMS, DP_ALGORITHMS, STRING_ALGORITHMS, GEOMETRY_ALGORITHMS, MATH_ALGORITHMS } from "@/lib/catalog";
+import { BENCHMARK, COMPARE, CUSTOM_SORT, LEARNING, SORTING_ALGORITHMS, DATA_STRUCTURES, TOOLS, SEARCHING_ALGORITHMS, GRAPH_ALGORITHMS, DP_ALGORITHMS, STRING_ALGORITHMS, GEOMETRY_ALGORITHMS, MATH_ALGORITHMS } from "@/lib/catalog";
 import AlgoBadge from "@/components/AlgoBadge";
 import ThemeToggle from "@/components/ThemeToggle";
 import LevelSelector from "@/components/LevelSelector";
@@ -192,6 +193,21 @@ function NavItems({
         >
           <GitCompare size={14} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
           <span className="text-sm">{COMPARE.name}</span>
+        </Link>
+        <Link
+          href={LEARNING.path}
+          onClick={onClick}
+          className="flex items-center gap-2 px-3 py-2 rounded-lg transition-colors"
+          style={{
+            background: pathname.startsWith(LEARNING.path) ? "var(--color-accent-muted)" : "var(--color-surface-2)",
+            color: pathname.startsWith(LEARNING.path) ? "var(--color-accent)" : "var(--color-text)",
+            border: `1px solid ${pathname.startsWith(LEARNING.path) ? "var(--color-accent)" : "var(--color-border)"}`,
+            borderLeft: `3px solid ${pathname.startsWith(LEARNING.path) ? "var(--color-accent)" : "var(--color-border)"}`,
+            fontWeight: 600,
+          }}
+        >
+          <GraduationCap size={14} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
+          <span className="text-sm">{LEARNING.name}</span>
         </Link>
       </div>
 

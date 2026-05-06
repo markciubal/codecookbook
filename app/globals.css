@@ -40,26 +40,46 @@ html {
 
 html[data-theme="dark"] {
   color-scheme: dark;
-  --color-bg:        #0f0e0d;
-  --color-surface-1: #161513;
-  --color-surface-2: #1e1c19;
-  --color-surface-3: #27241f;
-  --color-border:    #332f29;
+  /* Warm dark gray scale — deliberately not pure black so the eye can rest
+     and so legacy near-black text remains visible. Each surface step lifts
+     the previous by ~6-8% lightness for clear separation. */
+  --color-bg:        #1f1d1a;
+  --color-surface-1: #28251f;
+  --color-surface-2: #322e27;
+  --color-surface-3: #3d382f;
+  --color-border:    #4a4439;
 
-  --color-accent:       #c86050;
-  --color-accent-muted: #3a1a14;
+  --color-accent:       #d8705f;
+  --color-accent-muted: #4a221b;
 
-  --color-state-default: #55524c;
+  --color-state-default: #6b675f;
   --color-state-compare: #d48830;
   --color-state-swap:    #c84030;
   --color-state-sorted:  #4e8858;
-  --color-state-active:  #c86050;
+  --color-state-active:  #d8705f;
   --color-state-min:     #9070c0;
   --color-state-current: #c87030;
   --color-state-pivot:   #3a9898;
 
-  --color-text:  #ede8e0;
-  --color-muted: #8a8278;
+  --color-text:  #f0ebe2;
+  --color-muted: #a39a8c;
+}
+
+/* Defensive override: any hardcoded near-black text (#000, #0a0a0a, black)
+   becomes the dark-mode text color so legacy inline styles stay readable. */
+html[data-theme="dark"] [style*="color: #000"],
+html[data-theme="dark"] [style*="color: #0a0a0a"],
+html[data-theme="dark"] [style*="color: black"],
+html[data-theme="dark"] [style*="color:#000"],
+html[data-theme="dark"] [style*="color:#0a0a0a"],
+html[data-theme="dark"] [style*="color:black"] {
+  color: var(--color-text) !important;
+}
+html[data-theme="dark"] [fill="#000"],
+html[data-theme="dark"] [fill="#000000"],
+html[data-theme="dark"] [fill="black"],
+html[data-theme="dark"] [fill="#0a0a0a"] {
+  fill: var(--color-text) !important;
 }
 
 body {

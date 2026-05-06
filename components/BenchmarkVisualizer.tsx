@@ -175,6 +175,94 @@ const CUSTOM_PRESETS: { label: string; code: string }[] = [
 }`,
   },
   {
+    label: "Adaptive",
+    code: `(arr) => {
+  // Adaptive Sort: profiles input, then picks the cheapest strategy.
+  // 1. Counting sort if integers with small range.
+  // 2. Insertion sort if tiny or nearly sorted.
+  // 3. Otherwise introsort with median-of-3 + heapsort fallback.
+  const a = [...arr];
+  const n = a.length;
+  if (n <= 1) return a;
+
+  // Scan: min/max, integer check, sampled inversion rate
+  let minVal = a[0], maxVal = a[0], allInt = true, inv = 0;
+  for (let i = 0; i < n; i++) {
+    if (a[i] < minVal) minVal = a[i];
+    if (a[i] > maxVal) maxVal = a[i];
+    if (!Number.isInteger(a[i])) allInt = false;
+  }
+  const sample = Math.min(n, 40);
+  const step = Math.max(1, Math.floor(n / sample));
+  for (let i = 0; i + step < n; i += step) if (a[i] > a[i + step]) inv++;
+  const invRate = inv / Math.max(1, sample - 1);
+  const span = maxVal - minVal + 1;
+
+  // Counting sort path: integers with small value range
+  if (allInt && span < 4 * n) {
+    const c = new Array(span).fill(0);
+    for (let i = 0; i < n; i++) c[a[i] - minVal]++;
+    let idx = 0;
+    for (let v = 0; v < span; v++) while (c[v]-- > 0) a[idx++] = v + minVal;
+    return a;
+  }
+
+  function ins(lo, hi) {
+    for (let i = lo + 1; i <= hi; i++) {
+      const k = a[i]; let j = i - 1;
+      while (j >= lo && a[j] > k) { a[j + 1] = a[j]; j--; }
+      a[j + 1] = k;
+    }
+  }
+
+  // Tiny or nearly-sorted → insertion sort
+  if (n <= 16 || invRate <= 0.05) { ins(0, n - 1); return a; }
+
+  // Introsort with heapsort fallback
+  const maxDepth = 2 * Math.floor(Math.log2(n));
+  function hpfy(end, root, base) {
+    let lg = root;
+    const l = 2 * root + 1, r = l + 1;
+    if (l < end && a[base + l] > a[base + lg]) lg = l;
+    if (r < end && a[base + r] > a[base + lg]) lg = r;
+    if (lg !== root) { [a[base + root], a[base + lg]] = [a[base + lg], a[base + root]]; hpfy(end, lg, base); }
+  }
+  function hp(lo, hi) {
+    const len = hi - lo + 1;
+    for (let i = Math.floor(len / 2) - 1; i >= 0; i--) hpfy(len, i, lo);
+    for (let i = len - 1; i > 0; i--) { [a[lo], a[lo + i]] = [a[lo + i], a[lo]]; hpfy(i, 0, lo); }
+  }
+  function med3(lo, mid, hi) {
+    if (a[lo] > a[mid]) [a[lo], a[mid]] = [a[mid], a[lo]];
+    if (a[lo] > a[hi])  [a[lo], a[hi]]  = [a[hi],  a[lo]];
+    if (a[mid] > a[hi]) [a[mid], a[hi]] = [a[hi], a[mid]];
+    return mid;
+  }
+  function sort(lo, hi, depth) {
+    if (hi - lo < 1) return;
+    if (hi - lo + 1 <= 16) { ins(lo, hi); return; }
+    if (depth === 0) { hp(lo, hi); return; }
+    const mid = (lo + hi) >> 1;
+    const pi = med3(lo, mid, hi);
+    const pv = a[pi];
+    [a[pi], a[hi - 1]] = [a[hi - 1], a[pi]];
+    let i = lo, j = hi - 2;
+    while (true) {
+      while (i <= hi - 1 && a[i] < pv) i++;
+      while (j >= lo && a[j] > pv) j--;
+      if (i >= j) break;
+      [a[i], a[j]] = [a[j], a[i]]; i++; j--;
+    }
+    [a[i], a[hi - 1]] = [a[hi - 1], a[i]];
+    // Recurse smaller half first (bounded stack depth)
+    if (i - lo <= hi - i) { sort(lo, i - 1, depth - 1); sort(i + 1, hi, depth - 1); }
+    else { sort(i + 1, hi, depth - 1); sort(lo, i - 1, depth - 1); }
+  }
+  sort(0, n - 1, maxDepth);
+  return a;
+}`,
+  },
+  {
     label: "Introsort",
     code: `(arr) => {
   const a = [...arr];
@@ -539,7 +627,7 @@ const ALGO_NAMES: Record<string, string> = withLogosVariants({
 
 
 const ALGO_COLORS: Record<string, string> = withLogosVariants({
-  logos:            "#000000",
+  logos:            "#808080",
   "logos-custom-1": "#555555",
   adaptive:       "#26a69a",
   introsort:      "#e67e22",
@@ -1901,11 +1989,12 @@ function Chart3D({
 // Shows fitted equation, derivative (marginal cost), and cumulative work integral per algorithm.
 
 function MathPanel({
-  data, algos, mode,
+  data, algos, mode, sampleProofs,
 }: {
   data: CurveData;
   algos: string[];
   mode: "time" | "space";
+  sampleProofs?: Record<string, { before: number[]; after: number[]; n: number }>;
 }) {
   const [openIds, setOpenIds] = useState<Set<string>>(new Set(algos));
   const toggle = (id: string) => setOpenIds(prev => {
@@ -2045,6 +2134,85 @@ function MathPanel({
                             })}
                           </tbody>
                         </table>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Before/After sample — visual proof the sort actually sorts */}
+                  {sampleProofs?.[id] && (() => {
+                    const sp = sampleProofs[id];
+                    const all = [...sp.before, ...sp.after];
+                    const maxV = Math.max(...all, 1);
+                    const minV = Math.min(...all, 0);
+                    const range = Math.max(1, maxV - minV);
+                    // Sortedness verification: every adjacent pair must be non-decreasing.
+                    // Samples are evenly-spaced from the fully sorted output, so monotonicity
+                    // is necessary (though not sufficient) for correctness.
+                    let badIdx = -1;
+                    for (let i = 1; i < sp.after.length; i++) {
+                      if (sp.after[i] < sp.after[i - 1]) { badIdx = i; break; }
+                    }
+                    const verified = badIdx === -1;
+                    const fmtCell = (v: number) =>
+                      Number.isInteger(v) ? v.toString() : v.toFixed(2);
+                    const renderRow = (vals: number[], valueColor: string) => (
+                      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 1 }}>
+                        <div style={{ display: "flex", gap: 1, height: 18, alignItems: "flex-end" }}>
+                          {vals.map((v, i) => {
+                            const h = ((v - minV) / range) * 16 + 2;
+                            return (
+                              <span key={i}
+                                title={String(v)}
+                                style={{ flex: 1, height: h, background: dotColor, opacity: 0.85, borderRadius: 1 }}
+                              />
+                            );
+                          })}
+                        </div>
+                        <div style={{ display: "flex", gap: 1 }}>
+                          {vals.map((v, i) => (
+                            <span key={i}
+                              title={String(v)}
+                              style={{ flex: 1, fontSize: 7, fontFamily: "monospace", color: valueColor, textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                            >
+                              {fmtCell(v)}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                    return (
+                      <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px dashed var(--color-border)" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                          <span style={{ fontSize: 8, color: "var(--color-muted)", fontFamily: "monospace", flex: 1 }}>
+                            sample (every ⌊n/{sp.before.length}⌋th element from n={fmtN(sp.n)})
+                          </span>
+                          <span
+                            title={verified
+                              ? "Sample is in non-decreasing order — sort produced a valid ordering at the sampled positions."
+                              : `Sample is out of order: a[${badIdx}] (${sp.after[badIdx]}) < a[${badIdx - 1}] (${sp.after[badIdx - 1]}). Sort is broken.`}
+                            style={{
+                              fontSize: 7, fontFamily: "monospace", fontWeight: 700,
+                              padding: "1px 5px", borderRadius: 3, whiteSpace: "nowrap",
+                              background: verified ? "rgba(78,160,90,0.18)" : "rgba(239,83,80,0.20)",
+                              border: `1px solid ${verified ? "rgba(78,160,90,0.55)" : "rgba(239,83,80,0.65)"}`,
+                              color: verified ? "#7ec88a" : "#ef5350",
+                            }}
+                          >
+                            {verified
+                              ? "✓ verified sorted"
+                              : `✗ BROKEN — out of order at index ${badIdx}`}
+                          </span>
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+                            <span style={{ fontSize: 8, fontFamily: "monospace", color: "var(--color-muted)", width: 38, flexShrink: 0, paddingTop: 5 }}>before</span>
+                            {renderRow(sp.before, "var(--color-muted)")}
+                          </div>
+                          <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+                            <span style={{ fontSize: 8, fontFamily: "monospace", color: dotColor, width: 38, flexShrink: 0, paddingTop: 5 }}>after</span>
+                            {renderRow(sp.after, dotColor)}
+                          </div>
+                        </div>
                       </div>
                     );
                   })()}
@@ -2696,15 +2864,7 @@ function CurveChart({
   })();
   const bigOCalibC = [...bigOCalibMap.values()].find(v => v > 0) ?? 0; // kept for condition checks
 
-  // Big-O tooltip bubbles shown at the hover crosshair (not in ratio mode — axis is already normalised)
-  const bigOBubbles = showBigORefs && effectiveN != null && bigOCalibC > 0 && mode !== "ratio"
-    ? [...bigORefs]
-        .map(ref => ({ ref, v: (bigOCalibMap.get(ref.id) ?? 0) * ref.fn(effectiveN) }))
-        .filter(x => isFinite(x.v) && x.v > 0)
-        .sort((a, b) => b.v - a.v)  // descending: n² first → top of chart
-    : [];
-
-  const overlayBtnBase: React.CSSProperties = btn("secondary", {
+const overlayBtnBase: React.CSSProperties = btn("secondary", {
     fontSize: 9, padding: "2px 5px", borderRadius: 4, background: "var(--color-surface-2)",
   });
 
@@ -2849,54 +3009,40 @@ function CurveChart({
       <line x1={pL} y1={pT} x2={pL} y2={pT + iH} stroke="var(--color-border)" strokeWidth={0.8} />
       <line x1={pL} y1={pT + iH} x2={VW - pR} y2={pT + iH} stroke="var(--color-border)" strokeWidth={0.8} />
 
-      {/* Big-O reference curves + algo right-edge labels — unified evenly-spaced right margin */}
+      {/* Big-O reference curves + LEFT-anchored ref labels.
+          Labels reflect the hovered N (effectiveN) when set, otherwise show
+          the projection at the largest measured N. */}
       {showBigORefs && mode !== "ratio" && mode !== "space-ratio" && visSizes.length >= 1 && bigOCalibC > 0 && (() => {
         const maxN  = visSizes[visSizes.length - 1];
+        // labelN: what N the left labels report. Tracks the hovered/pinned N when present.
+        const labelN = effectiveN ?? maxN;
+        const isHovered = effectiveN != null;
         const STEPS = 80;
-        const lx    = pL + iW + extraZoneW + 5;
+        // Anchor labels to the LEFT edge of the plot area (just inside)
+        const lx    = pL + 6;
 
         const refY = (refId: string, fn: (n: number) => number, n: number) => {
           const c = bigOCalibMap.get(refId) ?? 0;
           return Math.max(pT, pT + iH - (c * fn(n) / maxY) * iH);
         };
 
-        // Build a unified pool: Big-O reference curves + actual measured algo endpoints at maxN.
-        // Sort the whole pool by value ascending (fastest = bottom, slowest = top), then assign
-        // evenly-spaced Y slots across the full canvas so nothing overlaps.
-        type LabelItem =
-          | { kind: "ref"; ri: number; v: number }
-          | { kind: "algo"; id: string; v: number; actualY: number };
+        // Build pool of ONLY Big-O reference labels.
+        // Sort descending by value so slowest (n²) is at top, fastest (log n) at bottom —
+        // matches the visual order of the curves themselves.
+        const pool = bigORefs
+          .map((ref, ri) => ({ ri, ref, v: (bigOCalibMap.get(ref.id) ?? 0) * ref.fn(labelN) }))
+          .filter(item => isFinite(item.v) && item.v > 0)
+          .sort((a, b) => b.v - a.v);
 
-        const pool: LabelItem[] = [
-          ...bigORefs.map((ref, ri) => ({
-            kind: "ref" as const,
-            ri,
-            v: (bigOCalibMap.get(ref.id) ?? 0) * ref.fn(maxN),
-          })),
-          ...algos.flatMap(id => {
-            const pts = (data[id] ?? []).filter(p => !p.timedOut && visSizes.includes(p.n));
-            const pt  = [...pts].sort((a, b) => b.n - a.n)[0];
-            if (!pt) return [];
-            const v = getValue(pt);
-            if (v <= 0) return [];
-            return [{ kind: "algo" as const, id, v, actualY: Math.max(pT, Math.min(pT + iH, yAt(v))) }];
-          }),
-        ].filter(item => isFinite(item.v) && item.v > 0);
-
-        // Sort ascending by value (fastest first → bottom of canvas)
-        pool.sort((a, b) => a.v - b.v);
-
-        const labelTop    = pT + 7;
-        const labelBottom = pT + iH - 23;
+        const labelTop    = pT + 6;
+        const labelBottom = pT + iH - 12;
         const total       = pool.length;
         const step        = total > 1 ? (labelBottom - labelTop) / (total - 1) : 0;
-        // Assign evenly-spaced Y: index 0 (fastest) → bottom, index n-1 (slowest) → top
-        const assignedY   = pool.map((_, rank) => labelBottom - rank * step);
-        // Compact mode: collapse ref labels to one line when step is too small to fit 3-line blocks
-        const compactLabels = step < 20;
+        // index 0 (slowest) → top; index n-1 (fastest) → bottom
+        const assignedY   = pool.map((_, rank) => labelTop + rank * step);
 
         // Draw ref curve polylines first (background layer)
-        const refPolylines = bigORefs.map((ref, ri) => {
+        const refPolylines = bigORefs.map(ref => {
           const pts: string[] = [];
           for (let i = 0; i <= STEPS; i++) {
             const t = i / STEPS;
@@ -2921,67 +3067,30 @@ function CurveChart({
           );
         });
 
-        // Draw labels + connectors for the combined pool
+        // Draw left-anchored ref labels: dashed swatch + "O(n²)  14.3s @ n=1M"
+        // When hovering, accent the labels (brighter opacity) to signal they're live.
         const labels = pool.map((item, rank) => {
           const labelY = assignedY[rank];
-
-          if (item.kind === "ref") {
-            const ref     = bigORefs[item.ri];
-            const curveEndX = pL + iW + extraZoneW;
-            const curveEndY = Math.max(pT, Math.min(pT + iH, refY(ref.id, ref.fn, maxN)));
-            const predMs  = item.v;
-            const clipped = predMs > maxY;
-            return (
-              <g key={`refl-${ref.id}`} style={{ pointerEvents: "none" }}>
-                <line x1={curveEndX} y1={curveEndY} x2={lx - 2} y2={labelY + (compactLabels ? 4 : 8)}
-                  stroke={ref.color} strokeWidth={0.5} opacity={0.35} />
-                <text x={lx} y={labelY} textAnchor="start" fontSize={7.5}
-                  fontFamily="monospace" fill={ref.color} opacity={0.9}>
-                  {ref.label}{compactLabels ? `  ${clipped ? "↑ " : ""}${mode === "space" ? fmtBytes(predMs) : fmtPredicted(predMs)}` : ""}
-                </text>
-                {!compactLabels && <>
-                  <text x={lx} y={labelY + 9} textAnchor="start" fontSize={7}
-                    fontFamily="monospace" fill={ref.color} opacity={0.7}>
-                    n={fmtN(maxN)}
-                  </text>
-                  <text x={lx} y={labelY + 17} textAnchor="start" fontSize={7}
-                    fontFamily="monospace" fill={ref.color} opacity={0.7}>
-                    {clipped ? "↑ " : ""}{mode === "space" ? fmtBytes(predMs) : fmtPredicted(predMs)}
-                  </text>
-                </>}
-              </g>
-            );
-          } else {
-            // Algo label: connector from curve's actual right-edge Y to label slot
-            const color    = ALGO_COLORS[item.id] ?? "#888";
-            const isHl     = !highlight || highlight === item.id;
-            const shortName = (ALGO_NAMES[item.id] ?? item.id).replace(" Sort", "");
-            const fit      = extraFits.get(item.id);
-            const units    = mode === "space" ? "bytes" : "ms";
-            const fmtK     = (k: number) =>
-              k >= 100 ? k.toFixed(1) :
-              k >= 1   ? k.toPrecision(3) :
-              k < 0.0001 ? k.toExponential(2) :
-              k.toPrecision(3);
-            const eqStr    = fit
-              ? `T(n) ≈ ${fmtK(fit.k)} · n^${fit.exp.toFixed(3)} ${units}`
-              : null;
-            return (
-              <g key={`algol-${item.id}`} style={{ pointerEvents: eqStr ? "all" : "none", cursor: eqStr ? "help" : "default" }} opacity={isHl ? 1 : 0.2}>
-                {eqStr && <title>{eqStr}</title>}
-                <line x1={pL + iW + extraZoneW} y1={item.actualY} x2={lx - 2} y2={labelY + 5}
-                  stroke={color} strokeWidth={0.7} opacity={0.5} />
-                <text x={lx} y={labelY} textAnchor="start" fontSize={7.5}
-                  fontFamily="monospace" fill={color} fontWeight={600}>
-                  {shortName}
-                </text>
-                <text x={lx} y={labelY + 9} textAnchor="start" fontSize={7}
-                  fontFamily="monospace" fill={color} opacity={0.75}>
-                  {mode === "space" ? fmtBytes(item.v) : fmtTime(item.v)}{eqStr ? " ≈" : ""}
-                </text>
-              </g>
-            );
-          }
+          const ref    = item.ref;
+          const predMs = item.v;
+          const clipped = predMs > maxY;
+          const valStr = mode === "space" ? fmtBytes(predMs) : fmtPredicted(predMs);
+          return (
+            <g key={`refl-${ref.id}`} style={{ pointerEvents: "none" }}>
+              {/* dashed-line swatch in the ref's color */}
+              <line x1={lx} y1={labelY - 2} x2={lx + 12} y2={labelY - 2}
+                stroke={ref.color} strokeWidth={1.5} strokeDasharray="4 3" opacity={0.9} />
+              <text x={lx + 16} y={labelY} textAnchor="start" fontSize={8}
+                fontFamily="monospace" fill={ref.color} opacity={0.95} fontWeight={600}>
+                {ref.label}
+              </text>
+              <text x={lx + 16} y={labelY + 8} textAnchor="start" fontSize={7}
+                fontFamily="monospace" fill={ref.color} opacity={isHovered ? 0.95 : 0.65}
+                fontWeight={isHovered ? 600 : 400}>
+                {clipped ? "↑ " : ""}{valStr} @ n={fmtN(labelN)}
+              </text>
+            </g>
+          );
         });
 
         return <>{refPolylines}{labels}</>;
@@ -3533,98 +3642,8 @@ function CurveChart({
         );
       })()}
 
-      {/* Big-O reference curve tooltip bubbles at the hover crosshair */}
-      {bigOBubbles.length > 0 && effectiveN != null && (() => {
-        const cx = xAt(effectiveN);
-        const SWATCH_W = 14, GAP = 3, PAD = 5;
-        const nb = bigOBubbles.length;
-        const naturalCy = bigOBubbles.map(({ v }) =>
-          Math.max(pT + 8, Math.min(pT + iH - 8, yAt(v)))
-        );
-        const maxPerCol = Math.max(1, Math.floor(iH / 11));
-        const useColumns = nb > maxPerCol;
-
-        if (useColumns) {
-          // Horizontal column layout: Big O labels extend LEFT from crosshair
-          const BH = 10, fs = 7, COL_W = 110;
-          const goLeft = cx >= VW * 0.35;
-          return (
-            <g style={{ pointerEvents: "none" }}>
-              {bigOBubbles.map(({ ref, v }, i) => {
-                const col = Math.floor(i / maxPerCol);
-                const posInCol = i % maxPerCol;
-                const colSize = Math.min(maxPerCol, nb - col * maxPerCol);
-                const labelCy = colSize <= 1 ? pT + iH / 2
-                  : pT + 5 + (iH - 10) * posInCol / (colSize - 1);
-                const valueStr = mode === "space" ? fmtBytes(v) : fmtPredicted(v);
-                const labelStr = `${ref.label}  ${valueStr}`;
-                const bw = SWATCH_W + GAP + labelStr.length * (fs * 0.58) + PAD * 2;
-                const bx = goLeft ? cx - 10 - (col + 1) * COL_W : cx + 10 + col * COL_W;
-                const by = labelCy - BH / 2;
-                return (
-                  <g key={ref.id}>
-                    <line x1={cx} y1={naturalCy[i]} x2={goLeft ? bx + bw : bx}
-                      y2={labelCy} stroke={ref.color} strokeWidth={0.7} opacity={0.4} />
-                    <rect x={bx} y={by} width={bw} height={BH} rx={2}
-                      fill="var(--color-surface-2)" opacity={0.93}
-                      stroke={ref.color} strokeWidth={1} strokeDasharray="4 2" />
-                    <line x1={bx + PAD} y1={by + BH / 2} x2={bx + PAD + SWATCH_W} y2={by + BH / 2}
-                      stroke={ref.color} strokeWidth={1.5} strokeDasharray="4 3" />
-                    <text x={bx + PAD + SWATCH_W + GAP} y={by + BH - 2}
-                      fontSize={fs} fontFamily="monospace" fontWeight={600} fill={ref.color}>
-                      {labelStr}
-                    </text>
-                    <circle cx={cx} cy={naturalCy[i]} r={3}
-                      fill="var(--color-surface-2)" stroke={ref.color} strokeWidth={1.5} />
-                  </g>
-                );
-              })}
-            </g>
-          );
-        }
-
-        const BH = 15;
-        const flipRight = cx > VW * 0.55;
-        const spreadCy = bigOBubbles.map((_, i) =>
-          nb === 1 ? pT + iH / 2 : pT + BH / 2 + (iH - BH) * i / (nb - 1)
-        );
-
-        return (
-          <g style={{ pointerEvents: "none" }}>
-            {bigOBubbles.map(({ ref, v }, i) => {
-              const cy = spreadCy[i];
-              const valueStr = mode === "space" ? fmtBytes(v) : fmtPredicted(v);
-              const labelStr = `${ref.label}  ${valueStr}`;
-              const bw = SWATCH_W + GAP + labelStr.length * 5.1 + PAD * 2;
-              const bx = flipRight ? cx - bw - 10 : cx + 10;
-              const by = cy - BH / 2;
-              return (
-                <g key={ref.id}>
-                  {/* bubble */}
-                  <rect x={bx} y={by} width={bw} height={BH} rx={3}
-                    fill="var(--color-surface-2)" opacity={0.93}
-                    stroke={ref.color} strokeWidth={1} strokeDasharray="4 2" />
-                  {/* legend color swatch — dashed line matching the curve style */}
-                  <line
-                    x1={bx + PAD} y1={by + BH / 2}
-                    x2={bx + PAD + SWATCH_W} y2={by + BH / 2}
-                    stroke={ref.color} strokeWidth={1.5} strokeDasharray="4 3" />
-                  {/* label text */}
-                  <text
-                    x={bx + PAD + SWATCH_W + GAP} y={by + BH - 4}
-                    fontSize={8.5} fontFamily="monospace" fontWeight={600}
-                    fill={ref.color}>
-                    {labelStr}
-                  </text>
-                  {/* connector dot on the reference curve */}
-                  <circle cx={cx} cy={naturalCy[i]} r={3}
-                    fill="var(--color-surface-2)" stroke={ref.color} strokeWidth={1.5} />
-                </g>
-              );
-            })}
-          </g>
-        );
-      })()}
+      {/* Big-O hover bubbles removed — left-side reference labels are the
+          single source of truth for projected Big-O values. */}
 
       {/* Selection rect (brush = full height, zoom = box) */}
       {selRect && (
@@ -4276,7 +4295,7 @@ export default function BenchmarkVisualizer() {
   const [sampleProofs, setSampleProofs] = useState<Record<string, { before: number[]; after: number[]; n: number }>>({});
   const [activeProofAlgo, setActiveProofAlgo] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [useWorkerIsolation, setUseWorkerIsolation] = useState(false);
+  const [useWorkerIsolation, setUseWorkerIsolation] = useState(true);
   const [customSortCode, setCustomSortCode] = useState("");
   const [customSortName, setCustomSortName] = useState("");
   const [customSortNotes, setCustomSortNotes] = useState("");
@@ -4294,7 +4313,7 @@ export default function BenchmarkVisualizer() {
   const [sortCol, setSortCol] = useState<SortCol>("time");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [chartMode, setChartMode] = useState<"time" | "space" | "ratio" | "space-ratio" | "3d" | "memory" | "product">("time");
-  const [adversarialEnabled, setAdversarialEnabled] = useState(false);
+  const [adversarialEnabled, setAdversarialEnabled] = useState(true);
   const [miniCardSort, setMiniCardSort] = useState<"time" | "space" | "both">("time");
   const [customInput, setCustomInput] = useState("");
   const [pendingCustomN, setPendingCustomN] = useState<number | null>(null);
@@ -4311,9 +4330,16 @@ export default function BenchmarkVisualizer() {
   const [progressLocked, setProgressLocked] = useState(true);
   const [resultsMaximized, setResultsMaximized] = useState(false);
   const stopRef = useRef(false);
+  // Tracks when the user clicked Stop, so we can show a "still working..." hint
+  // if it doesn't actually stop within ~250ms (typical for main-thread mode).
+  const [stopPending, setStopPending] = useState(false);
   const excludedRef = useRef<Set<string>>(new Set());
   const algoSleepResolveRef = useRef<(() => void) | null>(null);
   const algoSleepTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Track the currently-running worker so stop() can terminate it mid-flight.
+  // Without this, a stop click during a long worker sort just waits for it to finish.
+  const currentWorkerRef = useRef<Worker | null>(null);
+  const currentWorkerResolveRef = useRef<((v: { timeMs: number; meanMs: number; stdDev: number; roundTimes?: number[]; timedOut: boolean; stopped?: boolean }) => void) | null>(null);
 
   // Lock chart cursor to the n currently being benchmarked
   useEffect(() => {
@@ -4648,10 +4674,22 @@ export default function BenchmarkVisualizer() {
         if (useWorkerIsolation) {
           const workerInputs = roundInputs.slice(0, algoRounds);
           const logosP = getLogosCustomParams(id) ?? (id === "logos" ? DEFAULT_LOGOS_PARAMS : undefined);
-          const result = await new Promise<{ timeMs: number; meanMs: number; stdDev: number; roundTimes?: number[]; timedOut: boolean }>((resolve) => {
+          const result = await new Promise<{ timeMs: number; meanMs: number; stdDev: number; roundTimes?: number[]; timedOut: boolean; stopped?: boolean }>((resolve) => {
             const w = new Worker(new URL("../lib/benchmarkWorker", import.meta.url));
-            w.onmessage = (e: MessageEvent) => { w.terminate(); resolve(e.data); };
-            w.onerror = () => { w.terminate(); resolve({ timeMs: 0, meanMs: 0, stdDev: 0, timedOut: false }); };
+            currentWorkerRef.current = w;
+            currentWorkerResolveRef.current = resolve;
+            w.onmessage = (e: MessageEvent) => {
+              w.terminate();
+              if (currentWorkerRef.current === w) currentWorkerRef.current = null;
+              currentWorkerResolveRef.current = null;
+              resolve(e.data);
+            };
+            w.onerror = () => {
+              w.terminate();
+              if (currentWorkerRef.current === w) currentWorkerRef.current = null;
+              currentWorkerResolveRef.current = null;
+              resolve({ timeMs: 0, meanMs: 0, stdDev: 0, timedOut: false });
+            };
             w.postMessage({
               runId: Date.now().toString(),
               algoId: id,
@@ -4665,6 +4703,8 @@ export default function BenchmarkVisualizer() {
               customFnStr: id === "custom" ? customSortCode : undefined,
             });
           });
+          // If stop terminated the worker, bail out without recording a result.
+          if (result.stopped || stopRef.current) break;
           if (!acc[id]) acc[id] = [];
           acc[id].push({
             n: sz, timeMs: result.timeMs, meanMs: result.meanMs, stdDev: result.stdDev,
@@ -4688,6 +4728,12 @@ export default function BenchmarkVisualizer() {
         const postWarmupTimes: number[] = [];
 
         for (let r = 0; r < algoRounds && !didTimeout; r++) {
+          // Yield to the event loop between rounds so a click on Stop can register
+          // and stopRef.current can flip before the next sort starts.
+          if (r > 0) {
+            await new Promise<void>(resolve => setTimeout(resolve, 0));
+            if (stopRef.current) break;
+          }
           const input = algoRoundInputs[r];
 
           // Capture per-algo proof on first encounter
@@ -4714,6 +4760,9 @@ export default function BenchmarkVisualizer() {
             postWarmupTimes.push(lastElapsed);
           }
         }
+
+        // If the user pressed Stop mid-rounds, abandon this size/algo and bail upward.
+        if (stopRef.current) break;
 
         // Edge case: all rounds were warmup — use the last timing
         if (best === Infinity && !didTimeout) { best = lastElapsed; postWarmupTimes.push(lastElapsed); }
@@ -4775,7 +4824,30 @@ export default function BenchmarkVisualizer() {
 
   }, [selected, selectedSizes, scenarios, rounds, warmup, customPreSorted, customDuplicates, quickPivot, shellGaps, customLogosVariants, adversarialEnabled, useWorkerIsolation, customSortEnabled, customSortCode]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const stop = () => { stopRef.current = true; };
+  const stop = () => {
+    stopRef.current = true;
+    setStopPending(true);
+    // Wake any pending pre-algo sleep so the loop can hit its stopRef check
+    if (algoSleepTimerRef.current !== null) {
+      clearTimeout(algoSleepTimerRef.current);
+      algoSleepTimerRef.current = null;
+      algoSleepResolveRef.current?.();
+      algoSleepResolveRef.current = null;
+    }
+    // Terminate any worker mid-sort and resolve its awaiting promise so the
+    // benchmark loop can exit immediately instead of waiting for the sort to finish.
+    if (currentWorkerRef.current) {
+      currentWorkerRef.current.terminate();
+      currentWorkerRef.current = null;
+      currentWorkerResolveRef.current?.({ timeMs: 0, meanMs: 0, stdDev: 0, timedOut: false, stopped: true });
+      currentWorkerResolveRef.current = null;
+    }
+  };
+
+  // Clear the "stop pending" state when the run actually finishes (status leaves "running").
+  useEffect(() => {
+    if (status !== "running") setStopPending(false);
+  }, [status]);
 
   // Keyboard shortcut: R = run/stop, Escape = close maximize
   useEffect(() => {
@@ -5362,7 +5434,7 @@ export default function BenchmarkVisualizer() {
                       {/* Load preset buttons — grouped by complexity class */}
                       {(() => {
                         const groups: { label: string; color: string; presets: string[] }[] = [
-                          { label: "O(n log n)", color: "#66bb6a", presets: ["Logos", "TimSort (JS)", "Introsort", "Merge", "Quick", "Heap"] },
+                          { label: "O(n log n)", color: "#66bb6a", presets: ["Logos", "Adaptive", "TimSort (JS)", "Introsort", "Merge", "Quick", "Heap"] },
                           { label: "O(n log² n) / linear", color: "#ffb74d", presets: ["Shell", "Counting", "Radix", "Bucket"] },
                           { label: "O(n²)", color: "#ef9a9a", presets: ["Insertion", "Selection", "Bubble", "Cocktail", "Comb", "Gnome", "Pancake", "Cycle", "Odd-Even"] },
                         ];
@@ -6081,8 +6153,12 @@ export default function BenchmarkVisualizer() {
                       <span style={{ flexShrink: 0 }}>n={currentN?.toLocaleString() ?? "…"}</span>
                       <span style={{ flexShrink: 0, color: "var(--color-muted)" }}>{progress.done}/{progress.total}</span>
                     </div>
-                    <button onClick={stop} style={btn("danger", { padding: "4px 12px" })}>
-                      <Square size={11} strokeWidth={2} fill="currentColor" /> Stop
+                    <button
+                      onClick={stop}
+                      disabled={stopPending}
+                      style={btn("danger", { padding: "4px 12px", opacity: stopPending ? 0.5 : 1, cursor: stopPending ? "not-allowed" : "pointer" })}
+                    >
+                      <Square size={11} strokeWidth={2} fill="currentColor" /> {stopPending ? "Stopping…" : "Stop"}
                     </button>
                   </>
                 ) : (
@@ -6104,6 +6180,33 @@ export default function BenchmarkVisualizer() {
                   </>
                 )}
               </div>
+              {/* Stop-delay hint: shown only in main-thread mode when Stop hasn't taken effect yet */}
+              {stopPending && status === "running" && !useWorkerIsolation && (
+                <div
+                  className="mt-2"
+                  style={{
+                    fontSize: 10, fontFamily: "monospace", lineHeight: 1.4,
+                    padding: "6px 10px", borderRadius: 5,
+                    background: "rgba(255,183,77,0.10)",
+                    border: "1px solid rgba(255,183,77,0.45)",
+                    color: "#ffb74d",
+                  }}
+                >
+                  Stop is delayed — JavaScript can&apos;t interrupt a running sort on the main thread.
+                  Will bail at the next round/algorithm boundary.{" "}
+                  <button
+                    onClick={() => setUseWorkerIsolation(true)}
+                    style={{
+                      background: "none", border: "none",
+                      color: "#ffb74d", textDecoration: "underline",
+                      cursor: "pointer", padding: 0, font: "inherit",
+                    }}
+                  >
+                    Enable Worker isolation
+                  </button>{" "}
+                  for instant stop on the next run.
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -6828,6 +6931,7 @@ export default function BenchmarkVisualizer() {
             data={curveDataExt}
             algos={chartAlgos}
             mode={chartMode}
+            sampleProofs={sampleProofs}
           />
         </div>
       )}
@@ -6848,8 +6952,12 @@ export default function BenchmarkVisualizer() {
         }}
       >
         {status === "running" ? (
-          <button onClick={stop} style={btn("danger", { flex: 1, justifyContent: "center", padding: "6px 0" })}>
-            <Square size={13} strokeWidth={2} fill="currentColor" /> Stop
+          <button
+            onClick={stop}
+            disabled={stopPending}
+            style={btn("danger", { flex: 1, justifyContent: "center", padding: "6px 0", opacity: stopPending ? 0.5 : 1, cursor: stopPending ? "not-allowed" : "pointer" })}
+          >
+            <Square size={13} strokeWidth={2} fill="currentColor" /> {stopPending ? "Stopping…" : "Stop"}
           </button>
         ) : (
           <button

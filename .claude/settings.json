@@ -20,10 +20,12 @@
       "Bash(node -e \":*)",
       "Bash(grep -r \"runBenchmark\\\\|performance.now\\\\|Date.now\\\\|Worker\" /c/Users/markc/Coding/codecookbook --include=*.ts --include=*.tsx --include=*.js)",
       "Bash(grep -v \"^\\\\s*//\")",
-      "Read(//c/Users/markc/Downloads/**)"
+      "Read(//c/Users/markc/Downloads/**)",
+      "Bash(mkdir -p \"/c/Users/markc/Coding/codecookbook/app/learning/[topic]\")"
     ],
     "additionalDirectories": [
-      "\\tmp"
+      "\\tmp",
+      "C:\\Users\\markc\\Coding\\codecookbook\\app\\learning"
     ]
   }
 }

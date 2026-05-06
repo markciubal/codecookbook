@@ -251,6 +251,14 @@ export const BENCHMARK: BenchmarkEntry = {
   blurb: "Configure algorithms, input sizes, and scenarios. Watch real timing curves emerge across millions of elements.",
 };
 
+export const LEARNING = {
+  kind: "learning" as const,
+  name: "Learning",
+  path: "/learning",
+  description: "Interactive lessons covering algorithms, data structures, and complexity analysis",
+  blurb: "Multiple choice, fill-in-the-blank, ordering, and matching questions across 16 topics with shuffled order and score tracking.",
+};
+
 /**
  * Sorting algorithms in display order.
  * Logos Sort is pinned first; add new entries anywhere below it.
