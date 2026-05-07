@@ -12,7 +12,7 @@ import { useLevel } from "@/hooks/useLevel";
 const SLOW_IDS = new Set(["insertion", "selection", "bubble", "cocktail", "comb", "gnome", "pancake", "cycle", "oddeven"]);
 const SLOW_THRESHOLD = 5_000;
 // All O(n log n) algorithms are allowed above 5 M elements
-const _UNLIMITED_BASE = new Set(["logos", "timsort", "timsort-js", "introsort", "adaptive", "merge", "quick", "heap"]);
+const _UNLIMITED_BASE = new Set(["logos", "timsort", "timsort-js", "introsort", "adaptive", "pdqsort", "merge", "quick", "heap"]);
 const UNLIMITED_IDS = { has: (id: string) => _UNLIMITED_BASE.has(id) || /^logos-custom-\d+$/.test(id) };
 
 // Palette for numbered Logos custom variants
@@ -259,6 +259,121 @@ const CUSTOM_PRESETS: { label: string; code: string }[] = [
     else { sort(i + 1, hi, depth - 1); sort(lo, i - 1, depth - 1); }
   }
   sort(0, n - 1, maxDepth);
+  return a;
+}`,
+  },
+  {
+    label: "PDQ",
+    code: `// Pattern-defeating quicksort by Orson Peters (2021).
+// Default sort in Rust's std. Hardened against adversarial input via:
+//   - median-of-3 / pseudomedian-of-9 (ninther) pivot selection
+//   - heapsort fallback after log2(n) bad partitions (O(n log n) guarantee)
+//   - partial insertion sort early-out for already-sorted regions
+//   - equal-elements fast path → O(n) on many-duplicates input
+//   - element shuffling on highly unbalanced partitions
+(arr) => {
+  const a = [...arr];
+  const n = a.length;
+  if (n <= 1) return a;
+  const INSERT = 24, NINTHER = 128, PARTIAL = 8;
+  const lt = (x, y) => x < y;
+  function ins(b, e) {
+    for (let c = b + 1; c < e; c++) {
+      let s = c, s1 = c - 1;
+      if (lt(a[s], a[s1])) {
+        const tmp = a[s];
+        do { a[s--] = a[s1]; } while (s !== b && lt(tmp, a[--s1]));
+        a[s] = tmp;
+      }
+    }
+  }
+  function uIns(b, e) {
+    for (let c = b + 1; c < e; c++) {
+      let s = c, s1 = c - 1;
+      if (lt(a[s], a[s1])) {
+        const tmp = a[s];
+        do { a[s--] = a[s1]; } while (lt(tmp, a[--s1]));
+        a[s] = tmp;
+      }
+    }
+  }
+  function pIns(b, e) {
+    let limit = 0;
+    for (let c = b + 1; c < e; c++) {
+      let s = c, s1 = c - 1;
+      if (lt(a[s], a[s1])) {
+        const tmp = a[s];
+        do { a[s--] = a[s1]; } while (s !== b && lt(tmp, a[--s1]));
+        a[s] = tmp;
+        limit += c - s;
+      }
+      if (limit > PARTIAL) return false;
+    }
+    return true;
+  }
+  const swap = (i, j) => { const t = a[i]; a[i] = a[j]; a[j] = t; };
+  const sort2 = (i, j) => { if (lt(a[j], a[i])) swap(i, j); };
+  const sort3 = (i, j, k) => { sort2(i, j); sort2(j, k); sort2(i, j); };
+  function partR(b, e) {
+    const pv = a[b]; let f = b, l = e;
+    while (lt(a[++f], pv));
+    if (f - 1 === b) while (f < l && !lt(a[--l], pv));
+    else             while (         !lt(a[--l], pv));
+    const ap = f >= l;
+    while (f < l) { swap(f, l); while (lt(a[++f], pv)); while (!lt(a[--l], pv)); }
+    const pp = f - 1;
+    a[b] = a[pp]; a[pp] = pv;
+    return [pp, ap];
+  }
+  function partL(b, e) {
+    const pv = a[b]; let f = b, l = e;
+    while (lt(pv, a[--l]));
+    if (l + 1 === e) while (f < l && !lt(pv, a[++f]));
+    else             while (         !lt(pv, a[++f]));
+    while (f < l) { swap(f, l); while (lt(pv, a[--l])); while (!lt(pv, a[++f])); }
+    a[b] = a[l]; a[l] = pv;
+    return l;
+  }
+  function hp(end, root, base) {
+    let lg = root;
+    const l = 2 * root + 1, r = l + 1;
+    if (l < end && a[base + l] > a[base + lg]) lg = l;
+    if (r < end && a[base + r] > a[base + lg]) lg = r;
+    if (lg !== root) { swap(base + root, base + lg); hp(end, lg, base); }
+  }
+  function heap(b, e) {
+    const len = e - b;
+    for (let i = (len >> 1) - 1; i >= 0; i--) hp(len, i, b);
+    for (let i = len - 1; i > 0; i--) { swap(b, b + i); hp(i, 0, b); }
+  }
+  function loop(b, e, bad, leftmost) {
+    while (true) {
+      const sz = e - b;
+      if (sz < INSERT) { if (leftmost) ins(b, e); else uIns(b, e); return; }
+      const s2 = sz >> 1;
+      if (sz > NINTHER) {
+        sort3(b, b + s2, e - 1);
+        sort3(b + 1, b + (s2 - 1), e - 2);
+        sort3(b + 2, b + (s2 + 1), e - 3);
+        sort3(b + (s2 - 1), b + s2, b + (s2 + 1));
+        swap(b, b + s2);
+      } else {
+        sort3(b + s2, b, e - 1);
+      }
+      if (!leftmost && !lt(a[b - 1], a[b])) { b = partL(b, e) + 1; continue; }
+      const [pp, ap] = partR(b, e);
+      const lS = pp - b, rS = e - (pp + 1);
+      if (lS < (sz >> 3) || rS < (sz >> 3)) {
+        if (--bad === 0) { heap(b, e); return; }
+        if (lS >= INSERT) { swap(b, b + (lS >> 2)); swap(pp - 1, pp - (lS >> 2)); }
+        if (rS >= INSERT) { swap(pp + 1, pp + 1 + (rS >> 2)); swap(e - 1, e - (rS >> 2)); }
+      } else if (ap && pIns(b, pp) && pIns(pp + 1, e)) return;
+      loop(b, pp, bad, leftmost);
+      b = pp + 1;
+      leftmost = false;
+    }
+  }
+  loop(0, n, Math.floor(Math.log2(n)), true);
   return a;
 }`,
   },
@@ -577,6 +692,7 @@ const ALGO_GROUPS = [
     items: [
       { id: "logos",     name: "Logos Sort",  href: "/sorting/logos" },
       { id: "adaptive",    name: "Adaptive Sort",   href: "/sorting/adaptive" },
+      { id: "pdqsort",     name: "PDQ Sort",        href: "/sorting/pdqsort" },
       { id: "introsort",   name: "Introsort",       href: "/sorting/introsort" },
       { id: "timsort",     name: "Tim Sort (V8)",   href: "/sorting/timsort" },
       { id: "timsort-js",  name: "Tim Sort (JS)" },
@@ -614,6 +730,7 @@ const ALGO_GROUPS = [
 const ALGO_NAMES: Record<string, string> = withLogosVariants({
   logos: "Logos Sort", "logos-custom-1": "Logos Sort - 1",
   adaptive: "Adaptive Sort",
+  pdqsort:  "PDQ Sort",
   introsort: "Introsort",
   timsort: "Tim Sort (V8)",   merge: "Merge Sort",
   quick: "Quick Sort", heap: "Heap Sort",      shell: "Shell Sort",
@@ -630,6 +747,7 @@ const ALGO_COLORS: Record<string, string> = withLogosVariants({
   logos:            "#808080",
   "logos-custom-1": "#555555",
   adaptive:       "#26a69a",
+  pdqsort:        "#7e57c2",
   introsort:      "#e67e22",
   timsort:        "#5b9bd5",
   "timsort-js":   "#a8c9ed",  // lighter blue — same family, clearly related
@@ -656,6 +774,7 @@ const ALGO_SPACE: Record<string, string> = withLogosVariants({
   logos:            "O(log n) / O(n)",
   "logos-custom-1": "O(log n) / O(n)",
   adaptive:       "O(log n) / O(span)",
+  pdqsort:        "O(log n)",
   introsort:      "O(log n)",
   timsort:        "O(n)",
   "timsort-js":   "O(n)",
@@ -681,6 +800,7 @@ const ALGO_TIME: Record<string, string> = withLogosVariants({
   logos:            "O(n log n)",
   "logos-custom-1": "O(n log n)",
   adaptive:       "O(n log n)",
+  pdqsort:        "O(n log n)",
   introsort:      "O(n log n)",
   timsort:        "O(n log n)",
   "timsort-js":   "O(n log n)",
@@ -707,6 +827,7 @@ const ALGO_STABLE: Record<string, boolean> = withLogosVariants({
   logos:            false,
   "logos-custom-1": false,
   adaptive:       false,
+  pdqsort:        false,
   introsort:      false,
   timsort:        true,
   "timsort-js":   true,
@@ -733,6 +854,7 @@ const ALGO_ONLINE: Record<string, boolean> = withLogosVariants({
   logos:            false,
   "logos-custom-1": false,
   adaptive:       false,
+  pdqsort:        false,
   introsort:      false,
   timsort:        false,
   "timsort-js":   false,
@@ -919,6 +1041,7 @@ interface AlgoInfo {
 const ALGO_INFO: Record<string, AlgoInfo> = {
   logos:     { best: "O(n)",       avg: "O(n log n)", worst: "O(n log n)", space: "O(log n) / O(n)", inPlace: false, useCase: "General-purpose sort for any data; adaptive across all input patterns", intuition: "Dual-pivot introsort hybrid. Auxiliary space has three distinct paths: (1) pure recursion — O(log n) call stack via tail-call elimination on the largest partition; (2) counting sort shortcut — O(k) where k = value range, fires when valueRange < 4·n, often O(1) relative to n in practice; (3) introsort fallback — O(n) slice + TimSort merge buffer when depth 2·log₂n + 4 is exhausted (adversarial input only). Worst-case auxiliary is O(n)." },
   adaptive:  { best: "O(n)",       avg: "O(n log n)", worst: "O(n log n)", space: "O(log n) / O(span)", inPlace: true, useCase: "General-purpose sort that profiles the input first and picks the cheapest strategy", intuition: "Scans for min/max, integer range, and inversion rate before choosing a strategy: counting sort for small integer spans, insertion sort for tiny or nearly-sorted arrays, introsort with heapsort fallback otherwise" },
+  pdqsort:   { best: "O(n)",       avg: "O(n log n)", worst: "O(n log n)", space: "O(log n)",            inPlace: true, useCase: "General-purpose default in Rust's std and Boost.Sort — robust against adversarial input", intuition: "Pattern-defeating quicksort by Orson Peters: median-of-3 / pseudomedian-of-9 pivot, partial-insertion-sort early-out detects already-sorted regions in O(n), equal-elements fast path handles many duplicates in O(n), heapsort fallback after log₂(n) bad partitions guarantees O(n log n)" },
   introsort: { best: "O(n log n)", avg: "O(n log n)", worst: "O(n log n)", space: "O(log n)", inPlace: true,  useCase: "Default sort in C++ std::sort; whenever stability isn't required", intuition: "Quicksort that switches to heapsort if recursion depth exceeds 2·log₂n — quicksort speed with worst-case guarantee" },
   timsort:      { best: "O(n)",       avg: "O(n log n)", worst: "O(n log n)", space: "O(n)",     inPlace: false, useCase: "Data that already has partial order: DB results, log files, nearly-sorted arrays", intuition: "Detects natural sorted runs in the input and merges them; exploits real-world order that pure quicksort ignores" },
   "timsort-js": { best: "O(n)",       avg: "O(n log n)", worst: "O(n log n)", space: "O(n)",     inPlace: false, useCase: "Same as Tim Sort — direct comparison of pure-JavaScript overhead vs V8's native C++ implementation", intuition: "Pure-JS implementation of the same TimSort algorithm: natural run detection, binary insertion sort, and merge with temporary buffer. The gap vs native .sort() reflects the JS⟷C++ comparator callback cost per comparison." },
@@ -5434,7 +5557,7 @@ export default function BenchmarkVisualizer() {
                       {/* Load preset buttons — grouped by complexity class */}
                       {(() => {
                         const groups: { label: string; color: string; presets: string[] }[] = [
-                          { label: "O(n log n)", color: "#66bb6a", presets: ["Logos", "Adaptive", "TimSort (JS)", "Introsort", "Merge", "Quick", "Heap"] },
+                          { label: "O(n log n)", color: "#66bb6a", presets: ["Logos", "Adaptive", "PDQ", "TimSort (JS)", "Introsort", "Merge", "Quick", "Heap"] },
                           { label: "O(n log² n) / linear", color: "#ffb74d", presets: ["Shell", "Counting", "Radix", "Bucket"] },
                           { label: "O(n²)", color: "#ef9a9a", presets: ["Insertion", "Selection", "Bubble", "Cocktail", "Comb", "Gnome", "Pancake", "Cycle", "Odd-Even"] },
                         ];

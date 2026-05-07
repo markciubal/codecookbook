@@ -120,6 +120,7 @@ const BASE: Record<string, string> = {
   timsort:   "tim",
   logos:     "logos",
   adaptive:  "adaptive",
+  pdqsort:   "pdq",
 };
 
 export function fnName(algo: string, lang: Language): string {

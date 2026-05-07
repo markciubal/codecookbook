@@ -981,6 +981,220 @@ function adaptiveSort(input: number[]): number[] {
   return arr;
 }
 
+/*
+ * pdqsort — Pattern-Defeating Quicksort by Orson Peters (2021).
+ *
+ * Hybrid of introsort + adversarial-resistance heuristics:
+ *   • Median-of-3 / pseudomedian-of-9 (Tukey's ninther) pivot selection
+ *   • Insertion sort under threshold (24 elements)
+ *   • Heapsort fallback once log₂(n) bad partitions occur — O(n log n) guarantee
+ *   • Detects already-partitioned subsequences and tries partial insertion sort
+ *   • Special-cases equal-to-pivot → groups equals together to break the
+ *     "many duplicates" worst case to O(n)
+ *   • Shuffles elements on highly unbalanced partitions to defeat adversarial input
+ *
+ * Worst case: O(n log n)  Best case: O(n) (already sorted)
+ * Space: O(log n) recursion stack
+ * Stable: NO
+ */
+function pdqSort(input: number[]): number[] {
+  const arr = [...input];
+  const INSERTION_SORT_THRESHOLD = 24;
+  const NINTHER_THRESHOLD = 128;
+  const PARTIAL_INSERTION_SORT_LIMIT = 8;
+
+  function lt(a: number, b: number) { return a < b; }
+
+  function insertionSort(begin: number, end: number) {
+    if (begin === end) return;
+    for (let cur = begin + 1; cur < end; cur++) {
+      let sift = cur, sift1 = cur - 1;
+      if (lt(arr[sift], arr[sift1])) {
+        const tmp = arr[sift];
+        do { arr[sift--] = arr[sift1]; }
+        while (sift !== begin && lt(tmp, arr[--sift1]));
+        arr[sift] = tmp;
+      }
+    }
+  }
+
+  // Assumes *(begin - 1) ≤ any element in [begin, end) — skips the begin guard.
+  function unguardedInsertionSort(begin: number, end: number) {
+    if (begin === end) return;
+    for (let cur = begin + 1; cur < end; cur++) {
+      let sift = cur, sift1 = cur - 1;
+      if (lt(arr[sift], arr[sift1])) {
+        const tmp = arr[sift];
+        do { arr[sift--] = arr[sift1]; }
+        while (lt(tmp, arr[--sift1]));
+        arr[sift] = tmp;
+      }
+    }
+  }
+
+  // Returns false (giving up) if more than PARTIAL_INSERTION_SORT_LIMIT element moves were made.
+  function partialInsertionSort(begin: number, end: number): boolean {
+    if (begin === end) return true;
+    let limit = 0;
+    for (let cur = begin + 1; cur < end; cur++) {
+      let sift = cur, sift1 = cur - 1;
+      if (lt(arr[sift], arr[sift1])) {
+        const tmp = arr[sift];
+        do { arr[sift--] = arr[sift1]; }
+        while (sift !== begin && lt(tmp, arr[--sift1]));
+        arr[sift] = tmp;
+        limit += cur - sift;
+      }
+      if (limit > PARTIAL_INSERTION_SORT_LIMIT) return false;
+    }
+    return true;
+  }
+
+  function sort2(a: number, b: number) {
+    if (lt(arr[b], arr[a])) { const t = arr[a]; arr[a] = arr[b]; arr[b] = t; }
+  }
+  function sort3(a: number, b: number, c: number) { sort2(a, b); sort2(b, c); sort2(a, b); }
+
+  // Right partition: elements equal to the pivot go to the right half.
+  // Returns [pivotPos, alreadyPartitioned].
+  function partitionRight(begin: number, end: number): [number, boolean] {
+    const pivot = arr[begin];
+    let first = begin, last = end;
+    while (lt(arr[++first], pivot));
+    if (first - 1 === begin) while (first < last && !lt(arr[--last], pivot));
+    else                      while (                !lt(arr[--last], pivot));
+    const alreadyPartitioned = first >= last;
+    while (first < last) {
+      const t = arr[first]; arr[first] = arr[last]; arr[last] = t;
+      while (lt(arr[++first], pivot));
+      while (!lt(arr[--last], pivot));
+    }
+    const pivotPos = first - 1;
+    arr[begin] = arr[pivotPos];
+    arr[pivotPos] = pivot;
+    return [pivotPos, alreadyPartitioned];
+  }
+
+  // Left partition: elements equal to the pivot go to the left — used only when
+  // the pivot equals the predecessor (lots-of-duplicates case).
+  function partitionLeft(begin: number, end: number): number {
+    const pivot = arr[begin];
+    let first = begin, last = end;
+    while (lt(pivot, arr[--last]));
+    if (last + 1 === end) while (first < last && !lt(pivot, arr[++first]));
+    else                   while (                !lt(pivot, arr[++first]));
+    while (first < last) {
+      const t = arr[first]; arr[first] = arr[last]; arr[last] = t;
+      while (lt(pivot, arr[--last]));
+      while (!lt(pivot, arr[++first]));
+    }
+    const pivotPos = last;
+    arr[begin] = arr[pivotPos];
+    arr[pivotPos] = pivot;
+    return pivotPos;
+  }
+
+  // Heapsort guarantees O(n log n) when the bad-partition budget is exhausted.
+  function heapify(end: number, root: number, base: number) {
+    let lg = root;
+    const l = 2 * root + 1, r = 2 * root + 2;
+    if (l < end && arr[base + l] > arr[base + lg]) lg = l;
+    if (r < end && arr[base + r] > arr[base + lg]) lg = r;
+    if (lg !== root) {
+      const t = arr[base + root]; arr[base + root] = arr[base + lg]; arr[base + lg] = t;
+      heapify(end, lg, base);
+    }
+  }
+  function heapSortRange(begin: number, end: number) {
+    const len = end - begin;
+    for (let i = (len >> 1) - 1; i >= 0; i--) heapify(len, i, begin);
+    for (let i = len - 1; i > 0; i--) {
+      const t = arr[begin]; arr[begin] = arr[begin + i]; arr[begin + i] = t;
+      heapify(i, 0, begin);
+    }
+  }
+
+  function loop(begin: number, end: number, badAllowed: number, leftmost: boolean) {
+    while (true) {
+      const size = end - begin;
+
+      if (size < INSERTION_SORT_THRESHOLD) {
+        if (leftmost) insertionSort(begin, end);
+        else unguardedInsertionSort(begin, end);
+        return;
+      }
+
+      const s2 = size >> 1;
+      if (size > NINTHER_THRESHOLD) {
+        // Pseudomedian of 9 (Tukey's ninther): three sort3s plus a final sort3
+        // of the three medians, then swap into [begin].
+        sort3(begin, begin + s2, end - 1);
+        sort3(begin + 1, begin + (s2 - 1), end - 2);
+        sort3(begin + 2, begin + (s2 + 1), end - 3);
+        sort3(begin + (s2 - 1), begin + s2, begin + (s2 + 1));
+        const t = arr[begin]; arr[begin] = arr[begin + s2]; arr[begin + s2] = t;
+      } else {
+        sort3(begin + s2, begin, end - 1);
+      }
+
+      // Equal-element fast path: if the pivot equals its predecessor, the left
+      // sub-array is all equal and already sorted — partition equals to the left
+      // and recurse only on the right.
+      if (!leftmost && !lt(arr[begin - 1], arr[begin])) {
+        begin = partitionLeft(begin, end) + 1;
+        continue;
+      }
+
+      const [pivotPos, alreadyPartitioned] = partitionRight(begin, end);
+      const lSize = pivotPos - begin;
+      const rSize = end - (pivotPos + 1);
+      const highlyUnbalanced = lSize < (size >> 3) || rSize < (size >> 3);
+
+      if (highlyUnbalanced) {
+        if (--badAllowed === 0) { heapSortRange(begin, end); return; }
+
+        // Shuffle a few elements to break adversarial patterns.
+        if (lSize >= INSERTION_SORT_THRESHOLD) {
+          const q = lSize >> 2;
+          const t1 = arr[begin]; arr[begin] = arr[begin + q]; arr[begin + q] = t1;
+          const t2 = arr[pivotPos - 1]; arr[pivotPos - 1] = arr[pivotPos - q]; arr[pivotPos - q] = t2;
+          if (lSize > NINTHER_THRESHOLD) {
+            const t3 = arr[begin + 1]; arr[begin + 1] = arr[begin + q + 1]; arr[begin + q + 1] = t3;
+            const t4 = arr[begin + 2]; arr[begin + 2] = arr[begin + q + 2]; arr[begin + q + 2] = t4;
+            const t5 = arr[pivotPos - 2]; arr[pivotPos - 2] = arr[pivotPos - (q + 1)]; arr[pivotPos - (q + 1)] = t5;
+            const t6 = arr[pivotPos - 3]; arr[pivotPos - 3] = arr[pivotPos - (q + 2)]; arr[pivotPos - (q + 2)] = t6;
+          }
+        }
+        if (rSize >= INSERTION_SORT_THRESHOLD) {
+          const q = rSize >> 2;
+          const t1 = arr[pivotPos + 1]; arr[pivotPos + 1] = arr[pivotPos + 1 + q]; arr[pivotPos + 1 + q] = t1;
+          const t2 = arr[end - 1]; arr[end - 1] = arr[end - q]; arr[end - q] = t2;
+          if (rSize > NINTHER_THRESHOLD) {
+            const t3 = arr[pivotPos + 2]; arr[pivotPos + 2] = arr[pivotPos + 2 + q]; arr[pivotPos + 2 + q] = t3;
+            const t4 = arr[pivotPos + 3]; arr[pivotPos + 3] = arr[pivotPos + 3 + q]; arr[pivotPos + 3 + q] = t4;
+            const t5 = arr[end - 2]; arr[end - 2] = arr[end - (1 + q)]; arr[end - (1 + q)] = t5;
+            const t6 = arr[end - 3]; arr[end - 3] = arr[end - (2 + q)]; arr[end - (2 + q)] = t6;
+          }
+        }
+      } else {
+        // Decently balanced + already partitioned + cheap to finish via insertion
+        // sort → bail out early. This is the O(n) best case for already-sorted input.
+        if (alreadyPartitioned
+            && partialInsertionSort(begin, pivotPos)
+            && partialInsertionSort(pivotPos + 1, end)) return;
+      }
+
+      // Recurse on the left, tail-call on the right (bounded stack depth).
+      loop(begin, pivotPos, badAllowed, leftmost);
+      begin = pivotPos + 1;
+      leftmost = false;
+    }
+  }
+
+  if (arr.length > 1) loop(0, arr.length, Math.floor(Math.log2(arr.length)), true);
+  return arr;
+}
+
 function introSort(input: number[]): number[] {
   const arr = [...input];
   const n = arr.length;
@@ -1178,6 +1392,7 @@ function timSortJS(input: number[]): number[] {
 export const SORT_FNS: Record<string, (arr: number[]) => number[]> = {
   logos:     logosSort,
   adaptive:  adaptiveSort,
+  pdqsort:   pdqSort,
   introsort: introSort,
   timsort:   (arr) => [...arr].sort((a, b) => a - b),
   "timsort-js": timSortJS,

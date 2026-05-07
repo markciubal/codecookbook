@@ -376,6 +376,28 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
     ],
     quote: { text: "The art of sorting is to do as little work as possible.", attribution: "Jon Bentley" },
   },
+  pdqsort: {
+    name: "Pattern-Defeating Quicksort",
+    slug: "pdqsort",
+    timeComplexity: "O(n log n)",
+    spaceComplexity: "O(log n)",
+    stable: false,
+    description:
+      "Pattern-defeating quicksort by Orson Peters (2021). An introsort hybrid hardened against adversarial input. Median-of-3 pivot for ≤128 elements, pseudomedian-of-9 (Tukey's ninther) above. Switches to heapsort once log₂(n) bad partitions occur, guaranteeing O(n log n). Detects already-sorted regions (partial insertion sort, gives up after 8 moves). Handles many-equal-elements input in O(n) by routing equals to the left half. On highly unbalanced partitions it shuffles a few elements to defeat patterns. Used as the default sort in Rust's std and Boost.Sort.",
+    comparisonNote: "Made {comparisons} comparisons — pdqsort recognises sorted prefixes, equal-key clusters, and adversarial patterns; only resorts to heapsort when nothing else works.",
+    pseudocode: [
+      "if size < 24: insertionSort",
+      "size > 128: pivot = ninther(9)  else median-of-3",
+      "if pivot equals predecessor: partition_left (group equals)",
+      "[pivotPos, alreadyPartitioned] = partition_right(begin, end)",
+      "if highly unbalanced (lSize<size/8 || rSize<size/8):",
+      "  if --bad_allowed == 0: heapsort // O(n log n) guarantee",
+      "  shuffle a few elements to defeat patterns",
+      "else if alreadyPartitioned: partial_insertion_sort // O(n) best",
+      "recurse left, tail-call right",
+    ],
+    quote: { text: "Pattern-defeating quicksort: best of all worlds.", attribution: "Orson Peters (2021)" },
+  },
   timsort: {
     name: "Tim Sort",
     slug: "timsort",
@@ -1494,6 +1516,11 @@ export function getLogosSortSteps(arr: number[], p: LogosParams = DEFAULT_LOGOS_
   const depthLimit = p.depthMult * Math.floor(Math.log2(Math.max(arraySize, 2))) + p.depthAdd;
   const stack: [number, number, number][] = [[0, arraySize - 1, depthLimit]];
 
+  // Initial unsorted snapshot at opCount=0 so the race starts on a clean
+  // frame instead of jumping into the first work step (which paints bars in
+  // a non-default state and looks like work has already happened).
+  step("Ready — array unsorted, no work done yet", -1);
+
   while (stack.length > 0) {
     let [lower, upper, depth] = stack.pop()!;
 
@@ -1519,19 +1546,34 @@ export function getLogosSortSteps(arr: number[], p: LogosParams = DEFAULT_LOGOS_
       for (let k = lower + 1; k <= upper; k++) { if (arr2[k] < minValue) minValue = arr2[k]; if (arr2[k] > maxValue) maxValue = arr2[k]; }
       const valSpan = maxValue - minValue;
       if (Number.isInteger(minValue) && valSpan < subSize * p.countingMult) {
-        // Charge the range scan to comparisons so this step has opCount > 0 — without this,
-        // both the "trigger" step (unsorted) and "result" step (sorted) have opCount=0, causing
-        // findStepForOp to skip past the unsorted state and show the sorted result at race start.
-        comparisons += subSize - 1;
+        // Charge a single comparison so the trigger step has opCount > 0 (otherwise
+        // findStepForOp would conflate it with the initial step). We deliberately
+        // do NOT charge the full range-scan cost here — that would create a large
+        // op-count gap between the initial step and the trigger, leaving the race
+        // visually frozen for ~n ticks before any animation begins. Charging 1
+        // keeps the timeline tight so each placement step animates smoothly.
+        comparisons += 1;
         const ov: Partial<Record<number, BarState>> = {};
         for (let k = lower; k <= upper; k++) ov[k] = "comparing";
         step(`Counting sort: range ${minValue}–${maxValue}, span ${valSpan + 1} < ${subSize * p.countingMult} — values are dense enough to count instead of compare`, 1, ov);
+
+        // Build the count buckets
         const counts = new Array(valSpan + 1).fill(0);
         for (let k = lower; k <= upper; k++) counts[arr2[k] - minValue]++;
-        let k = lower;
-        for (let v = 0; v <= valSpan; v++) { while (counts[v]-- > 0) arr2[k++] = v + minValue; }
-        for (let k = lower; k <= upper; k++) settled.add(k);
-        step(`Counting sort placed [${lower}..${upper}] — no comparisons used; values poured back by address`, 1);
+
+        // Place elements one at a time, emitting a step per placement so the
+        // race visualisation animates the sort instead of jumping to the result.
+        // Each placement charges 1 swap so opCount strictly increases between steps.
+        let writeIdx = lower;
+        for (let v = 0; v <= valSpan; v++) {
+          while (counts[v]-- > 0) {
+            arr2[writeIdx] = v + minValue;
+            settled.add(writeIdx);
+            swaps++;
+            step(`Counting sort: placing ${v + minValue} at index ${writeIdx}`, 1, { [writeIdx]: "sorted" });
+            writeIdx++;
+          }
+        }
         break;
       }
 
@@ -2086,6 +2128,218 @@ export function getAdaptiveSortSteps(arr: number[]): SortStep[] {
   return steps;
 }
 
+/*
+ * pdqsort step generator — visualiser-friendly version.
+ *
+ * Mirrors the real pdqsort algorithm (insertion sort under threshold,
+ * median-of-3 / ninther pivot, heapsort fallback at depth limit, equal-elements
+ * fast path, partial-insertion-sort early-out). Thresholds are smaller than
+ * production so the branches are reachable at typical race sizes (n=50–500).
+ */
+export function getPdqSortSteps(arr: number[]): SortStep[] {
+  const a = [...arr];
+  const n = a.length;
+  const steps: SortStep[] = [];
+  const sorted = new Set<number>();
+  let cmp = 0, swp = 0;
+
+  const INSERT = 8;            // insertion-sort threshold (24 in production)
+  const NINTHER = 32;          // ninther threshold (128 in production)
+  const PARTIAL_LIMIT = 8;
+
+  function makeStatesLocal(ov: Partial<Record<number, BarState>> = {}): BarState[] {
+    return Array.from({ length: n }, (_, i) => ov[i] ?? (sorted.has(i) ? "sorted" : "default"));
+  }
+  function push(ov: Partial<Record<number, BarState>>, desc: string, line: number) {
+    steps.push({ array: [...a], states: makeStatesLocal(ov), description: desc, comparisons: cmp, swaps: swp, pseudocodeLine: line });
+  }
+
+  function ins(begin: number, end: number) {
+    for (let cur = begin + 1; cur < end; cur++) {
+      let sift = cur, sift1 = cur - 1;
+      cmp++;
+      if (a[sift] < a[sift1]) {
+        push({ [sift]: "comparing", [sift1]: "comparing" }, `Insertion: ${a[sift]} < ${a[sift1]}, sift left`, 0);
+        const tmp = a[sift];
+        do {
+          a[sift--] = a[sift1];
+          swp++;
+        } while (sift !== begin && (cmp++, tmp < a[--sift1]));
+        a[sift] = tmp;
+        push({ [sift]: "swapping" }, `Insertion: placed ${tmp} at ${sift}`, 0);
+      }
+    }
+  }
+
+  function partialIns(begin: number, end: number): boolean {
+    let limit = 0;
+    for (let cur = begin + 1; cur < end; cur++) {
+      let sift = cur, sift1 = cur - 1;
+      cmp++;
+      if (a[sift] < a[sift1]) {
+        const tmp = a[sift];
+        do {
+          a[sift--] = a[sift1];
+          swp++;
+        } while (sift !== begin && (cmp++, tmp < a[--sift1]));
+        a[sift] = tmp;
+        limit += cur - sift;
+      }
+      if (limit > PARTIAL_LIMIT) return false;
+    }
+    push({}, "Partial insertion sort succeeded — already nearly sorted", 7);
+    return true;
+  }
+
+  function sort2(i: number, j: number) {
+    cmp++;
+    if (a[j] < a[i]) { const t = a[i]; a[i] = a[j]; a[j] = t; swp++; }
+  }
+  function sort3(i: number, j: number, k: number) { sort2(i, j); sort2(j, k); sort2(i, j); }
+
+  // Heapsort fallback
+  function heapify(end: number, root: number, base: number) {
+    let lg = root;
+    const l = 2 * root + 1, r = 2 * root + 2;
+    if (l < end) { cmp++; if (a[base + l] > a[base + lg]) lg = l; }
+    if (r < end) { cmp++; if (a[base + r] > a[base + lg]) lg = r; }
+    if (lg !== root) {
+      const t = a[base + root]; a[base + root] = a[base + lg]; a[base + lg] = t;
+      swp++;
+      heapify(end, lg, base);
+    }
+  }
+  function heapSortRange(begin: number, end: number) {
+    push({}, `Bad-partition budget exhausted — heapsort [${begin}..${end - 1}]`, 5);
+    const len = end - begin;
+    for (let i = (len >> 1) - 1; i >= 0; i--) heapify(len, i, begin);
+    for (let i = len - 1; i > 0; i--) {
+      const t = a[begin]; a[begin] = a[begin + i]; a[begin + i] = t;
+      swp++;
+      heapify(i, 0, begin);
+    }
+    for (let i = begin; i < end; i++) sorted.add(i);
+    push({}, `Heapsort placed [${begin}..${end - 1}]`, 5);
+  }
+
+  function partitionRight(begin: number, end: number): [number, boolean] {
+    const pivot = a[begin];
+    let first = begin, last = end;
+    while ((cmp++, a[++first] < pivot));
+    if (first - 1 === begin) while (first < last && (cmp++, !(a[--last] < pivot)));
+    else                      while (                 (cmp++, !(a[--last] < pivot)));
+    const alreadyPartitioned = first >= last;
+    while (first < last) {
+      const t = a[first]; a[first] = a[last]; a[last] = t;
+      swp++;
+      while ((cmp++, a[++first] < pivot));
+      while ((cmp++, !(a[--last] < pivot)));
+    }
+    const pivotPos = first - 1;
+    a[begin] = a[pivotPos]; a[pivotPos] = pivot;
+    swp++;
+    sorted.add(pivotPos);
+    push({ [pivotPos]: "pivot" }, `Pivot ${pivot} placed at ${pivotPos}`, 8);
+    return [pivotPos, alreadyPartitioned];
+  }
+
+  function partitionLeft(begin: number, end: number): number {
+    const pivot = a[begin];
+    let first = begin, last = end;
+    while ((cmp++, pivot < a[--last]));
+    if (last + 1 === end) while (first < last && (cmp++, !(pivot < a[++first])));
+    else                   while (                 (cmp++, !(pivot < a[++first])));
+    while (first < last) {
+      const t = a[first]; a[first] = a[last]; a[last] = t;
+      swp++;
+      while ((cmp++, pivot < a[--last]));
+      while ((cmp++, !(pivot < a[++first])));
+    }
+    const pivotPos = last;
+    a[begin] = a[pivotPos]; a[pivotPos] = pivot;
+    swp++;
+    sorted.add(pivotPos);
+    push({ [pivotPos]: "pivot" }, `Equal-elements path: pivot ${pivot} placed at ${pivotPos}`, 3);
+    return pivotPos;
+  }
+
+  function loop(begin: number, end: number, badAllowed: number, leftmost: boolean) {
+    while (true) {
+      const size = end - begin;
+      if (size < INSERT) {
+        if (size > 1) {
+          push({}, `Small subarray [${begin}..${end - 1}] — insertion sort`, 0);
+          ins(begin, end);
+        }
+        for (let i = begin; i < end; i++) sorted.add(i);
+        return;
+      }
+
+      const s2 = size >> 1;
+      if (size > NINTHER) {
+        push({ [begin]: "comparing", [begin + s2]: "comparing", [end - 1]: "comparing" }, `Pseudomedian-of-9 (ninther) for size ${size}`, 1);
+        sort3(begin, begin + s2, end - 1);
+        sort3(begin + 1, begin + (s2 - 1), end - 2);
+        sort3(begin + 2, begin + (s2 + 1), end - 3);
+        sort3(begin + (s2 - 1), begin + s2, begin + (s2 + 1));
+        const t = a[begin]; a[begin] = a[begin + s2]; a[begin + s2] = t;
+        swp++;
+      } else {
+        push({ [begin]: "comparing", [begin + s2]: "comparing", [end - 1]: "comparing" }, `Median-of-3 pivot for [${begin}..${end - 1}]`, 1);
+        sort3(begin + s2, begin, end - 1);
+      }
+
+      if (!leftmost) {
+        cmp++;
+        if (!(a[begin - 1] < a[begin])) {
+          push({ [begin - 1]: "comparing", [begin]: "comparing" }, "Pivot equals predecessor — group equals to the left", 2);
+          begin = partitionLeft(begin, end) + 1;
+          continue;
+        }
+      }
+
+      const [pivotPos, alreadyPartitioned] = partitionRight(begin, end);
+      const lSize = pivotPos - begin;
+      const rSize = end - (pivotPos + 1);
+      const unbalanced = lSize < (size >> 3) || rSize < (size >> 3);
+
+      if (unbalanced) {
+        if (--badAllowed === 0) { heapSortRange(begin, end); return; }
+        push({}, `Highly unbalanced (l=${lSize}, r=${rSize}) — shuffling to defeat patterns`, 6);
+        // Shuffle a few elements (visualizer-simplified — single quartile swap)
+        if (lSize >= INSERT) {
+          const q = Math.max(1, lSize >> 2);
+          const t = a[begin]; a[begin] = a[begin + q]; a[begin + q] = t; swp++;
+        }
+        if (rSize >= INSERT) {
+          const q = Math.max(1, rSize >> 2);
+          const t = a[pivotPos + 1]; a[pivotPos + 1] = a[pivotPos + 1 + q]; a[pivotPos + 1 + q] = t; swp++;
+        }
+      } else if (alreadyPartitioned) {
+        // Try partial insertion sort early-out (visualizer-simplified — both halves)
+        if (partialIns(begin, pivotPos) && partialIns(pivotPos + 1, end)) {
+          for (let i = begin; i < end; i++) sorted.add(i);
+          push({}, "Both halves finished via partial insertion sort", 7);
+          return;
+        }
+      }
+
+      loop(begin, pivotPos, badAllowed, leftmost);
+      begin = pivotPos + 1;
+      leftmost = false;
+    }
+  }
+
+  // Initial unsorted snapshot
+  steps.push({ array: [...a], states: makeStatesLocal(), description: "Ready — array unsorted", comparisons: 0, swaps: 0, pseudocodeLine: -1 });
+
+  if (n > 1) loop(0, n, Math.max(1, Math.floor(Math.log2(n))), true);
+  for (let i = 0; i < n; i++) sorted.add(i);
+  steps.push({ array: [...a], states: Array(n).fill("sorted"), description: "Array fully sorted!", comparisons: cmp, swaps: swp, pseudocodeLine: -1 });
+
+  return steps;
+}
+
 export function getSteps(algorithm: SortAlgorithm, arr: number[]): SortStep[] {
   switch (algorithm) {
     case "bubble":
@@ -2131,6 +2385,8 @@ export function getSteps(algorithm: SortAlgorithm, arr: number[]): SortStep[] {
       return getIntroSortSteps(arr);
     case "adaptive":
       return getAdaptiveSortSteps(arr);
+    case "pdqsort":
+      return getPdqSortSteps(arr);
   }
 }
 
