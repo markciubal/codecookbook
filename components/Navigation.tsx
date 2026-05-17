@@ -340,20 +340,11 @@ export default function Navigation() {
           </div>
         </Link>
 
-        <div className="mx-4 mb-4" style={{ height: 1, background: "var(--color-border)" }} />
-
-        <nav className="flex-1 px-2">
-          <SearchBox value={searchQuery} onChange={setSearchQuery} />
-          <div className="mx-1 mb-3">
-            <LevelSelector />
-          </div>
-          <NavItems pathname={pathname} query={searchQuery} />
-        </nav>
-
-        <div className="px-4 pb-4 pt-3" style={{ borderTop: "1px solid var(--color-border)" }}>
-          <DonateLink />
+        {/* Theme toggle + Donate + Acknowledgements — pinned to the top of the sidebar */}
+        <div className="px-4 pb-3" style={{ borderBottom: "1px solid var(--color-border)" }}>
+          <ThemeToggle />
           <div className="mt-2">
-            <ThemeToggle />
+            <DonateLink />
           </div>
           <p className="text-xs text-center mt-3" style={{ color: "var(--color-muted)", lineHeight: 1.7 }}>
             Inspired by{" "}
@@ -367,6 +358,14 @@ export default function Navigation() {
               style={{ color: "var(--color-accent)", textDecoration: "underline" }}>Timo Bingmann</a>
           </p>
         </div>
+
+        <nav className="flex-1 px-2 pt-3">
+          <SearchBox value={searchQuery} onChange={setSearchQuery} />
+          <div className="mx-1 mb-3">
+            <LevelSelector />
+          </div>
+          <NavItems pathname={pathname} query={searchQuery} />
+        </nav>
       </aside>
 
       {/* ── Mobile top bar (in-flow, not fixed — nothing gets covered) ── */}
@@ -434,20 +433,20 @@ export default function Navigation() {
               </button>
             </div>
 
+            {/* Theme + Donate — pinned to top */}
+            <div className="px-4 pb-3 flex flex-col gap-2" style={{ borderBottom: "1px solid var(--color-border)" }}>
+              <ThemeToggle />
+              <DonateLink onClick={close} />
+            </div>
+
             {/* Nav items */}
-            <nav className="flex-1 px-2 py-3">
+            <nav className="flex-1 px-2 pt-3">
               <SearchBox value={searchQuery} onChange={setSearchQuery} />
               <div className="mx-1 mb-3">
                 <LevelSelector />
               </div>
               <NavItems pathname={pathname} onClick={close} query={searchQuery} />
             </nav>
-
-            {/* Donate + theme */}
-            <div className="px-4 py-4 flex flex-col gap-2" style={{ borderTop: "1px solid var(--color-border)" }}>
-              <DonateLink onClick={close} />
-              <ThemeToggle />
-            </div>
           </div>
         </>
       )}

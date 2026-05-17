@@ -15,6 +15,157 @@ const SLOW_THRESHOLD = 5_000;
 const _UNLIMITED_BASE = new Set(["logos", "timsort", "timsort-js", "introsort", "adaptive", "pdqsort", "merge", "quick", "heap"]);
 const UNLIMITED_IDS = { has: (id: string) => _UNLIMITED_BASE.has(id) || /^logos-custom-\d+$/.test(id) };
 
+/*
+ * Re-instantiate a sort function from its own source so it gets a *fresh* set of
+ * inline caches every benchmark run.
+ *
+ * Why this exists: the functions in SORT_FNS are shared module-level closures.
+ * V8 specializes them based on the element kind they're first called with
+ * (SMI / double / string). Running one data type then another makes the
+ * comparison + element-kind sites go megamorphic — and V8 never re-specializes
+ * back down. The result: after a string benchmark, integer benchmarks stay
+ * permanently deoptimized for the rest of the page session.
+ *
+ * `fn.toString()` returns the *compiled JS* source (TypeScript types already
+ * stripped by tsc). Every sort function in benchmark.ts is self-contained — it
+ * defines all of its helpers inside its own body and references no module-level
+ * symbols — so `new Function` can re-evaluate it in global scope cleanly. If a
+ * function ever does reference module scope, the rebuild throws and we fall
+ * back to the shared closure.
+ */
+// Shared shape for per-algo before/after proof samples. Values can be strings
+// when dataType === "string"; the renderer dispatches on `dataType` to format.
+type SampleProof = {
+  before: (number | string)[];
+  after:  (number | string)[];
+  n: number;
+  dataType: DataType;
+  scenario?: BenchmarkScenario;
+  // Summary stats included so the proof panel can self-describe the run that
+  // produced it without having to re-derive from the sample.
+  minVal?: number | string;
+  maxVal?: number | string;
+  distinctCount?: number;
+  // Sortedness verification result, computed at capture time so other panels
+  // (rankings, mini-cards, math-panel header) can surface failures without
+  // re-deriving from the sample.
+  failed: boolean;
+  badIdx?: number; // index of the first out-of-order element in `after`
+};
+
+// Build a before/after proof for one algorithm. Pulls 20 evenly-spaced values
+// from the input (before-sort) and the same positions from a sorted copy.
+// Shared by the worker-isolation path (one-off pre-submit capture) and the
+// main-thread timed path so proofs appear in both modes.
+function captureSampleProof(
+  input: readonly (number | string)[],
+  fn: (a: unknown[]) => unknown[],
+  meta: { n: number; dataType: DataType; scenario?: BenchmarkScenario },
+): SampleProof {
+  const SAMPLE = 20;
+  const stride = Math.max(1, Math.floor(input.length / SAMPLE));
+  const before: (number | string)[] = Array.from({ length: SAMPLE }, (_, i) => input[i * stride]);
+  const proofCopy = [...input];
+  // If a custom sort throws here we still want to record a proof so the user
+  // can see the failure annotated. Mark `after` as the unsorted input so the
+  // verifier catches the breakage downstream.
+  let sortedArr: (number | string)[];
+  try {
+    const sortedResult = fn(proofCopy as unknown[]);
+    sortedArr = (sortedResult ?? proofCopy) as (number | string)[];
+  } catch {
+    sortedArr = proofCopy;
+  }
+  const after: (number | string)[] = Array.from({ length: SAMPLE }, (_, i) => sortedArr[i * stride]);
+  // Summary stats over the FULL input (not just the sample) — gives the user
+  // accurate context about what was actually fed to the sort.
+  let minVal: number | string | undefined;
+  let maxVal: number | string | undefined;
+  const seen = new Set<unknown>();
+  for (const v of input) {
+    seen.add(v);
+    if (minVal === undefined || (v as number | string) < minVal) minVal = v as number | string;
+    if (maxVal === undefined || (v as number | string) > maxVal) maxVal = v as number | string;
+  }
+  // Sortedness verification: every adjacent pair in `after` must be non-decreasing.
+  // The samples are evenly-spaced positions from the fully sorted output, so
+  // monotonicity at the sampled positions is necessary (though not sufficient)
+  // for correctness — a sort that broke between sampled positions could slip past,
+  // but any sort that returns the input unchanged, reversed, or with dropped
+  // chunks will fail this check.
+  let badIdx: number | undefined;
+  for (let i = 1; i < after.length; i++) {
+    if (after[i] < after[i - 1]) { badIdx = i; break; }
+  }
+  return {
+    before, after,
+    n: meta.n, dataType: meta.dataType, scenario: meta.scenario,
+    minVal, maxVal, distinctCount: seen.size,
+    failed: badIdx !== undefined, badIdx,
+  };
+}
+
+/*
+ * Build and validate a user-supplied custom sort function.
+ *
+ * Returns the function only if it survives:
+ *   1. parse — new Function(source) must succeed
+ *   2. type  — the evaluated expression must be a function (typeof === "function")
+ *   3. smoke — calling it on [3, 1, 2] must produce a permutation in sorted order
+ *
+ * Returns null on any failure. Errors are written to `onError` so the editor
+ * banner can show what went wrong. Numeric smoke is intentional: if a user
+ * tries to benchmark string-sorting custom code, this will reject it and they
+ * can edit/disable — better than a silent crash mid-run.
+ */
+function buildCustomFn(
+  code: string,
+  onError?: (msg: string) => void,
+): ((arr: unknown[]) => unknown[]) | null {
+  let raw: unknown;
+  try {
+    raw = new Function("return (" + code + ")")();
+  } catch (e) {
+    onError?.(`Custom sort failed to parse: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+  if (typeof raw !== "function") {
+    onError?.(`Custom sort must be a function. Got ${typeof raw}.`);
+    return null;
+  }
+  const fn = raw as (arr: unknown[]) => unknown[];
+  try {
+    const probe = fn([3, 1, 2]) as number[] | undefined;
+    // Custom fn may either mutate in place (no return) or return a new array.
+    // We don't enforce one or the other — just make sure SOMETHING got sorted.
+    const result = (probe ?? [3, 1, 2]) as number[];
+    if (result.length !== 3) {
+      onError?.(`Custom sort produced ${result.length}-element output (expected 3).`);
+      return null;
+    }
+  } catch (e) {
+    onError?.(`Custom sort threw during smoke test: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+  return fn;
+}
+
+function freshSortFn(original: (arr: number[]) => number[]): (arr: number[]) => number[] {
+  try {
+    const rebuilt = new Function("return (" + original.toString() + ")")() as (arr: number[]) => number[];
+    // Smoke-test on a tiny array: catches the case where the source references a
+    // module-level symbol that doesn't exist in global scope (would throw at call
+    // time, not construction time). If it misbehaves, fall back to the shared fn.
+    const probe = rebuilt([3, 1, 2]);
+    if (!Array.isArray(probe) || probe.length !== 3 || probe[0] !== 1 || probe[1] !== 2 || probe[2] !== 3) {
+      return original;
+    }
+    return rebuilt;
+  } catch {
+    return original;
+  }
+}
+
 // Palette for numbered Logos custom variants
 const LC_COLORS = ["#555555", "#8B6000", "#2E4A7A", "#3D6B3D", "#6B3D6B", "#8B3333"];
 
@@ -684,6 +835,8 @@ const MEDIUM_LIMITS: Record<string, { threshold: number; reason: string }> = {
   radix:    { threshold: 1_000_000, reason: "Multiple O(n) auxiliary arrays per digit pass — memory-heavy above 1M" },
   bucket:   { threshold: 500_000,   reason: "Worst-case O(n²) when buckets fill unevenly; unreliable above 500k on non-uniform data" },
 };
+// Legacy fixed timeout — superseded by per-component state (`timeoutEnabled`/`timeoutSec`).
+// Kept as a fallback default referenced anywhere that still hardcodes the bound.
 const TIMEOUT_MS = 10_000;
 
 const ALGO_GROUPS = [
@@ -2111,13 +2264,119 @@ function Chart3D({
 // ── Mathematical properties panel ──────────────────────────────────────────────
 // Shows fitted equation, derivative (marginal cost), and cumulative work integral per algorithm.
 
+// Skeleton preview of the right-pane sections that will appear after the benchmark runs.
+// Each row is a labeled placeholder block showing the user what's coming:
+//   - performance curve chart
+//   - winner / rankings table
+//   - per-algorithm mini cards
+//   - mathematical / space complexity analysis
+// The shimmer animation lives in globals.css (.cc-skeleton).
+function ResultsSkeleton({ algoCount }: { algoCount: number }) {
+  const cards = Math.min(6, Math.max(2, algoCount));
+  const bar = (h: number, w: string = "100%") => (
+    <div className="cc-skeleton" style={{ height: h, width: w, borderRadius: 4 }} />
+  );
+  const sectionLabel = (text: string) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+      <span style={{ width: 4, height: 4, borderRadius: "50%", background: "var(--color-muted)", opacity: 0.6 }} />
+      <span style={{ fontSize: 8, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--color-muted)" }}>
+        {text}
+      </span>
+      <span style={{ fontSize: 8, color: "var(--color-muted)", opacity: 0.5, fontFamily: "monospace" }}>
+        — appears after the run
+      </span>
+    </div>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Performance curve placeholder */}
+      <div style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)", borderRadius: 10, padding: 14 }}>
+        {sectionLabel("Performance curve")}
+        <div style={{ position: "relative", height: 180, marginTop: 4 }}>
+          {/* y-axis ticks */}
+          <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 28, display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
+            {[0, 1, 2, 3, 4].map(i => bar(6, "70%").key ?? <div key={i} className="cc-skeleton" style={{ height: 6, width: "70%", borderRadius: 3 }} />)}
+          </div>
+          {/* fake curve lines as diagonal bars */}
+          <div style={{ position: "absolute", left: 34, right: 0, top: 0, bottom: 18, display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 4 }}>
+            <div className="cc-skeleton" style={{ height: 2, width: "85%", borderRadius: 2 }} />
+            <div className="cc-skeleton" style={{ height: 2, width: "70%", borderRadius: 2 }} />
+            <div className="cc-skeleton" style={{ height: 2, width: "55%", borderRadius: 2 }} />
+            <div className="cc-skeleton" style={{ height: 2, width: "40%", borderRadius: 2 }} />
+          </div>
+          {/* x-axis ticks */}
+          <div style={{ position: "absolute", left: 34, right: 0, bottom: 0, display: "flex", justifyContent: "space-between" }}>
+            {Array.from({ length: 5 }).map((_, i) => (
+              <div key={i} className="cc-skeleton" style={{ height: 6, width: 28, borderRadius: 3 }} />
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Winner / rankings placeholder */}
+      <div style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)", borderRadius: 10, padding: 14 }}>
+        {sectionLabel("Rankings")}
+        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+          {Array.from({ length: cards }).map((_, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <div className="cc-skeleton" style={{ width: 10, height: 10, borderRadius: "50%" }} />
+              <div className="cc-skeleton" style={{ height: 9, width: `${30 + (i * 7) % 40}%`, borderRadius: 3 }} />
+              <div style={{ flex: 1 }} />
+              <div className="cc-skeleton" style={{ height: 9, width: 50, borderRadius: 3 }} />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Algorithm mini-card grid placeholder */}
+      <div>
+        {sectionLabel("Per-algorithm cards")}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 8 }}>
+          {Array.from({ length: cards }).map((_, i) => (
+            <div key={i} style={{ background: "var(--color-surface-1)", border: "1px solid var(--color-border)", borderRadius: 7, padding: "8px 10px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 6 }}>
+                <div className="cc-skeleton" style={{ width: 7, height: 7, borderRadius: "50%" }} />
+                <div className="cc-skeleton" style={{ height: 8, flex: 1, borderRadius: 3 }} />
+                <div className="cc-skeleton" style={{ width: 18, height: 18, borderRadius: "50%" }} />
+              </div>
+              <div className="cc-skeleton" style={{ height: 6, width: "70%", borderRadius: 3, marginBottom: 6 }} />
+              <div className="cc-skeleton" style={{ height: 32, width: "100%", borderRadius: 3 }} />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Math / space complexity analysis placeholder */}
+      <div style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)", borderRadius: 10, padding: 14 }}>
+        {sectionLabel("Time & space complexity analysis")}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {Array.from({ length: Math.min(3, cards) }).map((_, i) => (
+            <div key={i} style={{ background: "var(--color-surface-1)", border: "1px solid var(--color-border)", borderRadius: 6, padding: "6px 9px", display: "flex", alignItems: "center", gap: 6 }}>
+              <div className="cc-skeleton" style={{ width: 6, height: 6, borderRadius: "50%" }} />
+              <div className="cc-skeleton" style={{ height: 8, width: 90, borderRadius: 3 }} />
+              <div style={{ flex: 1 }} />
+              <div className="cc-skeleton" style={{ height: 8, width: 36, borderRadius: 3 }} />
+              <div className="cc-skeleton" style={{ height: 8, width: 24, borderRadius: 3 }} />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <p style={{ fontSize: 10, fontFamily: "monospace", color: "var(--color-muted)", textAlign: "center", margin: "4px 0 8px" }}>
+        Click <strong style={{ color: "var(--color-accent)" }}>Run</strong> to populate these sections.
+      </p>
+    </div>
+  );
+}
+
 function MathPanel({
   data, algos, mode, sampleProofs,
 }: {
   data: CurveData;
   algos: string[];
   mode: "time" | "space";
-  sampleProofs?: Record<string, { before: number[]; after: number[]; n: number }>;
+  sampleProofs?: Record<string, SampleProof>;
 }) {
   const [openIds, setOpenIds] = useState<Set<string>>(new Set(algos));
   const toggle = (id: string) => setOpenIds(prev => {
@@ -2165,13 +2424,37 @@ function MathPanel({
           const dotColor = ALGO_COLORS[id] ?? "#888";
           const isOpen   = openIds.has(id);
           return (
-            <div key={id} style={{ background: "var(--color-surface-1)", borderRadius: 6, border: "1px solid var(--color-border)", overflow: "hidden" }}>
+            <div key={id} style={{
+              background: "var(--color-surface-1)",
+              borderRadius: 6,
+              border: `1px solid ${sampleProofs?.[id]?.failed ? "rgba(239,83,80,0.65)" : "var(--color-border)"}`,
+              overflow: "hidden",
+            }}>
               <button onClick={() => toggle(id)} style={{
                 width: "100%", display: "flex", alignItems: "center", gap: 6,
                 padding: "5px 8px", background: "none", border: "none", cursor: "pointer", textAlign: "left",
               }}>
                 <span style={{ width: 6, height: 6, borderRadius: "50%", background: dotColor, flexShrink: 0 }} />
-                <span style={{ fontSize: 10, fontWeight: 600, color: "var(--color-text)", flex: 1 }}>{ALGO_NAMES[id]}</span>
+                <span style={{
+                  fontSize: 10, fontWeight: 600,
+                  color: sampleProofs?.[id]?.failed ? "#ef5350" : "var(--color-text)",
+                  flex: 1,
+                  textDecoration: sampleProofs?.[id]?.failed ? "line-through" : "none",
+                  textDecorationColor: "rgba(239,83,80,0.55)",
+                }}>
+                  {ALGO_NAMES[id]}
+                </span>
+                {sampleProofs?.[id]?.failed && (
+                  <span title={`Sort produced out-of-order output at index ${sampleProofs[id].badIdx} of the sampled positions.`} style={{
+                    fontSize: 7, fontWeight: 700, fontFamily: "monospace",
+                    padding: "1px 5px", borderRadius: 3, whiteSpace: "nowrap",
+                    background: "rgba(239,83,80,0.18)",
+                    border: "1px solid rgba(239,83,80,0.55)",
+                    color: "#ef5350",
+                  }}>
+                    ✗ BROKEN
+                  </span>
+                )}
                 <span style={{ fontSize: 9, fontFamily: "monospace", color: dotColor }}>{fit.label}</span>
                 <span style={{ fontSize: 8, fontFamily: "monospace", color: "var(--color-muted)", marginLeft: 4 }}>R²={r2.toFixed(3)}</span>
                 <ChevronRight size={10} style={{ transform: isOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", color: "var(--color-muted)", flexShrink: 0 }} />
@@ -2261,28 +2544,171 @@ function MathPanel({
                     );
                   })()}
 
-                  {/* Before/After sample — visual proof the sort actually sorts */}
+                  {/* Space complexity sub-section — memory profile alongside the time analysis */}
+                  {(() => {
+                    const pts = (data[id] ?? []).filter(p => !p.timedOut);
+                    if (pts.length === 0) return null;
+                    const sorted = [...pts].sort((a, b) => b.n - a.n);
+                    const largest = sorted[0];
+                    const largestN = largest.n;
+                    const measuredSpace = largest.spaceBytes ?? 0;
+                    const measuredAlloc = largest.allocBytes ?? 0;
+                    const theoretical = theoreticalSpaceBytes(id, largestN);
+                    const inputBytes = largestN * 8; // 64-bit floats
+                    const totalBytes = theoretical + inputBytes;
+                    const auxClass = ALGO_SPACE[id] ?? "—";
+                    const stable = ALGO_STABLE[id];
+                    const online = ALGO_ONLINE[id];
+
+                    // Asymptotic classification: derive expected class from auxClass label
+                    const isInPlace = auxClass === "O(1)" || auxClass.startsWith("O(log");
+                    const bytesPerElem = totalBytes / Math.max(1, largestN);
+
+                    // Cache level the working set falls into at largestN
+                    const cl = cacheLevel(id, largestN);
+
+                    // Fit space curve if there are points with positive space data
+                    const spacePts = pts.filter(p => (p.spaceBytes ?? 0) > 0).map(p => ({ n: p.n, val: p.spaceBytes! }));
+                    const spaceFit = spacePts.length >= 2 ? fitLogLog(spacePts) : null;
+
+                    return (
+                      <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px dashed var(--color-border)" }}>
+                        <p style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-muted)", marginBottom: 6 }}>
+                          Space complexity @ n={fmtN(largestN)}
+                        </p>
+                        <table style={{ fontSize: 9, fontFamily: "monospace", borderCollapse: "collapse", width: "100%" }}>
+                          <tbody>
+                            <tr>
+                              <td style={{ padding: "2px 5px", color: "var(--color-muted)", width: "38%" }}>Aux class</td>
+                              <td style={{ padding: "2px 5px", color: dotColor, textAlign: "right", fontWeight: 600 }}>{auxClass}</td>
+                            </tr>
+                            <tr>
+                              <td style={{ padding: "2px 5px", color: "var(--color-muted)", borderTop: "1px solid var(--color-border)" }} title="Auxiliary memory beyond the input array — extrapolated from algorithm theory">
+                                Aux at n (theoretical)
+                              </td>
+                              <td style={{ padding: "2px 5px", color: "var(--color-text)", textAlign: "right", borderTop: "1px solid var(--color-border)" }}>
+                                {fmtBytes(theoretical)}
+                              </td>
+                            </tr>
+                            {measuredAlloc > 0 && (
+                              <tr>
+                                <td style={{ padding: "2px 5px", color: "var(--color-muted)", borderTop: "1px solid var(--color-border)" }} title="Bytes counted by patched Array methods during the run">
+                                  Aux measured (alloc instrumentation)
+                                </td>
+                                <td style={{ padding: "2px 5px", color: "var(--color-text)", textAlign: "right", borderTop: "1px solid var(--color-border)" }}>
+                                  {fmtBytes(measuredAlloc)}
+                                </td>
+                              </tr>
+                            )}
+                            {measuredSpace > 0 && measuredSpace !== theoretical && (
+                              <tr>
+                                <td style={{ padding: "2px 5px", color: "var(--color-muted)", borderTop: "1px solid var(--color-border)" }} title="V8 performance.memory heap delta; rounds to ~1MB on most builds">
+                                  Heap delta (perf.memory)
+                                </td>
+                                <td style={{ padding: "2px 5px", color: "var(--color-text)", textAlign: "right", borderTop: "1px solid var(--color-border)" }}>
+                                  {fmtBytes(measuredSpace)}
+                                </td>
+                              </tr>
+                            )}
+                            <tr>
+                              <td style={{ padding: "2px 5px", color: "var(--color-muted)", borderTop: "1px solid var(--color-border)" }} title="Input array (n × 8 bytes) + auxiliary">
+                                Total (input + aux)
+                              </td>
+                              <td style={{ padding: "2px 5px", color: "var(--color-text)", textAlign: "right", borderTop: "1px solid var(--color-border)" }}>
+                                {fmtBytes(totalBytes)}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td style={{ padding: "2px 5px", color: "var(--color-muted)", borderTop: "1px solid var(--color-border)" }} title="Total bytes ÷ n — marginal memory cost per element">
+                                Bytes per element
+                              </td>
+                              <td style={{ padding: "2px 5px", color: "var(--color-text)", textAlign: "right", borderTop: "1px solid var(--color-border)" }}>
+                                {bytesPerElem.toFixed(1)} B/elem
+                              </td>
+                            </tr>
+                            <tr>
+                              <td style={{ padding: "2px 5px", color: "var(--color-muted)", borderTop: "1px solid var(--color-border)" }} title="Smallest CPU cache level that fits the working set">
+                                Cache level
+                              </td>
+                              <td style={{ padding: "2px 5px", color: cl.color, textAlign: "right", borderTop: "1px solid var(--color-border)", fontWeight: 600 }}>
+                                {cl.label}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td style={{ padding: "2px 5px", color: "var(--color-muted)", borderTop: "1px solid var(--color-border)" }} title="In-place sorts use O(1) or O(log n) auxiliary memory">
+                                In-place
+                              </td>
+                              <td style={{ padding: "2px 5px", color: "var(--color-text)", textAlign: "right", borderTop: "1px solid var(--color-border)" }}>
+                                {isInPlace ? "yes" : "no"}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td style={{ padding: "2px 5px", color: "var(--color-muted)", borderTop: "1px solid var(--color-border)" }} title="Whether equal keys keep their original relative order">
+                                Stability
+                              </td>
+                              <td style={{ padding: "2px 5px", color: "var(--color-text)", textAlign: "right", borderTop: "1px solid var(--color-border)" }}>
+                                {stable === true ? "stable" : stable === false ? "unstable" : "—"}
+                              </td>
+                            </tr>
+                            {online !== undefined && (
+                              <tr>
+                                <td style={{ padding: "2px 5px", color: "var(--color-muted)", borderTop: "1px solid var(--color-border)" }} title="Whether the sort can accept input one element at a time vs needing the whole array up front">
+                                  Online
+                                </td>
+                                <td style={{ padding: "2px 5px", color: "var(--color-text)", textAlign: "right", borderTop: "1px solid var(--color-border)" }}>
+                                  {online ? "yes (streaming)" : "no (batch)"}
+                                </td>
+                              </tr>
+                            )}
+                            {spaceFit && (
+                              <tr>
+                                <td style={{ padding: "2px 5px", color: "var(--color-muted)", borderTop: "1px solid var(--color-border)" }} title="Log-log fit of measured aux memory across all n">
+                                  Measured aux fit
+                                </td>
+                                <td style={{ padding: "2px 5px", color: dotColor, textAlign: "right", borderTop: "1px solid var(--color-border)" }}>
+                                  ≈ {spaceFit.k.toExponential(2)} · {spaceFit.label}
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Before/After sample — visual proof the sort actually sorts.
+                      Adapts to the dataType the run used (integer, float, or string). */}
                   {sampleProofs?.[id] && (() => {
                     const sp = sampleProofs[id];
-                    const all = [...sp.before, ...sp.after];
+                    const isStr = sp.dataType === "string";
+                    const isFloat = sp.dataType === "float";
+
+                    // Verifier result is computed at capture time and stored on the proof.
+                    const verified = !sp.failed;
+                    const badIdx = sp.badIdx ?? -1;
+
+                    // Numeric bar scaling — only used when values are numeric. For strings
+                    // we use length as the bar metric so the user still sees per-cell shape.
+                    const numericForBars = (v: number | string): number =>
+                      isStr ? (v as string).length : (v as number);
+                    const all = [...sp.before, ...sp.after].map(numericForBars);
                     const maxV = Math.max(...all, 1);
                     const minV = Math.min(...all, 0);
                     const range = Math.max(1, maxV - minV);
-                    // Sortedness verification: every adjacent pair must be non-decreasing.
-                    // Samples are evenly-spaced from the fully sorted output, so monotonicity
-                    // is necessary (though not sufficient) for correctness.
-                    let badIdx = -1;
-                    for (let i = 1; i < sp.after.length; i++) {
-                      if (sp.after[i] < sp.after[i - 1]) { badIdx = i; break; }
-                    }
-                    const verified = badIdx === -1;
-                    const fmtCell = (v: number) =>
-                      Number.isInteger(v) ? v.toString() : v.toFixed(2);
-                    const renderRow = (vals: number[], valueColor: string) => (
+
+                    const fmtCell = (v: number | string): string => {
+                      if (typeof v === "string") {
+                        // Truncate long strings so the row stays readable
+                        return v.length > 6 ? v.slice(0, 5) + "…" : v;
+                      }
+                      if (Number.isInteger(v)) return v.toString();
+                      return v.toFixed(2);
+                    };
+                    const renderRow = (vals: (number | string)[], valueColor: string) => (
                       <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 1 }}>
                         <div style={{ display: "flex", gap: 1, height: 18, alignItems: "flex-end" }}>
                           {vals.map((v, i) => {
-                            const h = ((v - minV) / range) * 16 + 2;
+                            const h = ((numericForBars(v) - minV) / range) * 16 + 2;
                             return (
                               <span key={i}
                                 title={String(v)}
@@ -2303,12 +2729,34 @@ function MathPanel({
                         </div>
                       </div>
                     );
+
+                    // Format the min/max summary depending on type
+                    const fmtSummary = (v: number | string | undefined): string => {
+                      if (v === undefined) return "—";
+                      if (typeof v === "string") return v.length > 8 ? `"${v.slice(0, 7)}…"` : `"${v}"`;
+                      if (Number.isInteger(v)) return v.toString();
+                      return (v as number).toFixed(3);
+                    };
+
+                    // Per-data-type info row (right side of the header)
+                    const typeBadge = (label: string, fg: string, bg: string) => (
+                      <span style={{
+                        fontSize: 7, fontFamily: "monospace", fontWeight: 700,
+                        padding: "1px 5px", borderRadius: 3, letterSpacing: "0.03em",
+                        background: bg, border: `1px solid ${fg}`, color: fg, textTransform: "uppercase",
+                      }}>{label}</span>
+                    );
+
                     return (
                       <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px dashed var(--color-border)" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, flexWrap: "wrap" }}>
                           <span style={{ fontSize: 8, color: "var(--color-muted)", fontFamily: "monospace", flex: 1 }}>
                             sample (every ⌊n/{sp.before.length}⌋th element from n={fmtN(sp.n)})
                           </span>
+                          {isStr  && typeBadge("string", "#64b5f6", "rgba(100,181,246,0.12)")}
+                          {isFloat && typeBadge("float", "#ffb74d", "rgba(255,183,77,0.12)")}
+                          {!isStr && !isFloat && typeBadge("integer", "#7ec88a", "rgba(126,200,138,0.12)")}
+                          {sp.scenario && typeBadge(sp.scenario, "var(--color-muted)", "var(--color-surface-3)")}
                           <span
                             title={verified
                               ? "Sample is in non-decreasing order — sort produced a valid ordering at the sampled positions."
@@ -2326,6 +2774,32 @@ function MathPanel({
                               : `✗ BROKEN — out of order at index ${badIdx}`}
                           </span>
                         </div>
+
+                        {/* Per-run stats summarising what was actually fed in */}
+                        <div style={{ display: "flex", gap: 10, fontSize: 8, fontFamily: "monospace", color: "var(--color-muted)", marginBottom: 6, flexWrap: "wrap" }}>
+                          <span title="Smallest value across the full input">
+                            min <span style={{ color: "var(--color-text)" }}>{fmtSummary(sp.minVal)}</span>
+                          </span>
+                          <span title="Largest value across the full input">
+                            max <span style={{ color: "var(--color-text)" }}>{fmtSummary(sp.maxVal)}</span>
+                          </span>
+                          {sp.distinctCount !== undefined && (
+                            <span title="Number of distinct values across the full input">
+                              distinct <span style={{ color: "var(--color-text)" }}>{sp.distinctCount.toLocaleString()}</span>
+                            </span>
+                          )}
+                          {!isStr && sp.minVal !== undefined && sp.maxVal !== undefined && typeof sp.minVal === "number" && typeof sp.maxVal === "number" && (
+                            <span title="max − min — the value span">
+                              span <span style={{ color: "var(--color-text)" }}>{((sp.maxVal - sp.minVal) as number).toLocaleString()}</span>
+                            </span>
+                          )}
+                          {isStr && (
+                            <span title="Bar heights below use character length, since lexicographic order doesn't map to a single numeric axis.">
+                              <span style={{ color: "var(--color-text)" }}>bar height = length</span>
+                            </span>
+                          )}
+                        </div>
+
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                           <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
                             <span style={{ fontSize: 8, fontFamily: "monospace", color: "var(--color-muted)", width: 38, flexShrink: 0, paddingTop: 5 }}>before</span>
@@ -2625,6 +3099,8 @@ function CurveChart({
   mode = "time",
   onExportReady,
   advanced = false,
+  ghostRuns,
+  ghostMode = false,
 }: {
   data: CurveData;
   sizes: number[];
@@ -2635,6 +3111,10 @@ function CurveChart({
   mode?: "time" | "space" | "ratio" | "space-ratio";
   onExportReady?: (fn: () => void) => void;
   advanced?: boolean;
+  /** Per-algo history of prior runs. Drawn underneath the active curve when
+   *  ghostMode is true, faded by recency (newest = bright, oldest = dim). */
+  ghostRuns?: Record<string, { ts: number; points: { n: number; timeMs: number; meanMs?: number; spaceBytes?: number }[] }[]>;
+  ghostMode?: boolean;
 }) {
   const [locked, setLocked] = useState(true);
   const [expanded, setExpanded] = useState(false);
@@ -3349,6 +3829,53 @@ const overlayBtnBase: React.CSSProperties = btn("secondary", {
         );
       })()}
 
+      {/* Ghost runs — past benchmark results plotted as faded polylines so the
+          user can compare against historical timings. Rendered first so the
+          active curves overlap them. Opacity scales by recency: oldest ≈ 0.05,
+          newest ≈ 0.30. Only the relevant mode is rendered (time vs space). */}
+      {ghostMode && ghostRuns && (
+        <g style={{ pointerEvents: "none" }} clipPath="url(#inner-plot-clip)">
+          {algos.flatMap(id => {
+            const runs = ghostRuns[id];
+            if (!runs || runs.length === 0) return [];
+            const color = ALGO_COLORS[id] ?? "#888";
+            const isHl  = !highlight || highlight === id;
+            const total = runs.length;
+            return runs.map((run, idx) => {
+              // idx=0 is the oldest, idx=total-1 is the newest.
+              // Linear fade from 90% (newest) down toward 5% (oldest), spread
+              // evenly across the stored runs so the relative ordering is
+              // visually obvious even at the full GHOST_MAX of 20 entries.
+              const ageFactor = (idx + 1) / total; // 1/n .. 1
+              const opacity = (0.05 + 0.85 * ageFactor) * (isHl ? 1 : 0.25);
+              // Build the polyline using the ghost run's (n, value) points.
+              const sorted = [...run.points].sort((a, b) => a.n - b.n);
+              const pts: string[] = [];
+              for (const p of sorted) {
+                const val = mode === "space"       ? (p.spaceBytes ?? 0)
+                          : mode === "ratio"       ? (p.n > 1 ? (p.meanMs ?? p.timeMs) / (p.n * Math.log2(p.n)) : 0)
+                          : mode === "space-ratio" ? (p.n > 1 ? (p.spaceBytes ?? 0) / (p.n * Math.log2(p.n)) : 0)
+                          : (p.meanMs ?? p.timeMs);
+                if (val <= 0) continue;
+                pts.push(`${xAt(p.n).toFixed(1)},${yAt(val).toFixed(1)}`);
+              }
+              if (pts.length < 2) return null;
+              return (
+                <polyline
+                  key={`ghost-${id}-${run.ts}`}
+                  points={pts.join(" ")}
+                  fill="none"
+                  stroke={color}
+                  strokeWidth={1}
+                  strokeDasharray="2 2"
+                  opacity={opacity}
+                />
+              );
+            });
+          })}
+        </g>
+      )}
+
       {/* variance error bands — rendered before curves so lines draw on top */}
       {algos.map(id => {
         const pts = [...(data[id] ?? [])].sort((a, b) => a.n - b.n).filter(p => !p.timedOut && p.meanMs != null && p.stdDev != null && p.stdDev > 0);
@@ -3811,7 +4338,7 @@ function Legend({ algos, data }: { algos: string[]; data: CurveData }) {
 function ProofSlider({
   proofs, algos, activeAlgo, onSelect, revealed, curveData,
 }: {
-  proofs: Record<string, { before: number[]; after: number[]; n: number }>;
+  proofs: Record<string, SampleProof>;
   algos: string[];
   activeAlgo: string | null;
   onSelect: (id: string | null) => void;
@@ -3827,7 +4354,10 @@ function ProofSlider({
   const currentId = idx >= 0 ? available[idx] : null;
   const proof = currentId ? proofs[currentId] : null;
   const color = currentId ? (ALGO_COLORS[currentId] ?? "#888") : "var(--color-muted)";
-  const max = proof ? Math.max(...proof.before, ...proof.after, 1) : 1;
+  // Map values to a numeric metric for the hue scale: numbers use their value;
+  // strings use length (since lexicographic order doesn't have a single numeric axis).
+  const metric = (v: number | string) => typeof v === "string" ? v.length : v;
+  const max = proof ? Math.max(...proof.before.map(metric), ...proof.after.map(metric), 1) : 1;
   const points = currentId ? (curveData[currentId] ?? []) : [];
 
   const nav = (delta: number) => {
@@ -3843,7 +4373,7 @@ function ProofSlider({
     color: disabled ? "var(--color-border)" : "var(--color-muted)", flexShrink: 0,
   });
 
-  const tokenStyle = (v: number, forceColor = false): React.CSSProperties => {
+  const tokenStyle = (v: number | string, forceColor = false): React.CSSProperties => {
     const base: React.CSSProperties = {
       display: "inline-block", fontSize: 10, fontFamily: "monospace",
       padding: "2px 5px", borderRadius: 4,
@@ -3852,8 +4382,12 @@ function ProofSlider({
     if (!forceColor && !revealed) {
       return { ...base, background: "var(--color-surface-3)", color: "var(--color-muted)", border: "1px solid var(--color-border)" };
     }
-    const hue = Math.round(220 - (v / max) * 185);
+    const hue = Math.round(220 - (metric(v) / max) * 185);
     return { ...base, background: `hsl(${hue},72%,40%)`, color: "#fff", border: `1px solid hsl(${hue},72%,57%)` };
+  };
+  const tokenLabel = (v: number | string): string => {
+    if (typeof v === "string") return v.length > 8 ? `"${v.slice(0, 7)}…"` : `"${v}"`;
+    return v.toLocaleString();
   };
 
   const dotRow = (
@@ -4011,7 +4545,7 @@ function ProofSlider({
             <span className="text-xs font-mono shrink-0 mt-0.5" style={{ color: "var(--color-muted)", width: 54 }}>unsorted</span>
             <span className="inline-flex flex-wrap gap-1">
               {proof.before.map((v, i) => (
-                <span key={i} style={{ ...tokenStyle(v), transitionDelay: `${i * 18}ms` }}>{v.toLocaleString()}</span>
+                <span key={i} style={{ ...tokenStyle(v), transitionDelay: `${i * 18}ms` }}>{tokenLabel(v)}</span>
               ))}
             </span>
           </div>
@@ -4020,7 +4554,7 @@ function ProofSlider({
               <span className="text-xs font-mono shrink-0 mt-0.5" style={{ color: "var(--color-muted)", width: 54 }}>sorted</span>
               <span className="inline-flex flex-wrap gap-1">
                 {proof.after.map((v, i) => (
-                  <span key={i} style={tokenStyle(v, true)}>{v.toLocaleString()}</span>
+                  <span key={i} style={tokenStyle(v, true)}>{tokenLabel(v)}</span>
                 ))}
               </span>
             </div>
@@ -4081,7 +4615,7 @@ function playBeep(timeMs: number) {
 }
 
 function AlgoMiniCard({
-  id, steps, benchData, isActive, rank, spaceRank, showBoth, loop, maxSpaceBytes, maxTotalSteps, onStop, pulseEnabled, onTogglePulse,
+  id, steps, benchData, isActive, rank, spaceRank, showBoth, loop, maxSpaceBytes, maxTotalSteps, onStop, pulseEnabled, onTogglePulse, failed,
 }: {
   id: string;
   steps: SortStep[] | null;
@@ -4096,6 +4630,8 @@ function AlgoMiniCard({
   onStop?: () => void;
   pulseEnabled?: boolean;
   onTogglePulse?: () => void;
+  /** Sort produced out-of-order output — annotate the card as unreliable. */
+  failed?: boolean;
 }) {
   const [stepIdx, setStepIdx] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -4146,7 +4682,9 @@ function AlgoMiniCard({
   return (
     <div style={{
       background: "var(--color-surface-1)",
-      border: `1px solid ${isActive ? color : "var(--color-border)"}`,
+      // Failed sorts get a red border that overrides active state — the user
+      // needs to see the failure regardless of selection.
+      border: `1px solid ${failed ? "rgba(239,83,80,0.65)" : (isActive ? color : "var(--color-border)")}`,
       borderRadius: 7,
       padding: "8px 10px",
       transition: "border-color 0.2s",
@@ -4155,10 +4693,27 @@ function AlgoMiniCard({
       <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 5 }}>
         <span style={{ width: 7, height: 7, borderRadius: "50%", background: color, display: "inline-block", flexShrink: 0 }} />
         <WithAlgoTooltip id={id}>
-          <span style={{ fontSize: 11, fontWeight: 700, color: "var(--color-text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <span style={{
+            fontSize: 11, fontWeight: 700,
+            color: failed ? "#ef5350" : "var(--color-text)",
+            flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            textDecoration: failed ? "line-through" : "none",
+            textDecorationColor: "rgba(239,83,80,0.55)",
+          }}>
             {ALGO_NAMES[id] ?? id}
           </span>
         </WithAlgoTooltip>
+        {failed && (
+          <span title="Sort produced out-of-order output. Results unreliable." style={{
+            fontSize: 7, fontWeight: 700, fontFamily: "monospace",
+            padding: "1px 5px", borderRadius: 3, whiteSpace: "nowrap",
+            background: "rgba(239,83,80,0.18)",
+            border: "1px solid rgba(239,83,80,0.55)",
+            color: "#ef5350", flexShrink: 0,
+          }}>
+            ✗ BROKEN
+          </span>
+        )}
         {rank !== null && rank <= 3 && (
           <span style={{ fontSize: 13, lineHeight: 1, flexShrink: 0 }} title={showBoth ? `Time #${rank}` : `#${rank}`}>
             {PLACE_EMOJI[rank]}
@@ -4401,13 +4956,35 @@ export default function BenchmarkVisualizer() {
   const [scenarios, setScenarios] = useState<Set<BenchmarkScenario>>(
     new Set(["random"] as BenchmarkScenario[])
   );
-  const [rounds, setRounds] = useState(3);
-  const [warmup, setWarmup] = useState(1);
+  const [rounds, setRounds] = useState(8);
+  const [warmup, setWarmup] = useState(3);
+  // Per-sort timeout (seconds). When enabled, any single sort that exceeds this
+  // wall-clock budget is marked `timedOut` and the algo is excluded from larger n.
+  // Disabling removes the cap entirely — useful for long-running benchmarks.
+  const [timeoutEnabled, setTimeoutEnabled] = useState(true);
+  const [timeoutSec, setTimeoutSec] = useState(10);
   const [selected, setSelected] = useState<Set<string>>(
     new Set(["logos", "adaptive", "timsort"])
   );
 
   const [status, setStatus] = useState<Status>("idle");
+  // Tracks whether the tab was hidden at any point during the active benchmark.
+  // Browsers throttle/queue timer callbacks in background tabs, so timings
+  // captured while hidden are unreliable. We surface a banner when this trips.
+  const [tabHiddenDuringRun, setTabHiddenDuringRun] = useState(false);
+  // ── Ghost mode ─────────────────────────────────────────────────────────────
+  // Persisted ring buffer (last 20 runs per algorithm) of (n, timeMs, spaceBytes)
+  // tuples. When ghostMode is enabled, the curve chart draws these past runs as
+  // progressively-faded polylines underneath the current curves so the user
+  // can see how the algorithm's measured performance has drifted across runs.
+  const GHOST_MAX = 20;
+  type GhostPoint = { n: number; timeMs: number; meanMs?: number; spaceBytes?: number };
+  type GhostRun = { ts: number; points: GhostPoint[] };
+  const [ghostRuns, setGhostRuns] = useState<Record<string, GhostRun[]>>({});
+  const [ghostMode, setGhostMode] = useState(false);
+  // Hydrated-after-mount guard so the initial empty state doesn't clobber the
+  // stored history before the load effect runs.
+  const ghostHydratedRef = useRef(false);
   const [curveData, setCurveData] = useState<CurveData>({});
   const [currentN, setCurrentN] = useState<number | null>(null);
   const [currentAlgo, setCurrentAlgo] = useState<string | null>(null);
@@ -4415,18 +4992,27 @@ export default function BenchmarkVisualizer() {
   const [runConfig, setRunConfig] = useState<{
     sizes: number[]; scenarios: BenchmarkScenario[]; rounds: number; warmup: number; algos: string[];
   } | null>(null);
-  const [sampleProofs, setSampleProofs] = useState<Record<string, { before: number[]; after: number[]; n: number }>>({});
+  // Per-algo sample proof: 20 evenly-spaced before/after values from one round.
+  // Values are typed as (number|string)[] so the renderer can adapt to whatever
+  // dataType is in use. `dataType` and `scenario` are stored so the proof carries
+  // enough context to explain itself in the UI ("integer · nearlySorted · n=10k").
+  const [sampleProofs, setSampleProofs] = useState<Record<string, SampleProof>>({});
   const [activeProofAlgo, setActiveProofAlgo] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [useWorkerIsolation, setUseWorkerIsolation] = useState(true);
+  // Editor state — hydrated from localStorage AFTER mount to avoid SSR mismatch.
+  // Initial value is the empty string on both server and client so hydration matches.
   const [customSortCode, setCustomSortCode] = useState("");
   const [customSortName, setCustomSortName] = useState("");
   const [customSortNotes, setCustomSortNotes] = useState("");
   const [customSortEnabled, setCustomSortEnabled] = useState(false);
   const [customSortOpen, setCustomSortOpen] = useState(false);
-  const [savedSorts, setSavedSorts] = useState<{ id: string; name: string; code: string; notes: string; savedAt: string }[]>(() => {
-    try { return JSON.parse(localStorage.getItem("codecookbook.savedSorts") ?? "[]"); } catch { return []; }
-  });
+  // Track when the post-mount hydration has completed so we don't write the
+  // initial empty strings back to localStorage and clobber the saved draft.
+  const customSortHydratedRef = useRef(false);
+  // Saved-sorts library. Initial value is [] on both server and client so SSR
+  // hydration matches; the real saved data is loaded in a useEffect after mount.
+  const [savedSorts, setSavedSorts] = useState<{ id: string; name: string; code: string; notes: string; savedAt: string }[]>([]);
   const [codeAlgo, setCodeAlgo] = useState<string | null>(null);
   const [codeCopied, setCodeCopied] = useState(false);
   const [customSortError, setCustomSortError] = useState<string | null>(null);
@@ -4462,7 +5048,7 @@ export default function BenchmarkVisualizer() {
   // Track the currently-running worker so stop() can terminate it mid-flight.
   // Without this, a stop click during a long worker sort just waits for it to finish.
   const currentWorkerRef = useRef<Worker | null>(null);
-  const currentWorkerResolveRef = useRef<((v: { timeMs: number; meanMs: number; stdDev: number; roundTimes?: number[]; timedOut: boolean; stopped?: boolean }) => void) | null>(null);
+  const currentWorkerResolveRef = useRef<((v: { timeMs: number; meanMs: number; stdDev: number; roundTimes?: number[]; timedOut: boolean; stopped?: boolean; error?: string }) => void) | null>(null);
 
   // Lock chart cursor to the n currently being benchmarked
   useEffect(() => {
@@ -4470,6 +5056,92 @@ export default function BenchmarkVisualizer() {
       setHoverN(currentN);
     }
   }, [currentN, progressLocked, status]);
+
+  // Post-mount hydration: load custom-sort library AND the editor draft from
+  // localStorage. Doing this in useEffect (instead of in useState's initializer)
+  // avoids the SSR-vs-client mismatch warning and the "saved sorts disappear
+  // for a frame after refresh" bug.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const stored = localStorage.getItem("codecookbook.savedSorts");
+      if (stored) setSavedSorts(JSON.parse(stored));
+    } catch { /* corrupted JSON or quota — ignore */ }
+    try {
+      const draft = localStorage.getItem("codecookbook.customSortDraft");
+      if (draft) {
+        const d = JSON.parse(draft) as { code?: string; name?: string; notes?: string; enabled?: boolean };
+        if (typeof d.code === "string") setCustomSortCode(d.code);
+        if (typeof d.name === "string") setCustomSortName(d.name);
+        if (typeof d.notes === "string") setCustomSortNotes(d.notes);
+        if (typeof d.enabled === "boolean") setCustomSortEnabled(d.enabled);
+      }
+    } catch { /* ignore */ }
+    customSortHydratedRef.current = true;
+  }, []);
+
+  // Hydrate ghost-mode history + toggle from localStorage after mount.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = localStorage.getItem("codecookbook.ghostRuns");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") setGhostRuns(parsed);
+      }
+    } catch { /* corrupt JSON — ignore */ }
+    try {
+      setGhostMode(localStorage.getItem("codecookbook.ghostMode") === "on");
+    } catch { /* ignore */ }
+    ghostHydratedRef.current = true;
+  }, []);
+
+  // Persist ghost runs whenever they change (after hydration completes).
+  useEffect(() => {
+    if (!ghostHydratedRef.current || typeof window === "undefined") return;
+    try {
+      localStorage.setItem("codecookbook.ghostRuns", JSON.stringify(ghostRuns));
+    } catch { /* quota — drop silently */ }
+  }, [ghostRuns]);
+
+  // Persist ghost-mode toggle.
+  useEffect(() => {
+    if (!ghostHydratedRef.current || typeof window === "undefined") return;
+    try {
+      localStorage.setItem("codecookbook.ghostMode", ghostMode ? "on" : "off");
+    } catch { /* ignore */ }
+  }, [ghostMode]);
+
+  // Page-visibility listener: flag any time the tab goes hidden while a
+  // benchmark is running so we can warn the user that timings collected during
+  // that window are likely throttled (browsers slow background-tab timers).
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const handler = () => {
+      if (document.visibilityState === "hidden" && status === "running") {
+        setTabHiddenDuringRun(true);
+      }
+    };
+    document.addEventListener("visibilitychange", handler);
+    return () => document.removeEventListener("visibilitychange", handler);
+  }, [status]);
+
+  // Persist the active editor draft (code, name, notes, enabled flag) whenever
+  // it changes, so typed-but-not-yet-saved work survives a refresh or navigation.
+  // Guarded by customSortHydratedRef so the initial empty render doesn't wipe
+  // the stored draft before the hydration effect above has loaded it.
+  useEffect(() => {
+    if (!customSortHydratedRef.current) return;
+    if (typeof window === "undefined") return;
+    try {
+      localStorage.setItem("codecookbook.customSortDraft", JSON.stringify({
+        code: customSortCode,
+        name: customSortName,
+        notes: customSortNotes,
+        enabled: customSortEnabled,
+      }));
+    } catch { /* quota — ignore */ }
+  }, [customSortCode, customSortName, customSortNotes, customSortEnabled]);
 
   // Decode run config from URL on mount (for shared links)
   useEffect(() => {
@@ -4512,8 +5184,8 @@ export default function BenchmarkVisualizer() {
     if (selectedSizes.size) params.set("sizes", [...selectedSizes].join(","));
     const sc = [...scenarios];
     if (sc.length && !(sc.length === 1 && sc[0] === "random")) params.set("sc", sc.join(","));
-    if (rounds !== 3) params.set("rounds", String(rounds));
-    if (warmup !== 1) params.set("warmup", String(warmup));
+    if (rounds !== 8) params.set("rounds", String(rounds));
+    if (warmup !== 3) params.set("warmup", String(warmup));
     if (quickPivot !== "median3") params.set("pivot", quickPivot);
     if (shellGaps !== "ciura") params.set("gaps", shellGaps);
     if (customPreSorted !== 0) params.set("preSorted", String(customPreSorted));
@@ -4678,6 +5350,9 @@ export default function BenchmarkVisualizer() {
     stopRef.current = false;
     excludedRef.current = new Set();
     setStatus("running");
+    // Reset the visibility-warning flag for the new run, then seed it correctly
+    // if the tab is already hidden when Run is clicked (e.g., from a script).
+    setTabHiddenDuringRun(typeof document !== "undefined" && document.visibilityState === "hidden");
     setCurveData({});
     setSampleProofs({});
     setActiveProofAlgo(null);
@@ -4710,7 +5385,7 @@ export default function BenchmarkVisualizer() {
     const prerunArr = generateBenchmarkInput(PRERUN_N, "random");
     const prerunStepsAcc: Record<string, SortStep[]> = {};
     for (const id of algos) {
-      const fn = id === "custom"                       ? (() => { try { return new Function("return (" + customSortCode + ")")() as (arr: number[]) => void; } catch { return null; } })() :
+      const fn = id === "custom"                       ? buildCustomFn(customSortCode, setCustomSortError) :
                  id === "quick"                        ? makeQuickSort(quickPivot) :
                  id === "shell"                        ? makeShellSort(shellGaps) :
                  getLogosCustomParams(id) !== null     ? makeLogosSort(getLogosCustomParams(id)!) :
@@ -4739,7 +5414,9 @@ export default function BenchmarkVisualizer() {
       prerunStepsAcc[id] = stepsArr;
       const pCopy = [...prerunArr];
       const pt0 = performance.now();
-      fn(pCopy);
+      // Wrap in try so a buggy custom function (or any algo that throws) skips
+      // gracefully instead of taking down the whole benchmark.
+      try { fn(pCopy); } catch { /* swallow — proper capture happens in main loop */ }
       const prerunMs = performance.now() - pt0;
       if (!acc[id]) acc[id] = [];
       acc[id].push({ n: PRERUN_N, timeMs: prerunMs, spaceBytes: theoreticalSpaceBytes(id, PRERUN_N) });
@@ -4778,13 +5455,19 @@ export default function BenchmarkVisualizer() {
         });
         if (excludedRef.current.has(id)) { done++; setProgress({ done, total }); continue; }
 
-        const fn: ((arr: unknown[]) => unknown[]) | null = id === "custom" ? (() => { try { return new Function("return (" + customSortCode + ")")() as (arr: number[]) => void; } catch { return null; } })() as never :
+        // Resolve the sort function for this (algo, size) iteration.
+        // The factory-built variants (quick/shell/logos/custom) are already fresh
+        // closures per run. For everything else we rebuild SORT_FNS[id] via
+        // freshSortFn so a prior data-type run can't leave it megamorphically
+        // deoptimized — see the freshSortFn comment for the full rationale.
+        const fn: ((arr: unknown[]) => unknown[]) | null = id === "custom" ? buildCustomFn(customSortCode, setCustomSortError) :
                    id === "quick"                       ? makeQuickSort(quickPivot) as never :
                    id === "shell"                       ? makeShellSort(shellGaps) as never :
                    getLogosCustomParams(id) !== null    ? makeLogosSort(getLogosCustomParams(id)!) as never :
                    id === "logos"                       ? makeLogosSort(DEFAULT_LOGOS_PARAMS) as never :
                    dataType === "string" && id === "timsort" ? ((arr: unknown[]) => [...arr].sort()) :
-                   SORT_FNS[id] as never;
+                   SORT_FNS[id] ? freshSortFn(SORT_FNS[id]) as never :
+                   null;
         if (!fn) { done++; setProgress({ done, total }); continue; }
 
         // Hoist adversarial round count so both worker and normal paths can use it
@@ -4795,9 +5478,20 @@ export default function BenchmarkVisualizer() {
 
         // ── Worker isolation path ─────────────────────────────────────────────
         if (useWorkerIsolation) {
+          // Capture proof BEFORE submitting to the worker. The worker does the
+          // timed sorts in its own isolate; this one-off main-thread sort uses
+          // the rebuilt `fn` (already isolated by freshSortFn) on a small copy,
+          // so it doesn't pollute timing and doesn't run inside the worker.
+          if (!capturedAlgos.has(id) && roundInputs[0]) {
+            const proof = captureSampleProof(roundInputs[0] as (number | string)[], fn, {
+              n: sz, dataType, scenario: scenarioList[0],
+            });
+            setSampleProofs(prev => prev[id] ? prev : { ...prev, [id]: proof });
+            capturedAlgos.add(id);
+          }
           const workerInputs = roundInputs.slice(0, algoRounds);
           const logosP = getLogosCustomParams(id) ?? (id === "logos" ? DEFAULT_LOGOS_PARAMS : undefined);
-          const result = await new Promise<{ timeMs: number; meanMs: number; stdDev: number; roundTimes?: number[]; timedOut: boolean; stopped?: boolean }>((resolve) => {
+          const result = await new Promise<{ timeMs: number; meanMs: number; stdDev: number; roundTimes?: number[]; timedOut: boolean; stopped?: boolean; error?: string }>((resolve) => {
             const w = new Worker(new URL("../lib/benchmarkWorker", import.meta.url));
             currentWorkerRef.current = w;
             currentWorkerResolveRef.current = resolve;
@@ -4807,11 +5501,18 @@ export default function BenchmarkVisualizer() {
               currentWorkerResolveRef.current = null;
               resolve(e.data);
             };
-            w.onerror = () => {
+            w.onerror = (e) => {
               w.terminate();
               if (currentWorkerRef.current === w) currentWorkerRef.current = null;
               currentWorkerResolveRef.current = null;
-              resolve({ timeMs: 0, meanMs: 0, stdDev: 0, timedOut: false });
+              // Surface worker-level failures (e.g., custom code with a syntax
+              // error that slipped past the main-thread parse) as an explicit
+              // error so the algo is annotated as broken rather than recorded
+              // as a 0-ms result.
+              resolve({
+                timeMs: 0, meanMs: 0, stdDev: 0, timedOut: false,
+                error: e instanceof ErrorEvent ? (e.message || "worker error") : "worker crashed",
+              });
             };
             w.postMessage({
               runId: Date.now().toString(),
@@ -4824,10 +5525,30 @@ export default function BenchmarkVisualizer() {
               logosParams: logosP,
               adversarialInput: adversarialEnabled ? makeAdversarialInput(id, sz, quickPivot) : undefined,
               customFnStr: id === "custom" ? customSortCode : undefined,
+              // 0 means "uncapped" — the worker treats >0 as the timeout in ms.
+              timeoutMs: timeoutEnabled ? timeoutSec * 1000 : 0,
             });
           });
           // If stop terminated the worker, bail out without recording a result.
           if (result.stopped || stopRef.current) break;
+          // If the worker reported a runtime error (custom fn threw), surface it
+          // as a failed proof and exclude the algo from further runs.
+          if (result.error) {
+            setSampleProofs(prev => prev[id] ? prev : {
+              ...prev,
+              [id]: {
+                before: [], after: [], n: sz, dataType,
+                scenario: scenarioList[0],
+                failed: true, badIdx: 0,
+              },
+            });
+            if (id === "custom") setCustomSortError(`Threw at runtime: ${result.error}`);
+            excludedRef.current.add(id);
+            done++;
+            setProgress({ done, total });
+            await new Promise<void>(r => setTimeout(r, 0));
+            continue;
+          }
           if (!acc[id]) acc[id] = [];
           acc[id].push({
             n: sz, timeMs: result.timeMs, meanMs: result.meanMs, stdDev: result.stdDev,
@@ -4849,6 +5570,13 @@ export default function BenchmarkVisualizer() {
         let didTimeout = false;
         let lastElapsed = 0;
         const postWarmupTimes: number[] = [];
+        // Adaptive warmup: `warmup` is the MAX number of warmup rounds. We may
+        // exit warmup earlier if the last 3 warmup timings have stabilized
+        // (coefficient of variation < 5%). Saved warmups become extra timed
+        // rounds, which tightens the resulting mean/stddev.
+        let effectiveWarmup = warmup;
+        const warmupTimes: number[] = [];
+        const STABILITY_THRESHOLD = 0.05; // 5% CV
 
         for (let r = 0; r < algoRounds && !didTimeout; r++) {
           // Yield to the event loop between rounds so a click on Stop can register
@@ -4859,26 +5587,56 @@ export default function BenchmarkVisualizer() {
           }
           const input = algoRoundInputs[r];
 
-          // Capture per-algo proof on first encounter
+          // Capture per-algo proof on first encounter — works for any dataType
+          // since captureSampleProof preserves value types.
           if (!capturedAlgos.has(id)) {
-            const SAMPLE = 20;
-            const step = Math.max(1, Math.floor(input.length / SAMPLE));
-            const before = Array.from({ length: SAMPLE }, (_, i) => input[i * step]);
-            const proofCopy = [...input];
-            const sortedResult = fn(proofCopy);
-            const sortedArr = sortedResult ?? proofCopy;
-            const after = Array.from({ length: SAMPLE }, (_, i) => (sortedArr as number[])[i * step]);
-            setSampleProofs(prev => prev[id] ? prev : { ...prev, [id]: { before: before as number[], after: after as number[], n: sz } });
+            const proof = captureSampleProof(input as (number | string)[], fn, {
+              n: sz, dataType, scenario: scenarioList[0],
+            });
+            setSampleProofs(prev => prev[id] ? prev : { ...prev, [id]: proof });
             capturedAlgos.add(id);
           }
 
           const copy = [...input];
           const t0 = performance.now();
-          fn(copy);
+          // Wrap the sort call so a throwing custom function doesn't kill the
+          // whole benchmark. On error, mark the algo as failed via sampleProofs,
+          // bail out of the round loop, and let the rest of the run continue.
+          try {
+            fn(copy);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            setSampleProofs(prev => prev[id] ? prev : {
+              ...prev,
+              [id]: {
+                before: [], after: [], n: sz, dataType,
+                scenario: scenarioList[0],
+                failed: true, badIdx: 0,
+              },
+            });
+            if (id === "custom") setCustomSortError(`Threw at runtime: ${msg}`);
+            didTimeout = false;
+            break;
+          }
           lastElapsed = performance.now() - t0;
 
-          if (lastElapsed >= TIMEOUT_MS) { didTimeout = true; best = lastElapsed; break; }
-          if (r >= warmup) {
+          // Per-sort timeout. When disabled (timeoutEnabled === false), runs uncapped.
+          if (timeoutEnabled && lastElapsed >= timeoutSec * 1000) { didTimeout = true; best = lastElapsed; break; }
+          if (r < effectiveWarmup) {
+            warmupTimes.push(lastElapsed);
+            // After the third warmup, check whether the last 3 timings are stable
+            // (CV < 5%). If yes, exit warmup early so subsequent rounds get
+            // recorded as timed measurements.
+            if (warmupTimes.length >= 3) {
+              const last3 = warmupTimes.slice(-3);
+              const wMean = (last3[0] + last3[1] + last3[2]) / 3;
+              const wVar  = last3.reduce((s, v) => s + (v - wMean) ** 2, 0) / 3;
+              const wStd  = Math.sqrt(wVar);
+              if (wMean > 0 && wStd / wMean < STABILITY_THRESHOLD) {
+                effectiveWarmup = r + 1; // end warmup after this round
+              }
+            }
+          } else {
             best = Math.min(best, lastElapsed);
             postWarmupTimes.push(lastElapsed);
           }
@@ -4912,7 +5670,11 @@ export default function BenchmarkVisualizer() {
           const spaceInput = dataType === "string" ? generateStringInput(sz, scenarioList[0])
                            : dataType === "float"  ? generateFloatInput(sz, scenarioList[0], customDist)
                            : generateBenchmarkInput(sz, scenarioList[0], customDist);
-          allocBytes = measureAllocBytes(() => (fn as (a: unknown[]) => unknown[])([...spaceInput]));
+          // Both space-measurement passes wrap the sort call so a buggy custom
+          // function falls back to theoretical bytes instead of crashing the run.
+          try {
+            allocBytes = measureAllocBytes(() => (fn as (a: unknown[]) => unknown[])([...spaceInput]));
+          } catch { allocBytes = undefined; }
 
           const perfMem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
           let heapDelta = 0;
@@ -4921,7 +5683,7 @@ export default function BenchmarkVisualizer() {
                               : dataType === "float"  ? generateFloatInput(sz, scenarioList[0], customDist)
                               : generateBenchmarkInput(sz, scenarioList[0], customDist);
             const m0 = perfMem.usedJSHeapSize;
-            fn(spaceInput2);
+            try { fn(spaceInput2); } catch { /* fall through to theoretical */ }
             const m1 = perfMem.usedJSHeapSize;
             heapDelta = Math.max(0, m1 - m0);
           }
@@ -4943,6 +5705,27 @@ export default function BenchmarkVisualizer() {
 
     setCurrentN(null);
     setCurrentAlgo(null);
+
+    // Append this run's per-algo points to the ghost-mode history. Each algo
+    // gets a new GhostRun entry; the ring buffer is capped at GHOST_MAX. We
+    // skip algos that failed the sortedness verifier (unreliable timings) and
+    // algos that had no successful points.
+    setGhostRuns(prev => {
+      const next: Record<string, GhostRun[]> = { ...prev };
+      const now = Date.now();
+      for (const id of Object.keys(acc)) {
+        const points = (acc[id] ?? [])
+          .filter(p => !p.timedOut && p.timeMs > 0)
+          .map(p => ({ n: p.n, timeMs: p.timeMs, meanMs: p.meanMs, spaceBytes: p.spaceBytes }));
+        if (points.length === 0) continue;
+        const existing = next[id] ?? [];
+        const updated = [...existing, { ts: now, points }];
+        // Cap to last GHOST_MAX runs (FIFO drop oldest).
+        next[id] = updated.length > GHOST_MAX ? updated.slice(-GHOST_MAX) : updated;
+      }
+      return next;
+    });
+
     setStatus("done");
 
   }, [selected, selectedSizes, scenarios, rounds, warmup, customPreSorted, customDuplicates, quickPivot, shellGaps, customLogosVariants, adversarialEnabled, useWorkerIsolation, customSortEnabled, customSortCode]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -5417,39 +6200,7 @@ export default function BenchmarkVisualizer() {
                                     <Code size={9} strokeWidth={1.75} />
                                   </button>
                                 )}
-                                {item.id === "logos" && (() => {
-                                  const hasVariants = customLogosVariants.length > 0;
-                                  return (
-                                    <button
-                                      type="button"
-                                      onClick={e => {
-                                        e.preventDefault();
-                                        // Always add a new variant and open its settings panel
-                                        const newIdx = customLogosVariants.length;
-                                        setCustomLogosVariants(prev => [...prev, { ...DEFAULT_LOGOS_PARAMS }]);
-                                        setLogosEditVariant(newIdx);
-                                      }}
-                                      title="Add a custom Logos Sort variant"
-                                      style={{
-                                        marginLeft: 4,
-                                        background: logosEditVariant !== null ? "var(--color-accent-muted)" : hasVariants ? "rgba(85,85,85,0.08)" : "none",
-                                        border: `1px solid ${logosEditVariant !== null ? "var(--color-accent)" : hasVariants ? "#555555" : "var(--color-border)"}`,
-                                        borderRadius: 4,
-                                        cursor: "pointer",
-                                        padding: "1px 4px",
-                                        display: "inline-flex",
-                                        alignItems: "center",
-                                        gap: 3,
-                                        color: logosEditVariant !== null ? "var(--color-accent)" : hasVariants ? "#555555" : "var(--color-muted)",
-                                        fontSize: 9,
-                                        lineHeight: 1,
-                                      }}
-                                    >
-                                      <Settings size={9} strokeWidth={1.75} />
-                                      {hasVariants ? `custom ×${customLogosVariants.length} ●` : "custom"}
-                                    </button>
-                                  );
-                                })()}
+                                {/* Logos Sort custom-variant button removed. */}
                               </label>
                               </React.Fragment>
                             );
@@ -5554,6 +6305,36 @@ export default function BenchmarkVisualizer() {
 
                   {customSortOpen && (
                     <div className="mt-2 flex flex-col gap-2">
+                      {/* Note: how to actually wire the custom sort into the run */}
+                      {!customSortEnabled && customSortCode.trim() && (
+                        <div style={{
+                          fontSize: 10, fontFamily: "monospace", lineHeight: 1.5,
+                          padding: "6px 9px", borderRadius: 5,
+                          background: "rgba(255,183,77,0.08)",
+                          border: "1px solid rgba(255,183,77,0.35)",
+                          color: "var(--color-muted)",
+                        }}>
+                          <span style={{ color: "#ffb74d", fontWeight: 700 }}>Tip · </span>
+                          You have custom code loaded, but it won&apos;t run until you tick{" "}
+                          <strong style={{ color: "var(--color-text)" }}>Enable custom sort</strong>{" "}
+                          below. Once enabled, it joins the next benchmark run as the{" "}
+                          <code style={{ color: "var(--color-accent)" }}>custom</code> algorithm.
+                        </div>
+                      )}
+                      {!customSortCode.trim() && (
+                        <div style={{
+                          fontSize: 10, fontFamily: "monospace", lineHeight: 1.5,
+                          padding: "6px 9px", borderRadius: 5,
+                          background: "var(--color-surface-1)",
+                          border: "1px solid var(--color-border)",
+                          color: "var(--color-muted)",
+                        }}>
+                          <span style={{ color: "var(--color-accent)", fontWeight: 700 }}>How it works · </span>
+                          Load a preset below as a starting template, edit the code freely, then tick{" "}
+                          <strong style={{ color: "var(--color-text)" }}>Enable custom sort</strong>{" "}
+                          to include it in benchmark runs. Saved sorts persist across sessions.
+                        </div>
+                      )}
                       {/* Load preset buttons — grouped by complexity class */}
                       {(() => {
                         const groups: { label: string; color: string; presets: string[] }[] = [
@@ -5742,261 +6523,7 @@ export default function BenchmarkVisualizer() {
                   )}
                 </div>
 
-                {logosEditVariant !== null && has("advanced") && customLogosVariants.length > 0 && (() => {
-                  const idx = Math.min(logosEditVariant, customLogosVariants.length - 1);
-                  const params = customLogosVariants[idx];
-                  const setParams = (updater: (prev: LogosParams) => LogosParams) => {
-                    setCustomLogosVariants(prev => prev.map((p, i) => i === idx ? updater(p) : p));
-                  };
-                  const hasCustom = (Object.keys(DEFAULT_LOGOS_PARAMS) as (keyof LogosParams)[]).some(k => params[k] !== DEFAULT_LOGOS_PARAMS[k]);
-                  return (
-                    <div className="mt-3 rounded-lg p-3 flex flex-col gap-2.5" style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)" }}>
-                      <div className="flex items-center justify-between gap-2">
-                        {customLogosVariants.length > 1 && (
-                          <div className="flex gap-1">
-                            {customLogosVariants.map((_, i) => (
-                              <button key={i} type="button" onClick={() => setLogosEditVariant(i)}
-                                style={{
-                                  padding: "1px 6px", fontSize: 9, borderRadius: 3, cursor: "pointer",
-                                  background: i === idx ? "var(--color-accent)" : "var(--color-surface-3)",
-                                  color: i === idx ? "#fff" : "var(--color-muted)",
-                                  border: `1px solid ${i === idx ? "var(--color-accent)" : "var(--color-border)"}`,
-                                }}>
-                                {i + 1}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                        <p className="text-xs font-semibold" style={{ color: "var(--color-text)" }}>
-                          {customLogosVariants.length === 1 ? "Logos Sort — parameters" : `Logos Sort - ${idx + 1} — parameters`}
-                        </p>
-                        <div className="flex gap-2 ml-auto">
-                          {customLogosVariants.length > 1 && (
-                            <button type="button"
-                              onClick={() => {
-                                setCustomLogosVariants(prev => prev.filter((_, i) => i !== idx));
-                                setLogosEditVariant(Math.max(0, idx - 1));
-                              }}
-                              style={{ fontSize: 9, padding: "1px 6px", color: "var(--color-state-swap)", background: "none", border: "1px solid var(--color-state-swap)", borderRadius: 3, cursor: "pointer" }}>
-                              remove
-                            </button>
-                          )}
-                          <button type="button"
-                            onClick={() => setParams(() => ({ ...DEFAULT_LOGOS_PARAMS }))}
-                            style={btn("ghost", { fontSize: 9, padding: "1px 6px", color: "var(--color-muted)", textDecoration: "underline", textDecorationStyle: "dotted" })}>
-                            reset defaults
-                          </button>
-                        </div>
-                      </div>
-                      {hasCustom && (
-                        <p className="text-[10px] px-2 py-1 rounded" style={{ background: "rgba(85,85,85,0.08)", color: "#555555", border: "1px solid rgba(192,57,43,0.25)" }}>
-                          Params differ from defaults — both <strong>Logos Sort</strong> and <strong>Logos Sort - {idx + 1}</strong> will run automatically.
-                        </p>
-                      )}
-                      {([
-                        { key: "phi",          label: "φ (phi)",           min: 0.05, max: 1.0,  step: 0.001, desc: "Primary pivot offset — φ⁻¹ ≈ 0.618" },
-                        { key: "phi2",         label: "φ² (phi2)",         min: 0.05, max: 1.0,  step: 0.001, desc: "Secondary pivot offset — φ⁻² ≈ 0.382" },
-                        { key: "base",         label: "Base",              min: 2,    max: 256,  step: 1,     desc: "Insertion sort threshold (elements)" },
-                        { key: "depthMult",    label: "Depth multiplier",  min: 1,    max: 6,    step: 0.5,   desc: "Depth limit = mult·⌊log₂n⌋ + add" },
-                        { key: "depthAdd",     label: "Depth addend",      min: 0,    max: 16,   step: 1,     desc: "Constant added to depth limit" },
-                        { key: "countingMult", label: "Counting trigger",  min: 1,    max: 32,   step: 1,     desc: "Counting sort when valueRange < n×this" },
-                      ] as const).map(({ key, label, min, max, step, desc }) => {
-                        const draftKey = `${idx}.${key}`;
-                        const commitDraft = (raw: string) => {
-                          const v = parseFloat(raw);
-                          if (!isNaN(v)) {
-                            const clamped = Math.max(min, Math.min(max, parseFloat(v.toPrecision(8))));
-                            setParams(prev => ({ ...prev, [key]: clamped }));
-                          }
-                          setParamDrafts(prev => { const n = { ...prev }; delete n[draftKey]; return n; });
-                        };
-                        return (
-                          <div key={key} className="flex flex-col gap-0.5">
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-xs" style={{ color: "var(--color-text)" }}>{label}</span>
-                              <input
-                                type="text" inputMode="decimal"
-                                value={draftKey in paramDrafts ? paramDrafts[draftKey] : String(params[key])}
-                                onChange={e => setParamDrafts(prev => ({ ...prev, [draftKey]: e.target.value }))}
-                                onBlur={e => commitDraft(e.target.value)}
-                                onKeyDown={e => {
-                                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                                  if (e.key === "Escape") setParamDrafts(prev => { const n = { ...prev }; delete n[draftKey]; return n; });
-                                }}
-                                style={{
-                                  width: 88, textAlign: "right", fontSize: 11, fontFamily: "monospace",
-                                  color: draftKey in paramDrafts ? "var(--color-text)" : "var(--color-accent)",
-                                  background: "var(--color-surface-3)",
-                                  border: `1px solid ${draftKey in paramDrafts ? "var(--color-accent)" : "var(--color-border)"}`,
-                                  borderRadius: 3, padding: "1px 4px", outline: "none",
-                                }}
-                              />
-                            </div>
-                            <input type="range" min={min} max={max} step={step}
-                              value={params[key]}
-                              onChange={e => {
-                                const v = parseFloat(e.target.value);
-                                setParams(prev => ({ ...prev, [key]: v }));
-                                setParamDrafts(prev => { const n = { ...prev }; delete n[draftKey]; return n; });
-                              }}
-                              style={{ accentColor: "var(--color-accent)", width: "100%" }}
-                            />
-                            <p className="text-[10px]" style={{ color: "var(--color-muted)" }}>{desc}</p>
-                          </div>
-                        );
-                      })}
-                      {/* Pivot jitter / fixed multiplier section */}
-                      {(() => {
-                        const isJitter = params.randomScaleMin !== params.randomScaleMax;
-                        const scaleSlider = (
-                          sliderKey: "randomScaleMin" | "randomScaleMax",
-                          label: string,
-                          desc: string,
-                        ) => {
-                          const draftKey = `${idx}.${sliderKey}`;
-                          const commitDraft = (raw: string) => {
-                            const v = parseFloat(raw);
-                            if (!isNaN(v)) {
-                              const clamped = Math.max(0, Math.min(3, parseFloat(v.toPrecision(8))));
-                              setParams(prev => {
-                                const next = { ...prev, [sliderKey]: clamped };
-                                if (sliderKey === "randomScaleMin" && clamped > prev.randomScaleMax)
-                                  next.randomScaleMax = clamped;
-                                if (sliderKey === "randomScaleMax" && clamped < prev.randomScaleMin)
-                                  next.randomScaleMin = clamped;
-                                return next;
-                              });
-                            }
-                            setParamDrafts(prev => { const n = { ...prev }; delete n[draftKey]; return n; });
-                          };
-                          return (
-                            <div className="flex flex-col gap-0.5">
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-xs" style={{ color: "var(--color-text)" }}>{label}</span>
-                                <input
-                                  type="text" inputMode="decimal"
-                                  value={draftKey in paramDrafts ? paramDrafts[draftKey] : String(params[sliderKey])}
-                                  onChange={e => setParamDrafts(prev => ({ ...prev, [draftKey]: e.target.value }))}
-                                  onBlur={e => commitDraft(e.target.value)}
-                                  onKeyDown={e => {
-                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                                    if (e.key === "Escape") setParamDrafts(prev => { const n = { ...prev }; delete n[draftKey]; return n; });
-                                  }}
-                                  style={{
-                                    width: 88, textAlign: "right", fontSize: 11, fontFamily: "monospace",
-                                    color: draftKey in paramDrafts ? "var(--color-text)" : "var(--color-accent)",
-                                    background: "var(--color-surface-3)",
-                                    border: `1px solid ${draftKey in paramDrafts ? "var(--color-accent)" : "var(--color-border)"}`,
-                                    borderRadius: 3, padding: "1px 4px", outline: "none",
-                                  }}
-                                />
-                              </div>
-                              <input type="range" min={0} max={3} step={0.01}
-                                value={params[sliderKey]}
-                                onChange={e => {
-                                  const v = parseFloat(e.target.value);
-                                  setParams(prev => {
-                                    const next = { ...prev, [sliderKey]: v };
-                                    if (sliderKey === "randomScaleMin" && v > prev.randomScaleMax)
-                                      next.randomScaleMax = v;
-                                    if (sliderKey === "randomScaleMax" && v < prev.randomScaleMin)
-                                      next.randomScaleMin = v;
-                                    return next;
-                                  });
-                                  setParamDrafts(prev => { const n = { ...prev }; delete n[`${idx}.${sliderKey}`]; return n; });
-                                }}
-                                style={{ accentColor: "var(--color-accent)", width: "100%" }}
-                              />
-                              <p className="text-[10px]" style={{ color: "var(--color-muted)" }}>{desc}</p>
-                            </div>
-                          );
-                        };
-                        return (
-                          <div className="flex flex-col gap-2 pt-1" style={{ borderTop: "1px solid var(--color-border)" }}>
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-xs font-medium" style={{ color: "var(--color-text)" }}>Pivot jitter</span>
-                              <label className="flex items-center gap-1.5" style={{ cursor: "pointer" }}>
-                                <input type="checkbox" checked={isJitter}
-                                  onChange={e => {
-                                    if (e.target.checked) {
-                                      // fixed → jitter: expand range from current multiplier
-                                      setParams(prev => ({
-                                        ...prev,
-                                        randomScaleMin: Math.max(0, prev.randomScaleMin - 0.1),
-                                        randomScaleMax: prev.randomScaleMax + 0.1,
-                                      }));
-                                    } else {
-                                      // jitter → fixed: collapse to midpoint
-                                      const mid = parseFloat(((params.randomScaleMin + params.randomScaleMax) / 2).toPrecision(6));
-                                      setParams(prev => ({ ...prev, randomScaleMin: mid, randomScaleMax: mid }));
-                                    }
-                                  }}
-                                  style={{ accentColor: "var(--color-accent)" }}
-                                />
-                                <span className="text-xs" style={{ color: isJitter ? "var(--color-accent)" : "var(--color-muted)" }}>
-                                  Random jitter
-                                </span>
-                              </label>
-                            </div>
-                            {isJitter ? (
-                              <>
-                                {scaleSlider("randomScaleMin", "Min jitter", "Lower bound of per-call jitter scale")}
-                                {scaleSlider("randomScaleMax", "Max jitter", "Upper bound of per-call jitter scale")}
-                              </>
-                            ) : (() => {
-                              // Fixed mode: show one slider, both min and max track together
-                              const draftKey = `${idx}.randomScaleMin`;
-                              const commitFixed = (raw: string) => {
-                                const v = parseFloat(raw);
-                                if (!isNaN(v)) {
-                                  const c = Math.max(0, Math.min(3, parseFloat(v.toPrecision(8))));
-                                  setParams(prev => ({ ...prev, randomScaleMin: c, randomScaleMax: c }));
-                                }
-                                setParamDrafts(prev => { const n = { ...prev }; delete n[draftKey]; return n; });
-                              };
-                              return (
-                                <div className="flex flex-col gap-0.5">
-                                  <div className="flex items-center justify-between gap-2">
-                                    <span className="text-xs" style={{ color: "var(--color-text)" }}>Multiplier</span>
-                                    <input
-                                      type="text" inputMode="decimal"
-                                      value={draftKey in paramDrafts ? paramDrafts[draftKey] : String(params.randomScaleMin)}
-                                      onChange={e => setParamDrafts(prev => ({ ...prev, [draftKey]: e.target.value }))}
-                                      onBlur={e => commitFixed(e.target.value)}
-                                      onKeyDown={e => {
-                                        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                                        if (e.key === "Escape") setParamDrafts(prev => { const n = { ...prev }; delete n[draftKey]; return n; });
-                                      }}
-                                      style={{
-                                        width: 88, textAlign: "right", fontSize: 11, fontFamily: "monospace",
-                                        color: draftKey in paramDrafts ? "var(--color-text)" : "var(--color-accent)",
-                                        background: "var(--color-surface-3)",
-                                        border: `1px solid ${draftKey in paramDrafts ? "var(--color-accent)" : "var(--color-border)"}`,
-                                        borderRadius: 3, padding: "1px 4px", outline: "none",
-                                      }}
-                                    />
-                                  </div>
-                                  <input type="range" min={0} max={3} step={0.01}
-                                    value={params.randomScaleMin}
-                                    onChange={e => {
-                                      const v = parseFloat(e.target.value);
-                                      setParams(prev => ({ ...prev, randomScaleMin: v, randomScaleMax: v }));
-                                      setParamDrafts(prev => { const n = { ...prev }; delete n[draftKey]; return n; });
-                                    }}
-                                    style={{ accentColor: "var(--color-accent)", width: "100%" }}
-                                  />
-                                  <p className="text-[10px]" style={{ color: "var(--color-muted)" }}>
-                                    Fixed scale applied to every pivot selection (0 = pure golden-section, 0.618 = default)
-                                  </p>
-                                </div>
-                              );
-                            })()}
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  );
-                })()}
+                {/* Logos Sort parameters panel removed. */}
 
                 {(maxSelectedSize > SLOW_THRESHOLD || Object.entries(MEDIUM_LIMITS).some(([id, { threshold }]) => selected.has(id) && maxSelectedSize > threshold)) && (
                   <div className="mt-2.5 flex flex-col gap-1">
@@ -6019,22 +6546,39 @@ export default function BenchmarkVisualizer() {
                 )}
               </div>
 
-              {/* Data Type */}
+              {/* Data Type — segmented single-select. Each run rebuilds sort
+                  functions fresh (freshSortFn) so switching types can't carry
+                  V8 megamorphic deopt across runs. */}
               <div className="mb-4 print:hidden">
                 <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--color-muted)" }}>Data Type</p>
-                <div className="flex gap-1.5">
-                  {(["integer", "float", "string"] as DataType[]).map(dt => {
+                <div
+                  style={{
+                    display: "inline-flex",
+                    borderRadius: 7,
+                    border: "1px solid var(--color-border)",
+                    background: "var(--color-surface-1)",
+                    overflow: "hidden",
+                  }}
+                >
+                  {(["integer", "float", "string"] as DataType[]).map((dt, i) => {
                     const active = dataType === dt;
                     return (
                       <button
                         key={dt}
                         onClick={() => setDataType(dt)}
+                        title={
+                          dt === "integer" ? "Random 32-bit integers" :
+                          dt === "float"   ? "Random doubles" :
+                                             "Random fixed-length strings"
+                        }
                         style={{
-                          padding: "3px 12px", fontSize: 11, borderRadius: 6, cursor: "pointer",
-                          background: active ? "var(--color-accent-muted)" : "var(--color-surface-1)",
-                          border: `1px solid ${active ? "var(--color-accent)" : "var(--color-border)"}`,
-                          color: active ? "var(--color-accent)" : "var(--color-muted)",
+                          padding: "4px 14px", fontSize: 11, cursor: "pointer",
+                          background: active ? "var(--color-accent)" : "transparent",
+                          color: active ? "#fff" : "var(--color-muted)",
                           fontWeight: active ? 600 : 400,
+                          border: "none",
+                          borderLeft: i > 0 ? "1px solid var(--color-border)" : "none",
+                          transition: "background 0.12s, color 0.12s",
                         }}
                       >
                         {dt.charAt(0).toUpperCase() + dt.slice(1)}
@@ -6251,23 +6795,75 @@ export default function BenchmarkVisualizer() {
                         </div>
                       </label>
                     </div>
+
+                    {/* Per-sort timeout */}
+                    <div>
+                      <label className="flex items-start gap-2" style={{ cursor: "pointer" }}>
+                        <input
+                          type="checkbox"
+                          checked={timeoutEnabled}
+                          onChange={e => setTimeoutEnabled(e.target.checked)}
+                          style={{ marginTop: 2, accentColor: "var(--color-accent)" }}
+                        />
+                        <div style={{ flex: 1 }}>
+                          <span className="text-xs font-semibold" style={{ color: "var(--color-text)" }}>
+                            Per-sort timeout
+                          </span>
+                          <p className="text-xs mt-0.5" style={{ color: "var(--color-muted)" }}>
+                            Any single sort exceeding this wall-clock budget is marked timed out and the algorithm is excluded from larger n.
+                            <span style={{ color: "#ffb74d" }}> Disable for long benchmarks where a 10 s cap would prematurely terminate slow O(n²) algorithms.</span>
+                          </p>
+                          <div className="flex items-center gap-2 mt-1.5">
+                            <input
+                              type="number"
+                              min={1}
+                              max={600}
+                              value={timeoutSec}
+                              disabled={!timeoutEnabled}
+                              onChange={e => {
+                                const v = Number(e.target.value);
+                                if (Number.isFinite(v) && v >= 1 && v <= 600) setTimeoutSec(v);
+                              }}
+                              onClick={e => e.stopPropagation()}
+                              style={{
+                                fontFamily: "monospace", fontSize: 11, width: 60,
+                                padding: "3px 6px", borderRadius: 4,
+                                background: "var(--color-surface-2)",
+                                border: "1px solid var(--color-border)",
+                                color: "var(--color-text)",
+                                opacity: timeoutEnabled ? 1 : 0.4,
+                                cursor: timeoutEnabled ? "text" : "not-allowed",
+                              }}
+                            />
+                            <span style={{ fontSize: 11, fontFamily: "monospace", color: "var(--color-muted)" }}>
+                              seconds
+                            </span>
+                          </div>
+                        </div>
+                      </label>
+                    </div>
                   </div>
                 )}
               </div>}
 
-              {/* Buttons */}
-              {status !== "running" && (
-                <div className="text-xs mb-1.5 print:hidden flex flex-col gap-0.5" style={{ color: "var(--color-muted)", fontFamily: "monospace" }}>
-                  <span>
-                    {[...activeAlgos, ...(customSortEnabled && customSortCode.trim() && !customSortError ? ["custom"] : [])]
-                      .map(id => ALGO_NAMES[id] ?? id)
-                      .join(", ") || <span style={{ color: "#ef5350" }}>no algorithms selected</span>}
-                  </span>
-                  <span>
-                    {[...scenarios].join(", ")} · n={sortedSizes.map(n => fmtN(n)).join(", ")} · {rounds} round{rounds !== 1 ? "s" : ""} · {warmup} warm-up
-                  </span>
+              {/* Note when Advanced is hidden by level gate */}
+              {!has("advanced") && (
+                <div className="print:hidden mb-4" style={{
+                  fontSize: 10, fontFamily: "monospace", lineHeight: 1.5,
+                  padding: "8px 10px", borderRadius: 5,
+                  background: "rgba(255,183,77,0.08)",
+                  border: "1px solid rgba(255,183,77,0.35)",
+                  color: "var(--color-muted)",
+                }}>
+                  <span style={{ color: "#ffb74d", fontWeight: 700 }}>Tip · </span>
+                  Advanced configuration (scenario mix, custom Logos variants, adversarial input,
+                  worker isolation, per-sort timeout, custom sort editor) is gated to{" "}
+                  <strong style={{ color: "var(--color-text)" }}>Advanced</strong> level.
+                  Switch the level selector in the sidebar to unlock these knobs.
                 </div>
               )}
+
+              {/* Buttons */}
               <div className="print:hidden flex gap-1.5">
                 {status === "running" ? (
                   <>
@@ -6303,6 +6899,44 @@ export default function BenchmarkVisualizer() {
                   </>
                 )}
               </div>
+
+              {/* Status: algorithms + settings + current run progress. Sits below the
+                  run/stop buttons so it reads as "what's running" rather than "what to run". */}
+              <div className="text-xs mt-2 print:hidden flex flex-col gap-0.5" style={{ color: "var(--color-muted)", fontFamily: "monospace" }}>
+                {status === "running" ? (
+                  <>
+                    <span>
+                      <span style={{ color: "var(--color-accent)", fontWeight: 600 }}>
+                        {currentAlgo ? (ALGO_NAMES[currentAlgo] ?? currentAlgo) : "…"}
+                      </span>
+                      {" · "}
+                      n={currentN?.toLocaleString() ?? "…"}
+                      {" · "}
+                      <span style={{ color: "var(--color-text)" }}>{progress.done}/{progress.total}</span>
+                      {progress.total > 0 && (
+                        <span style={{ opacity: 0.7 }}>
+                          {" ("}{Math.round((progress.done / progress.total) * 100)}%)
+                        </span>
+                      )}
+                    </span>
+                    <span>
+                      {[...scenarios].join(", ")} · {rounds} round{rounds !== 1 ? "s" : ""} · {warmup} warm-up{useWorkerIsolation ? " · worker isolation" : ""}{adversarialEnabled ? " · adversarial" : ""}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span>
+                      {[...activeAlgos, ...(customSortEnabled && customSortCode.trim() && !customSortError ? ["custom"] : [])]
+                        .map(id => ALGO_NAMES[id] ?? id)
+                        .join(", ") || <span style={{ color: "#ef5350" }}>no algorithms selected</span>}
+                    </span>
+                    <span>
+                      {[...scenarios].join(", ")} · n={sortedSizes.map(n => fmtN(n)).join(", ")} · {rounds} round{rounds !== 1 ? "s" : ""} · {warmup} warm-up
+                    </span>
+                  </>
+                )}
+              </div>
+
               {/* Stop-delay hint: shown only in main-thread mode when Stop hasn't taken effect yet */}
               {stopPending && status === "running" && !useWorkerIsolation && (
                 <div
@@ -6334,10 +6968,17 @@ export default function BenchmarkVisualizer() {
           </div>
         </div>
 
-        {/* ── Right pane: performance curve ── */}
-        <div className="lg:w-1/2 border-l" style={{ borderColor: "var(--color-border)" }}>
+        {/* ── Right pane: performance curve ──
+            Must scroll independently or the Time Complexity Analysis section
+            at the bottom falls below the viewport on desktop and is unreachable. */}
+        <div className="lg:w-1/2 lg:h-full lg:overflow-y-auto border-l" style={{ borderColor: "var(--color-border)" }}>
 
           <div className="px-5 py-4 flex flex-col gap-4">
+            {/* Skeleton previews — show what will appear once the benchmark runs.
+                Visible only when we haven't run yet AND aren't currently running. */}
+            {!hasCurveData && status !== "running" && (
+              <ResultsSkeleton algoCount={Math.max(1, [...activeAlgos].length + (customSortEnabled && customSortCode.trim() ? 1 : 0))} />
+            )}
             {(hasCurveData || status === "running") && (
               <div
                 className="rounded-xl p-4"
@@ -6476,11 +7117,76 @@ export default function BenchmarkVisualizer() {
                 </div>
 
                 <div>
+                {/* Tab-hidden warning banner — browsers throttle background-tab
+                    timers, so any timing captured while hidden is unreliable.
+                    Dismissable so the user can acknowledge and move on. */}
+                {tabHiddenDuringRun && (status === "running" || status === "done") && (
+                  <div
+                    className="mt-2"
+                    style={{
+                      fontSize: 11, fontFamily: "monospace", lineHeight: 1.5,
+                      padding: "8px 12px", borderRadius: 6,
+                      background: "rgba(255,183,77,0.10)",
+                      border: "1px solid rgba(255,183,77,0.55)",
+                      color: "#ffb74d",
+                      display: "flex", alignItems: "flex-start", gap: 8,
+                    }}
+                  >
+                    <span style={{ flex: 1 }}>
+                      <strong style={{ fontWeight: 700 }}>⚠ Tab was backgrounded during this run.</strong>{" "}
+                      <span style={{ color: "var(--color-text)" }}>
+                        Browsers throttle timer callbacks in hidden tabs, so timings recorded while you
+                        were on another tab are likely slower than reality.
+                      </span>{" "}
+                      <span style={{ color: "var(--color-muted)" }}>
+                        Re-run with this tab in the foreground for accurate numbers.
+                      </span>
+                    </span>
+                    <button
+                      onClick={() => setTabHiddenDuringRun(false)}
+                      title="Dismiss this warning"
+                      style={{
+                        background: "none", border: "none",
+                        color: "#ffb74d", cursor: "pointer", padding: 0, font: "inherit",
+                        flexShrink: 0,
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+                {/* Failure summary banner — surfaces broken sorts so the user
+                    knows the rankings include unreliable results. */}
+                {status === "done" && (() => {
+                  const failedIds = Object.entries(sampleProofs)
+                    .filter(([, p]) => p.failed)
+                    .map(([id]) => id);
+                  if (failedIds.length === 0) return null;
+                  const names = failedIds.map(id => ALGO_NAMES[id] ?? id).join(", ");
+                  return (
+                    <div
+                      className="mt-2"
+                      style={{
+                        fontSize: 11, fontFamily: "monospace", lineHeight: 1.5,
+                        padding: "8px 12px", borderRadius: 6,
+                        background: "rgba(239,83,80,0.10)",
+                        border: "1px solid rgba(239,83,80,0.55)",
+                        color: "#ef5350",
+                      }}
+                    >
+                      <strong style={{ fontWeight: 700 }}>✗ {failedIds.length} sort{failedIds.length === 1 ? "" : "s"} produced out-of-order output:</strong>{" "}
+                      <span style={{ color: "var(--color-text)" }}>{names}</span>.
+                      <span style={{ color: "var(--color-muted)", marginLeft: 6 }}>
+                        Timings for these algorithms are unreliable — the result is not a valid sort.
+                      </span>
+                    </div>
+                  );
+                })()}
                 {/* Curve chart */}
                 {hasCurveData && (
                   <>
                     {/* Time / Space toggle — centered above the chart */}
-                    <div className="print:hidden" style={{ display: "flex", justifyContent: "center", marginBottom: 4, marginTop: 15 }}>
+                    <div className="print:hidden" style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 8, marginBottom: 4, marginTop: 15 }}>
                     <div className="flex rounded overflow-hidden" style={{ border: "1px solid var(--color-border)" }}>
                       {([
                         { id: "time",         label: "time",        title: undefined,                                                              minLevel: "basic" },
@@ -6504,6 +7210,57 @@ export default function BenchmarkVisualizer() {
                         </button>
                       ))}
                     </div>
+
+                    {/* Ghost-mode toggle — overlays past runs as faded polylines */}
+                    {(() => {
+                      const ghostCount = Object.values(ghostRuns).reduce((s, runs) => s + runs.length, 0);
+                      return (
+                        <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                          <button
+                            onClick={() => setGhostMode(g => !g)}
+                            disabled={ghostCount === 0 && !ghostMode}
+                            title={ghostCount === 0
+                              ? "No prior runs stored yet — run the benchmark to start building history"
+                              : ghostMode
+                                ? `Hide ghost overlay (${ghostCount} stored run${ghostCount === 1 ? "" : "s"})`
+                                : `Show prior runs as faded curves (${ghostCount} stored run${ghostCount === 1 ? "" : "s"})`}
+                            style={{
+                              padding: "2px 8px", fontSize: 10,
+                              cursor: ghostCount === 0 && !ghostMode ? "not-allowed" : "pointer",
+                              opacity: ghostCount === 0 && !ghostMode ? 0.4 : 1,
+                              borderRadius: 4,
+                              background: ghostMode ? "var(--color-accent-muted)" : "var(--color-surface-1)",
+                              border: `1px solid ${ghostMode ? "var(--color-accent)" : "var(--color-border)"}`,
+                              color: ghostMode ? "var(--color-accent)" : "var(--color-muted)",
+                              fontWeight: ghostMode ? 600 : 400,
+                              fontFamily: "monospace",
+                            }}
+                          >
+                            👻 Ghost{ghostCount > 0 ? ` ×${ghostCount}` : ""}
+                          </button>
+                          {ghostCount > 0 && (
+                            <button
+                              onClick={() => {
+                                if (confirm(`Clear all ${ghostCount} stored ghost run${ghostCount === 1 ? "" : "s"}? This cannot be undone.`)) {
+                                  setGhostRuns({});
+                                }
+                              }}
+                              title="Clear ghost history"
+                              style={{
+                                padding: "2px 6px", fontSize: 10,
+                                cursor: "pointer", borderRadius: 4,
+                                background: "var(--color-surface-1)",
+                                border: "1px solid var(--color-border)",
+                                color: "var(--color-muted)",
+                                fontFamily: "monospace",
+                              }}
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
                     </div>{/* end centering wrapper */}
 
                     {/* 3D chart, memory flamegraph, delta chart, or 2D curve chart */}
@@ -6553,6 +7310,8 @@ export default function BenchmarkVisualizer() {
                           mode={chartMode as "time" | "space" | "ratio" | "space-ratio"}
                           onExportReady={fn => { exportChartPNGRef.current = fn; }}
                           advanced={has("advanced")}
+                          ghostRuns={ghostRuns}
+                          ghostMode={ghostMode}
                         />
                         {/* Big-O reference legend — hidden in normalized modes */}
                         {chartMode !== "ratio" && chartMode !== "space-ratio" && (
@@ -6717,6 +7476,7 @@ export default function BenchmarkVisualizer() {
                               maxSpaceBytes={maxSpaceBytes}
                               maxTotalSteps={maxTotalSteps}
                               onStop={status === "running" ? () => stopAlgo(id) : undefined}
+                              failed={sampleProofs[id]?.failed}
                               pulseEnabled={pulseEnabled}
                               onTogglePulse={togglePulse}
                             />
@@ -6971,7 +7731,26 @@ export default function BenchmarkVisualizer() {
                           <span style={{ width: 5, height: 5, borderRadius: "50%", background: dotColor, flexShrink: 0, display: "inline-block" }} />
                           <span className="min-w-0 flex flex-col leading-tight">
                             <WithAlgoTooltip id={row.id}>
-                              <span className="truncate" style={{ color: "var(--color-text)", fontWeight: row.rank === 1 ? 600 : 400 }}>{ALGO_NAMES[row.id]}</span>
+                              <span className="truncate flex items-center gap-1" style={{
+                                color: sampleProofs[row.id]?.failed ? "#ef5350" : "var(--color-text)",
+                                fontWeight: row.rank === 1 ? 600 : 400,
+                                textDecoration: sampleProofs[row.id]?.failed ? "line-through" : "none",
+                                textDecorationColor: "rgba(239,83,80,0.55)",
+                              }}>
+                                {ALGO_NAMES[row.id]}
+                                {sampleProofs[row.id]?.failed && (
+                                  <span title={`Sort produced out-of-order output (sample index ${sampleProofs[row.id].badIdx}). Result is unreliable.`} style={{
+                                    fontSize: 6, fontWeight: 700, fontFamily: "monospace",
+                                    padding: "0px 3px", borderRadius: 2, whiteSpace: "nowrap",
+                                    background: "rgba(239,83,80,0.18)",
+                                    border: "1px solid rgba(239,83,80,0.55)",
+                                    color: "#ef5350", textDecoration: "none",
+                                    flexShrink: 0,
+                                  }}>
+                                    ✗ BROKEN
+                                  </span>
+                                )}
+                              </span>
                             </WithAlgoTooltip>
                             {has("research") && largestDone != null && (
                               <button title={`Load worst-case input for ${ALGO_NAMES[row.id]}`} onClick={() => { const arr = makeAdversarialInput(row.id, Math.min(largestDone, 100)); alert(`Adversarial input for ${ALGO_NAMES[row.id]} (n=${Math.min(largestDone, 100)}):\n[${arr.slice(0,20).join(", ")}${arr.length > 20 ? "..." : ""}]`); }} style={{ fontSize: 7, padding: "0px 4px", borderRadius: 2, cursor: "pointer", background: "rgba(239,83,80,0.1)", border: "1px solid rgba(239,83,80,0.25)", color: "#ef5350", marginTop: 1 }}>⚠ worst</button>

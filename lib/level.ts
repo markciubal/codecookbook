@@ -2,7 +2,7 @@ export const LEVELS = ["basic", "intermediate", "advanced", "research"] as const
 export type Level = typeof LEVELS[number];
 
 export const LEVEL_KEY = "cc-level";
-export const DEFAULT_LEVEL: Level = "intermediate";
+export const DEFAULT_LEVEL: Level = "research";
 
 export const LEVEL_LABELS: Record<Level, string> = {
   basic:        "Basic",
