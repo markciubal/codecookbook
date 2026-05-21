@@ -33,6 +33,75 @@ export const DEFAULT_LOGOS_PARAMS: LogosParams = {
 export interface CustomDistribution {
   preSortedPct: number;  // 0–100: % of elements already in sorted position (prefix sorted)
   duplicatePct: number;  // 0–100: % of elements replaced with duplicates
+  // Optional integer-specific knobs:
+  uniqueOnly?: boolean;  // if true, guarantee no duplicate values (overrides duplicatePct)
+  fullInt32?: boolean;   // if true, draw from the full signed 32-bit range [INT32_MIN, INT32_MAX]
+}
+
+// 32-bit signed integer bounds — used by the `fullInt32` integer option.
+const INT32_MIN = -2_147_483_648;
+const INT32_MAX =  2_147_483_647;
+const INT32_RANGE = INT32_MAX - INT32_MIN + 1; // 2^32
+
+/**
+ * Draw a random integer over the configured range.
+ *   • fullInt32 = true  → uniform across the full signed 32-bit range
+ *   • fullInt32 = false → uniform in [0, 10000) (the legacy small range)
+ *
+ * We use two Math.random()s for the 32-bit case because Math.random() only
+ * yields 52 bits of precision but distributes them unevenly when multiplied
+ * by 2^32 — the two-half approach gives uniform coverage of all 2^32 values.
+ */
+function randInt(fullInt32: boolean): number {
+  if (!fullInt32) return Math.floor(Math.random() * 10_000);
+  // High and low 16-bit halves combined via shift, then re-centered to signed.
+  const hi = Math.floor(Math.random() * 0x10000);
+  const lo = Math.floor(Math.random() * 0x10000);
+  // Use a 32-bit unsigned, then map to signed by subtracting 2^31 — uniform.
+  const unsigned = (hi * 0x10000 + lo) >>> 0;
+  return unsigned + INT32_MIN; // shift into signed range
+}
+
+/**
+ * Generate n unique integers using rejection sampling over the chosen range.
+ *
+ * - For tiny ranges where n approaches the range size, we fall back to
+ *   "build the full range, shuffle, take first n" (Fisher–Yates) so the
+ *   rejection rate stays bounded.
+ * - For very wide ranges (fullInt32), simple rejection is fine because the
+ *   range (~4.3 billion) dwarfs any practical n.
+ */
+function uniqueIntegers(n: number, fullInt32: boolean): number[] {
+  const rangeSize = fullInt32 ? INT32_RANGE : 10_000;
+  if (n > rangeSize) {
+    // Caller asked for more unique values than the range can supply. Cap at
+    // range size; the resulting array will be a permutation of the entire range.
+    n = rangeSize;
+  }
+  // Threshold heuristic: when n is more than half the range, materialise the
+  // full range and shuffle. Below that, rejection sampling with a Set is faster.
+  if (rangeSize <= 65_536 || n > rangeSize / 2) {
+    // Materialise the legacy 0..9999 range — only fast for the small case.
+    const lo = fullInt32 ? INT32_MIN : 0;
+    const pool = Array.from({ length: rangeSize }, (_, i) => lo + i);
+    // Fisher-Yates partial shuffle: only randomise the first n positions.
+    for (let i = 0; i < n; i++) {
+      const j = i + Math.floor(Math.random() * (rangeSize - i));
+      [pool[i], pool[j]] = [pool[j], pool[i]];
+    }
+    return pool.slice(0, n);
+  }
+  // Rejection sampling — fast when n << rangeSize (the common case for 32-bit).
+  const seen = new Set<number>();
+  const out: number[] = [];
+  while (out.length < n) {
+    const v = randInt(fullInt32);
+    if (!seen.has(v)) {
+      seen.add(v);
+      out.push(v);
+    }
+  }
+  return out;
 }
 
 export function generateBenchmarkInput(
@@ -40,13 +109,23 @@ export function generateBenchmarkInput(
   scenario: BenchmarkScenario,
   custom?: CustomDistribution,
 ): number[] {
+  const fullInt32 = custom?.fullInt32 === true;
+  const uniqueOnly = custom?.uniqueOnly === true;
   let arr: number[];
   switch (scenario) {
     case "random":
-      arr = Array.from({ length: n }, () => Math.floor(Math.random() * 10_000));
+      arr = uniqueOnly
+        ? uniqueIntegers(n, fullInt32)
+        : Array.from({ length: n }, () => randInt(fullInt32));
       break;
     case "nearlySorted": {
-      arr = Array.from({ length: n }, (_, i) => i + 1);
+      // "Nearly sorted" needs increasing values regardless of mode. If
+      // fullInt32 is requested, stretch the increment to cover the range so
+      // values land across the full int32 span instead of clustering at the
+      // bottom — preserves the "nearly sorted" property of monotone order.
+      const stride = fullInt32 ? Math.max(1, Math.floor(INT32_RANGE / Math.max(n, 1))) : 1;
+      const base   = fullInt32 ? INT32_MIN : 1;
+      arr = Array.from({ length: n }, (_, i) => base + i * stride);
       const swaps = Math.max(1, Math.floor(n * 0.05));
       for (let i = 0; i < swaps; i++) {
         const indexA = Math.floor(Math.random() * n);
@@ -56,16 +135,31 @@ export function generateBenchmarkInput(
       break;
     }
     case "reversed":
-      arr = Array.from({ length: n }, (_, i) => n - i);
+      arr = fullInt32
+        ? Array.from({ length: n }, (_, i) => INT32_MAX - i)
+        : Array.from({ length: n }, (_, i) => n - i);
       break;
     case "duplicates":
-      arr = Array.from({ length: n }, () => Math.floor(Math.random() * Math.ceil(n / 5)));
+      // Duplicate scenario explicitly wants duplicates — uniqueOnly is
+      // incompatible; we honour scenario semantics (intentional duplicates)
+      // unless uniqueOnly is set, in which case the array becomes all unique
+      // in a tight range (loses scenario character but respects the flag).
+      if (uniqueOnly) {
+        arr = uniqueIntegers(n, fullInt32);
+      } else {
+        const rangeCeil = fullInt32 ? Math.max(2, Math.ceil(n / 5)) : Math.ceil(n / 5);
+        arr = Array.from({ length: n }, () => Math.floor(Math.random() * rangeCeil));
+      }
       break;
     case "sorted":
-      arr = Array.from({ length: n }, (_, i) => i + 1);
+      arr = fullInt32
+        ? Array.from({ length: n }, (_, i) => INT32_MIN + i * Math.max(1, Math.floor(INT32_RANGE / Math.max(n, 1))))
+        : Array.from({ length: n }, (_, i) => i + 1);
       break;
     default:
-      arr = Array.from({ length: n }, () => Math.floor(Math.random() * 10_000));
+      arr = uniqueOnly
+        ? uniqueIntegers(n, fullInt32)
+        : Array.from({ length: n }, () => randInt(fullInt32));
   }
 
   if (custom) {
@@ -75,8 +169,10 @@ export function generateBenchmarkInput(
       const prefix = arr.slice(0, prefixLen).sort((a, b) => a - b);
       for (let i = 0; i < prefixLen; i++) arr[i] = prefix[i];
     }
-    // Apply duplicate injection: replace duplicatePct% of elements with the median value
-    if (custom.duplicatePct > 0) {
+    // Apply duplicate injection: replace duplicatePct% of elements with the median value.
+    // Skip when uniqueOnly is set — those two options are mutually exclusive
+    // and uniqueOnly takes priority.
+    if (custom.duplicatePct > 0 && !custom.uniqueOnly) {
       const count = Math.floor(n * custom.duplicatePct / 100);
       const dupVal = arr[Math.floor(n / 2)];
       for (let i = 0; i < count; i++) {

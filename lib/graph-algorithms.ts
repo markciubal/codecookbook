@@ -416,9 +416,16 @@ export function dijkstraSteps(
   nodes?: GraphNode[],
   edges?: GraphEdge[],
 ): GraphStep[] {
-  const _nodes = nodes ?? DIRECTED_NODES;
-  const _edges = edges ?? DIRECTED_EDGES;
-  const adj = getAdjacency(_nodes, _edges, true);
+  // Default to the UNDIRECTED graph so any source node can reach every other
+  // vertex. The DIRECTED graph used previously is a DAG — picking a sink (G/H)
+  // or near-sink (D/E/F) as source produced "all ∞" output, which looked
+  // broken even though it was mathematically correct directed-Dijkstra.
+  const _nodes = nodes ?? UNDIRECTED_NODES;
+  const _edges = edges ?? UNDIRECTED_EDGES;
+  // Treat edges as undirected: an edge A↔B is traversable in both directions.
+  // The visualizer also passes `directed: false` via GRAPH_ALGO_META.dijkstra,
+  // so when a caller supplies a custom graph, this matches that semantic too.
+  const adj = getAdjacency(_nodes, _edges, false);
 
   const steps: GraphStep[] = [];
   let comparisons = 0;
@@ -988,7 +995,12 @@ export const GRAPH_ALGO_META: Record<GraphAlgorithm, GraphAlgoMeta> = {
     space: "O(V)",
     description:
       "Finds shortest paths from a source to all vertices in a weighted graph with non-negative edge weights. Uses a min-priority queue and greedy relaxation.",
-    directed: true,
+    // Demonstrated on an UNDIRECTED weighted graph so every source can reach
+    // every other vertex. The previous DIRECTED default was a DAG, which left
+    // sink nodes (D, F, G, H) unable to reach anything when chosen as source.
+    // For directed-graph shortest paths, see Bellman-Ford which preserves
+    // direction (and supports negative weights).
+    directed: false,
     queueLabel: "Priority Queue",
   },
   "bellman-ford": {

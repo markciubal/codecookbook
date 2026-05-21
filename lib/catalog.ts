@@ -110,7 +110,16 @@ export type MathEntry = {
   blurb: string;
 };
 
-export type CatalogEntry = SortingEntry | DSEntry | BenchmarkEntry | CustomSortEntry | CompareEntry | ToolEntry | SearchEntry | GraphAlgoEntry | DPEntry | StringAlgoEntry | GeometryEntry | MathEntry;
+export type ExpressionEntry = {
+  kind: "expression";
+  name: string;
+  path: string;
+  time: string;
+  space: string;
+  blurb: string;
+};
+
+export type CatalogEntry = SortingEntry | DSEntry | BenchmarkEntry | CustomSortEntry | CompareEntry | ToolEntry | SearchEntry | GraphAlgoEntry | DPEntry | StringAlgoEntry | GeometryEntry | MathEntry | ExpressionEntry;
 
 export const SEARCHING_ALGORITHMS: SearchEntry[] = [
   { kind: "search", name: "Linear Search",      path: "/search/linear",        time: "O(n)",       space: "O(1)", blurb: "Scans every element left to right until the target is found. Works on unsorted arrays." },
@@ -227,6 +236,11 @@ export const MATH_ALGORITHMS: MathEntry[] = [
   { kind: "math", name: "Fast Exponentiation",    path: "/math/fast-exp", time: "O(log n)",       space: "O(1)", blurb: "Square-and-multiply: compute aⁿ in O(log n) multiplications by decomposing the exponent in binary." },
 ];
 
+export const EXPRESSION_ALGORITHMS: ExpressionEntry[] = [
+  { kind: "expression", name: "Shunting Yard",          path: "/expressions/shunting-yard", time: "O(n)", space: "O(n)", blurb: "Dijkstra's infix → postfix converter. Operator stack + output queue; precedence and associativity drive the popping rules." },
+  { kind: "expression", name: "Postfix Evaluation (FPE)", path: "/expressions/postfix-eval",  time: "O(n)", space: "O(n)", blurb: "Stack-based evaluator for postfix (RPN) expressions. Numbers push; operators pop two and push the result. The final stack value is the answer." },
+];
+
 export const CUSTOM_SORT: CustomSortEntry = {
   kind: "custom",
   name: "Sort Your Data",
@@ -292,7 +306,8 @@ export const DATA_STRUCTURES: DSEntry[] = [
   { kind: "ds", name: "Queue",        path: "/ds/queue",        time: "O(1)",     space: "O(n)",   blurb: "First-In-First-Out. Enqueue at back, dequeue from the front." },
   { kind: "ds", name: "Deque",        path: "/ds/deque",        time: "O(1)",     space: "O(n)",   blurb: "Double-ended queue. Push and pop from both front and back." },
   { kind: "ds", name: "Linked List",  path: "/ds/linked-list",  time: "O(n)",     space: "O(n)",   blurb: "Nodes connected by pointers. Insert, delete, and traverse." },
-  { kind: "ds", name: "Binary Heap",  path: "/ds/binary-heap",  time: "O(log n)", space: "O(n)",   blurb: "Min-heap tree. Insert and extract-min with percolate operations." },
+  { kind: "ds", name: "Binary Heap",  path: "/ds/binary-heap",  time: "O(log n)", space: "O(n)",   blurb: "Min/max heap tree. Insert, extract-root, peek, heapify, and full heap-sort animation with percolate operations." },
+  { kind: "ds", name: "2-3 Tree",     path: "/ds/two-three",    time: "O(log n)", space: "O(n)",   blurb: "Self-balancing search tree with 2-nodes (1 key, 2 children) and 3-nodes (2 keys, 3 children). Splits propagate up to keep height perfectly balanced." },
   { kind: "ds", name: "Hash Table",   path: "/ds/hash-table",   time: "O(1) avg", space: "O(n)",   blurb: "Hash function maps keys to buckets. Separate chaining for collisions." },
   { kind: "ds", name: "BST",          path: "/ds/bst",          time: "O(log n)", space: "O(n)",   blurb: "Binary Search Tree. Insert, search, delete, and traversal animations." },
   { kind: "ds", name: "Graph",        path: "/ds/graph",        time: "O(V+E)",   space: "O(V)",   blurb: "Undirected graph with BFS and DFS traversal step-by-step." },

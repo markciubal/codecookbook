@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
-import { Search, Plus, RotateCcw, Play, Pause, SkipForward } from "lucide-react";
+import { Search, Plus, RotateCcw, Dices, ListOrdered } from "lucide-react";
+import { StepTreeLayout, StepNav, SidebarSection, StepMessage, TraverseControls, TRAVERSAL_LABELS, type TraversalKind } from "./StepTreeLayout";
 
 // ── Trie data structure ───────────────────────────────────────────────────────
 
@@ -88,6 +89,55 @@ function buildSearchSteps(root: TrieNode, word: string): TrieStep[] {
   } else {
     steps.push({ trie: cloneNode(root), highlighted: [node.id], message: `"${word}" is a prefix but NOT a complete word` });
   }
+  return steps;
+}
+
+// ── Traversal steps ───────────────────────────────────────────────────────────
+//
+// Tries are multi-way and have no key ordering inside a node, so in-order
+// doesn't apply. BFS walks level by level; pre-order DFS visits a node before
+// its children (the natural way to *enumerate* all stored words); post-order
+// visits children first. When the walk reaches an end-of-word node, the path
+// from the root spells a complete word, which the step annotates.
+
+function buildTrieTraversalSteps(root: TrieNode, kind: TraversalKind): TrieStep[] {
+  const label = TRAVERSAL_LABELS[kind];
+  const order: { id: string; label: string }[] = [];
+  const entryFor = (node: TrieNode, path: string) => {
+    const ch = node.char === "" ? "·" : node.char;
+    return { id: node.id, label: node.isEnd ? `'${ch}' ✓ "${path}"` : `'${ch}'` };
+  };
+
+  if (kind === "bfs") {
+    const q: { node: TrieNode; path: string }[] = [{ node: root, path: "" }];
+    while (q.length) {
+      const { node, path } = q.shift()!;
+      order.push(entryFor(node, path));
+      for (const child of node.children.values()) q.push({ node: child, path: path + child.char });
+    }
+  } else {
+    const visit = (node: TrieNode, path: string) => {
+      const entry = entryFor(node, path);
+      if (kind === "pre") order.push(entry);
+      for (const child of node.children.values()) visit(child, path + child.char);
+      if (kind === "post") order.push(entry);
+    };
+    visit(root, "");
+  }
+
+  const how =
+    kind === "bfs" ? "dequeue a node, visit it, enqueue its children — level by level"
+    : kind === "pre" ? "visit a node before its children — the natural way to enumerate every stored word"
+    : "visit all children before the node itself";
+
+  const steps: TrieStep[] = [{ trie: cloneNode(root), highlighted: [], message: `${label} — ${how}.` }];
+  const visited: string[] = [];
+  order.forEach((e, i) => {
+    visited.push(e.id);
+    steps.push({ trie: cloneNode(root), highlighted: [...visited], message: `${label}: visit ${e.label} (${i + 1}/${order.length})` });
+  });
+  const words = order.filter((e) => e.label.includes("✓")).length;
+  steps.push({ trie: cloneNode(root), highlighted: order.map((e) => e.id), message: `${label} complete — visited ${order.length} nodes, found ${words} complete word${words === 1 ? "" : "s"}.` });
   return steps;
 }
 
@@ -285,6 +335,7 @@ function buildInitialTrie(): TrieNode {
 export default function TrieVisualizer() {
   const [trie, setTrie] = useState<TrieNode>(buildInitialTrie);
   const [inputWord, setInputWord] = useState("");
+  const [customList, setCustomList] = useState("");
   const [steps, setSteps] = useState<TrieStep[]>([]);
   const [stepIdx, setStepIdx] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -346,6 +397,59 @@ export default function TrieVisualizer() {
     setInputWord("");
   }, [inputWord, trie, startAnimation]);
 
+  // Random guided lesson — fresh words that deliberately share a prefix so the
+  // learner can see node reuse, then a found-word search and a prefix-only
+  // search, all led by an instruction.
+  const handleRandomLesson = useCallback(() => {
+    nodeCounter = 0;
+    const prefixes = ["ca", "ba", "do", "ra", "pl", "tr", "ma", "fi"];
+    const suffixes = ["t", "r", "n", "d", "p", "ng", "ck", "ll", "sh", "b", "g"];
+    const base = prefixes[Math.floor(Math.random() * prefixes.length)];
+    const chosen = new Set<string>();
+    while (chosen.size < 3) chosen.add(base + suffixes[Math.floor(Math.random() * suffixes.length)]);
+    const words = [...chosen].sort(() => Math.random() - 0.5);
+
+    let t = makeNode("");
+    const emptyRoot = cloneNode(t);
+    const allSteps: TrieStep[] = [];
+    for (const w of words) {
+      allSteps.push(...buildInsertSteps(t, w));
+      t = insertWord(t, w);
+    }
+    const searchWord = words[Math.floor(Math.random() * words.length)];
+    allSteps.push(...buildSearchSteps(t, searchWord));
+    allSteps.push(...buildSearchSteps(t, base));
+
+    const intro = `Lesson — insert [${words.join(", ")}], then search "${searchWord}" and the prefix "${base}". All three words share the prefix "${base}", so they reuse the same first ${base.length} node${base.length === 1 ? "" : "s"} — watch the branch fork only where the words differ. The prefix search lands on an existing node that is NOT marked end-of-word.`;
+    allSteps.unshift({ trie: emptyRoot, highlighted: [], message: intro });
+
+    setTrie(t);
+    startAnimation(allSteps);
+  }, [startAnimation]);
+
+  const handleTraverse = useCallback((kind: TraversalKind) => {
+    startAnimation(buildTrieTraversalSteps(trie, kind));
+  }, [trie, startAnimation]);
+
+  // Build a fresh trie from a user-supplied word list and play the inserts.
+  const handleCustomDemo = useCallback(() => {
+    nodeCounter = 0;
+    const words = Array.from(new Set(
+      customList.toLowerCase().split(/[^a-z]+/).filter(Boolean)
+    )).slice(0, 12);
+    if (words.length === 0) { setMessage("Enter words separated by commas or spaces, e.g. apple, app, apt, bat"); return; }
+    let t = makeNode("");
+    const emptyRoot = cloneNode(t);
+    const allSteps: TrieStep[] = [];
+    for (const w of words) {
+      allSteps.push(...buildInsertSteps(t, w));
+      t = insertWord(t, w);
+    }
+    allSteps.unshift({ trie: emptyRoot, highlighted: [], message: `Custom demo — insert [${words.join(", ")}] into an empty trie. Watch shared prefixes reuse the same nodes.` });
+    setTrie(t);
+    startAnimation(allSteps);
+  }, [customList, startAnimation]);
+
   const handleReset = useCallback(() => {
     nodeCounter = 0;
     const fresh = buildInitialTrie();
@@ -356,49 +460,100 @@ export default function TrieVisualizer() {
     setMessage("Reset to preset words.");
   }, []);
 
-  const handleStep = () => {
-    if (stepIdx < steps.length - 1) setStepIdx((p) => p + 1);
-  };
+  const canvas = (
+    <div
+      className="rounded-xl overflow-auto h-full flex items-start"
+      style={{
+        background: "var(--color-surface-1)",
+        border: "1px solid var(--color-border)",
+        minHeight: 200,
+        padding: "16px 8px",
+      }}
+    >
+      <TrieSVG trie={displayTrie} highlighted={highlighted} />
+    </div>
+  );
 
-  return (
-    <div className="flex flex-col min-h-dvh" style={{ background: "var(--color-bg)" }}>
-      {/* Header */}
-      <div className="px-5 pt-6 pb-4" style={{ borderBottom: "1px solid var(--color-border)" }}>
-        <div className="flex flex-wrap items-center gap-2 mb-1">
-          <Search size={20} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
-          <h1 className="text-2xl font-bold">Trie</h1>
-          <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(124,106,247,0.15)", color: "var(--color-accent)" }}>Prefix Tree</span>
-          <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(167,139,250,0.12)", color: "#a78bfa" }}>O(k) search</span>
+  const sidebar = (
+    <>
+      <StepMessage>{message}</StepMessage>
+
+      {/* Controls */}
+      <SidebarSection title="Operations">
+        <div className="flex flex-col gap-2">
+          <input
+            type="text"
+            value={inputWord}
+            onChange={(e) => setInputWord(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") handleInsert(); }}
+            placeholder="e.g. apple"
+            className="rounded-lg px-3 py-2 text-sm w-full outline-none"
+            style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
+          />
+          <div className="flex flex-wrap gap-2">
+            <Btn onClick={handleInsert} primary icon={<Plus size={13} />}>Insert</Btn>
+            <Btn onClick={handleSearch} icon={<Search size={13} />}>Search</Btn>
+            <Btn onClick={handleRandomLesson} icon={<Dices size={13} />}>Random Lesson</Btn>
+            <Btn onClick={handleReset} icon={<RotateCcw size={13} />}>Reset</Btn>
+          </div>
         </div>
-        <p className="text-sm" style={{ color: "var(--color-muted)" }}>
-          A tree-shaped data structure for storing strings. Each path from root to an end-node spells a word.
-        </p>
-      </div>
+      </SidebarSection>
 
-      <div className="flex-1 px-5 pt-5 pb-4 flex flex-col gap-4">
-        {/* Message */}
-        <div
-          className="rounded-lg px-4 py-3 text-sm min-h-10"
-          style={{ background: "var(--color-surface-2)", color: "var(--color-accent)" }}
-        >
-          {message}
+      {/* Preset words */}
+      <SidebarSection title="Preset words (click to set)">
+        <div className="flex flex-wrap gap-2">
+          {PRESET_WORDS.map((w) => (
+            <button
+              key={w}
+              onClick={() => setInputWord(w)}
+              className="px-2 py-0.5 rounded-full text-xs font-mono transition-colors"
+              style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color: "var(--color-text)", cursor: "pointer" }}
+            >
+              {w}
+            </button>
+          ))}
         </div>
+      </SidebarSection>
 
-        {/* SVG Canvas */}
-        <div
-          className="rounded-xl overflow-auto"
-          style={{
-            background: "var(--color-surface-1)",
-            border: "1px solid var(--color-border)",
-            minHeight: 200,
-            padding: "16px 8px",
-          }}
-        >
-          <TrieSVG trie={displayTrie} highlighted={highlighted} />
+      {/* Custom list demo */}
+      <SidebarSection title="Custom list demo">
+        <div className="flex flex-col gap-2">
+          <input
+            type="text"
+            value={customList}
+            onChange={(e) => setCustomList(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") handleCustomDemo(); }}
+            placeholder="apple, app, apt, bat, ball"
+            className="rounded-lg px-3 py-2 text-sm w-full outline-none font-mono"
+            style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
+          />
+          <Btn onClick={handleCustomDemo} icon={<ListOrdered size={13} />}>Build &amp; demo list</Btn>
         </div>
+      </SidebarSection>
 
-        {/* Legend */}
-        <div className="flex flex-wrap gap-4">
+      {/* Traversal */}
+      <SidebarSection title="Traversal / search order">
+        <TraverseControls kinds={["bfs", "pre", "post"]} onTraverse={handleTraverse} />
+      </SidebarSection>
+
+      {/* Playback */}
+      {steps.length > 0 && (
+        <SidebarSection title="Playback">
+          <StepNav
+            stepIdx={stepIdx}
+            stepCount={steps.length}
+            isPlaying={playing}
+            setIsPlaying={setPlaying}
+            setStepIdx={setStepIdx}
+            speed={speed}
+            setSpeed={setSpeed}
+          />
+        </SidebarSection>
+      )}
+
+      {/* Legend */}
+      <SidebarSection title="Legend">
+        <div className="flex flex-col gap-2">
           {[
             { label: "highlighted", color: "var(--color-accent)" },
             { label: "end of word", color: "#22c55e", dashed: true },
@@ -406,114 +561,48 @@ export default function TrieVisualizer() {
           ].map(({ label, color, dashed }) => (
             <div key={label} className="flex items-center gap-1.5">
               <div
-                className="w-3 h-3 rounded-full"
-                style={{
-                  background: color,
-                  outline: dashed ? "1.5px dashed #22c55e" : undefined,
-                  outlineOffset: "2px",
-                }}
+                className="w-3 h-3 rounded-full shrink-0"
+                style={{ background: color, outline: dashed ? "1.5px dashed #22c55e" : undefined, outlineOffset: "2px" }}
               />
               <span className="text-xs" style={{ color: "var(--color-muted)" }}>{label}</span>
             </div>
           ))}
         </div>
+      </SidebarSection>
 
-        {/* Preset words */}
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--color-muted)" }}>
-            Preset words (click to set)
-          </p>
-          <div className="flex flex-wrap gap-2">
-            {PRESET_WORDS.map((w) => (
-              <button
-                key={w}
-                onClick={() => setInputWord(w)}
-                className="px-2 py-0.5 rounded-full text-xs font-mono transition-colors"
-                style={{
-                  background: "var(--color-surface-3)",
-                  border: "1px solid var(--color-border)",
-                  color: "var(--color-text)",
-                  cursor: "pointer",
-                }}
-              >
-                {w}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Controls */}
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap gap-2 items-center">
-            <input
-              type="text"
-              value={inputWord}
-              onChange={(e) => setInputWord(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") handleInsert(); }}
-              placeholder="e.g. apple"
-              className="rounded-lg px-3 py-2 text-sm w-36 outline-none"
-              style={{
-                background: "var(--color-surface-2)",
-                border: "1px solid var(--color-border)",
-                color: "var(--color-text)",
-              }}
-            />
-            <Btn onClick={handleInsert} primary icon={<Plus size={13} />}>Insert</Btn>
-            <Btn onClick={handleSearch} icon={<Search size={13} />}>Search</Btn>
-            <Btn onClick={handleReset} icon={<RotateCcw size={13} />}>Reset</Btn>
-          </div>
-
-          {/* Playback controls */}
-          {steps.length > 0 && (
-            <div className="flex flex-wrap gap-2 items-center">
-              <Btn
-                onClick={() => setPlaying((p) => !p)}
-                disabled={stepIdx >= steps.length - 1 && !playing}
-                icon={playing ? <Pause size={13} /> : <Play size={13} />}
-              >
-                {playing ? "Pause" : "Play"}
-              </Btn>
-              <Btn onClick={handleStep} disabled={stepIdx >= steps.length - 1} icon={<SkipForward size={13} />}>
-                Step
-              </Btn>
-              <Btn onClick={() => { setStepIdx(0); setPlaying(false); }} icon={<RotateCcw size={13} />}>
-                Restart
-              </Btn>
-              <span className="text-xs" style={{ color: "var(--color-muted)" }}>
-                Step {stepIdx + 1}/{steps.length}
-              </span>
-              <div className="flex items-center gap-2 ml-2">
-                <span className="text-xs" style={{ color: "var(--color-muted)" }}>Speed</span>
-                <input
-                  type="range"
-                  min={150}
-                  max={1200}
-                  step={50}
-                  value={1350 - speed}
-                  onChange={(e) => setSpeed(1350 - Number(e.target.value))}
-                  className="w-24"
-                />
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Info */}
-        <div className="grid grid-cols-2 gap-3 mt-2" style={{ maxWidth: 480 }}>
+      {/* Complexity */}
+      <SidebarSection title="Complexity">
+        <div className="grid grid-cols-2 gap-2">
           {[
             { op: "insert(w)", time: "O(k)", desc: "k = word length" },
             { op: "search(w)", time: "O(k)", desc: "k = word length" },
             { op: "prefix(p)", time: "O(k)", desc: "Check prefix exists" },
             { op: "Space",     time: "O(N·k)", desc: "N words, avg length k" },
           ].map(({ op, time, desc }) => (
-            <div key={op} className="rounded-lg p-2.5" style={{ background: "var(--color-surface-2)" }}>
+            <div key={op} className="rounded-lg p-2.5" style={{ background: "var(--color-surface-3)" }}>
               <div className="text-xs font-mono" style={{ color: "var(--color-accent)" }}>{op}</div>
               <div className="text-xs font-bold" style={{ color: "var(--color-text)" }}>{time}</div>
               <div className="text-xs" style={{ color: "var(--color-muted)" }}>{desc}</div>
             </div>
           ))}
         </div>
-      </div>
-    </div>
+      </SidebarSection>
+    </>
+  );
+
+  return (
+    <StepTreeLayout
+      icon={<Search size={20} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />}
+      title="Trie"
+      badges={
+        <>
+          <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(124,106,247,0.15)", color: "var(--color-accent)" }}>Prefix Tree</span>
+          <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(167,139,250,0.12)", color: "#a78bfa" }}>O(k) search</span>
+        </>
+      }
+      description="A tree-shaped data structure for storing strings. Each path from root to an end-node spells a word."
+      canvas={canvas}
+      sidebar={sidebar}
+    />
   );
 }

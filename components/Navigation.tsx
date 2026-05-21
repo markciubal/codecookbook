@@ -23,7 +23,7 @@ import {
   Calculator,
   GraduationCap,
 } from "lucide-react";
-import { BENCHMARK, COMPARE, CUSTOM_SORT, LEARNING, SORTING_ALGORITHMS, DATA_STRUCTURES, TOOLS, SEARCHING_ALGORITHMS, GRAPH_ALGORITHMS, DP_ALGORITHMS, STRING_ALGORITHMS, GEOMETRY_ALGORITHMS, MATH_ALGORITHMS } from "@/lib/catalog";
+import { BENCHMARK, COMPARE, CUSTOM_SORT, LEARNING, SORTING_ALGORITHMS, DATA_STRUCTURES, TOOLS, SEARCHING_ALGORITHMS, GRAPH_ALGORITHMS, DP_ALGORITHMS, STRING_ALGORITHMS, GEOMETRY_ALGORITHMS, MATH_ALGORITHMS, EXPRESSION_ALGORITHMS } from "@/lib/catalog";
 import AlgoBadge from "@/components/AlgoBadge";
 import ThemeToggle from "@/components/ThemeToggle";
 import LevelSelector from "@/components/LevelSelector";
@@ -106,6 +106,15 @@ const NAV_ITEMS = [
       name: m.name,
       path: m.path,
       badge: m.time,
+    })),
+  },
+  {
+    group: "Expressions",
+    icon: <Calculator size={14} />,
+    items: EXPRESSION_ALGORITHMS.map((e) => ({
+      name: e.name,
+      path: e.path,
+      badge: e.time,
     })),
   },
   {

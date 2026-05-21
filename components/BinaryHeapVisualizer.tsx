@@ -89,22 +89,46 @@ function renderHeap(
 
 // ── Pure heap operations ──────────────────────────────────────────────────────
 
+type HeapMode = "min" | "max";
+
 interface AnimStep {
   heap: number[];
   desc: string;
   highlight: Record<number, string>;
+  // Heap-sort visualization: each step can carry a parallel "sorted output"
+  // array that the user sees building up as roots get extracted.
+  sortedOutput?: number[];
 }
 
-function heapInsert(heap: number[], val: number): { heap: number[]; steps: AnimStep[] } {
+/**
+ * For a min-heap, a parent must be `<=` both children (so we sift up when
+ * `parent > child`). For a max-heap, flip the comparison. Returns true when
+ * `parent` IS violating the heap property relative to `child` (so we should
+ * swap parent and child).
+ */
+function violates(mode: HeapMode, parentVal: number, childVal: number): boolean {
+  return mode === "min" ? parentVal > childVal : parentVal < childVal;
+}
+
+/** Picks the "extreme" of three values for sift-down: the smallest for min,
+ *  the largest for max. Returns the index of that extreme. */
+function pickExtreme(mode: HeapMode, h: number[], a: number, b: number): number {
+  if (mode === "min") return h[a] < h[b] ? a : b;
+  return h[a] > h[b] ? a : b;
+}
+
+function heapInsert(heap: number[], val: number, mode: HeapMode): { heap: number[]; steps: AnimStep[] } {
   const h = [...heap, val];
   const steps: AnimStep[] = [];
   let i = h.length - 1;
+  const cmpOp = mode === "min" ? ">" : "<";
+  const okOp  = mode === "min" ? "≥" : "≤";
   while (i > 0) {
     const parent = Math.floor((i - 1) / 2);
-    if (h[parent] > h[i]) {
+    if (violates(mode, h[parent], h[i])) {
       steps.push({
         heap: [...h],
-        desc: `${h[parent]} > ${h[i]}: swap with parent`,
+        desc: `${h[parent]} ${cmpOp} ${h[i]}: swap with parent`,
         highlight: { [i]: "comparing", [parent]: "comparing" },
       });
       [h[i], h[parent]] = [h[parent], h[i]];
@@ -117,7 +141,7 @@ function heapInsert(heap: number[], val: number): { heap: number[]; steps: AnimS
     } else {
       steps.push({
         heap: [...h],
-        desc: `${h[i]} ≥ parent ${h[parent]}: heap property satisfied`,
+        desc: `${h[i]} ${okOp} parent ${h[parent]}: heap property satisfied`,
         highlight: { [i]: "new" },
       });
       break;
@@ -126,54 +150,106 @@ function heapInsert(heap: number[], val: number): { heap: number[]; steps: AnimS
   return { heap: h, steps };
 }
 
-function heapExtractMin(heap: number[]): { heap: number[]; steps: AnimStep[] } {
-  if (heap.length === 0) return { heap: [], steps: [] };
+/**
+ * Extracts the root from the heap. For min-heap that's the smallest value,
+ * for max-heap the largest. Returns the new heap (root removed, last leaf
+ * promoted and sifted down) plus animation steps.
+ */
+function heapExtractRoot(heap: number[], mode: HeapMode): { heap: number[]; steps: AnimStep[]; extracted: number | null } {
+  if (heap.length === 0) return { heap: [], steps: [], extracted: null };
   const h = [...heap];
   const steps: AnimStep[] = [];
-  steps.push({ heap: [...h], desc: `Extracting min: ${h[0]}`, highlight: { [0]: "swapping" } });
+  const extracted = h[0];
+  const rootLabel = mode === "min" ? "min" : "max";
+  steps.push({ heap: [...h], desc: `Extracting ${rootLabel}: ${extracted}`, highlight: { [0]: "swapping" } });
   h[0] = h[h.length - 1];
   h.pop();
-  if (h.length === 0) return { heap: h, steps };
+  if (h.length === 0) return { heap: h, steps, extracted };
 
   let i = 0;
   while (true) {
     const l = 2 * i + 1;
     const r = 2 * i + 2;
-    let smallest = i;
-    if (l < h.length && h[l] < h[smallest]) smallest = l;
-    if (r < h.length && h[r] < h[smallest]) smallest = r;
-    if (smallest === i) {
+    let pick = i;
+    if (l < h.length && violates(mode, h[pick], h[l])) pick = l;
+    if (r < h.length && violates(mode, h[pick], h[r])) pick = r;
+    if (pick === i) {
       steps.push({ heap: [...h], desc: "Heap property restored", highlight: { [i]: "root" } });
       break;
     }
     steps.push({
       heap: [...h],
-      desc: `Sifting down: swapping ${h[i]} with ${h[smallest]}`,
-      highlight: { [i]: "comparing", [smallest]: "comparing" },
+      desc: `Sifting down: swapping ${h[i]} with ${h[pick]}`,
+      highlight: { [i]: "comparing", [pick]: "comparing" },
     });
-    [h[i], h[smallest]] = [h[smallest], h[i]];
+    [h[i], h[pick]] = [h[pick], h[i]];
     steps.push({ heap: [...h], desc: `Swapped`, highlight: { [i]: "swapping" } });
-    i = smallest;
+    i = pick;
   }
-  return { heap: h, steps };
+  return { heap: h, steps, extracted };
 }
 
-function buildMinHeap(arr: number[]): number[] {
+function buildHeap(arr: number[], mode: HeapMode): number[] {
   const h = [...arr];
   for (let i = Math.floor(h.length / 2) - 1; i >= 0; i--) {
     let idx = i;
     while (true) {
       const l  = 2 * idx + 1;
       const r  = 2 * idx + 2;
-      let sm   = idx;
-      if (l < h.length && h[l] < h[sm]) sm = l;
-      if (r < h.length && h[r] < h[sm]) sm = r;
-      if (sm === idx) break;
-      [h[idx], h[sm]] = [h[sm], h[idx]];
-      idx = sm;
+      let pick = idx;
+      if (l < h.length && violates(mode, h[pick], h[l])) pick = l;
+      if (r < h.length && violates(mode, h[pick], h[r])) pick = r;
+      if (pick === idx) break;
+      [h[idx], h[pick]] = [h[pick], h[idx]];
+      idx = pick;
     }
   }
   return h;
+}
+
+/**
+ * Full heap-sort animation: repeatedly extract the root, accumulating each
+ * extracted value into a separate `sortedOutput` array that the visualizer
+ * renders alongside the shrinking heap. For min-heap the result is sorted
+ * ascending; for max-heap, descending.
+ *
+ * Returns the empty final heap, the sorted array, and the merged step list
+ * (each extract pass's steps with sortedOutput stamped on every one).
+ */
+function heapSortSteps(heap: number[], mode: HeapMode): { sorted: number[]; steps: AnimStep[] } {
+  const sorted: number[] = [];
+  const steps: AnimStep[] = [];
+  let working = [...heap];
+  // Tag every step with the current `sortedOutput` so the side panel can
+  // visibly grow as roots are pulled out.
+  steps.push({
+    heap: [...working],
+    desc: `Heap sort begins: ${mode === "min" ? "ascending" : "descending"} (extract ${mode === "min" ? "min" : "max"}, repeat)`,
+    highlight: { [0]: "root" },
+    sortedOutput: [...sorted],
+  });
+  while (working.length > 0) {
+    const { heap: next, steps: extractSteps, extracted } = heapExtractRoot(working, mode);
+    for (const s of extractSteps) {
+      steps.push({ ...s, sortedOutput: [...sorted] });
+    }
+    if (extracted !== null) sorted.push(extracted);
+    // Post-extraction step showing the value moving into the sorted output.
+    steps.push({
+      heap: [...next],
+      desc: `Appended ${extracted} to sorted output`,
+      highlight: next.length > 0 ? { [0]: "root" } : {},
+      sortedOutput: [...sorted],
+    });
+    working = next;
+  }
+  steps.push({
+    heap: [],
+    desc: `Heap sort complete — ${sorted.length} values in ${mode === "min" ? "ascending" : "descending"} order`,
+    highlight: {},
+    sortedOutput: [...sorted],
+  });
+  return { sorted, steps };
 }
 
 // ── Interface ────────────────────────────────────────────────────────────────
@@ -181,7 +257,8 @@ function buildMinHeap(arr: number[]): number[] {
 interface CtxMenu { x: number; y: number; idx: number }
 
 export default function BinaryHeapVisualizer() {
-  const [heap, setHeap]           = useState<number[]>([3, 8, 5, 15, 10, 12, 7]);
+  const [heapMode, setHeapMode]   = useState<HeapMode>("min");
+  const [heap, setHeap]           = useState<number[]>(() => buildHeap([3, 8, 5, 15, 10, 12, 7], "min"));
   const [inputVal, setInputVal]   = useState("");
   const [log, setLog]             = useState<string[]>(["Heap initialized"]);
   const [error, setError]         = useState<string | null>(null);
@@ -191,9 +268,15 @@ export default function BinaryHeapVisualizer() {
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [activeMethod, setActiveMethod] = useState<string | null>(null);
 
+  // Sorted output of the most recent heap-sort run. Displayed below the tree
+  // while a sort is in progress and afterwards as a "result" strip.
+  const [sortedOutput, setSortedOutput] = useState<number[]>([]);
+
   const [animSteps, setAnimSteps]   = useState<AnimStep[]>([]);
   const [animIdx, setAnimIdx]       = useState(-1);
   const [isAnimating, setIsAnimating] = useState(false);
+
+  const rootLabel = heapMode === "min" ? "Min" : "Max";
 
   const cyHandle = useRef<CytoscapeBaseHandle>(null);
 
@@ -256,12 +339,30 @@ export default function BinaryHeapVisualizer() {
     return v;
   }, [inputVal]);
 
-  const playAnimation = (steps: AnimStep[], finalHeap: number[]) => {
-    setAnimSteps([...steps, { heap: finalHeap, desc: "Done", highlight: { [0]: "root" } }]);
+  const playAnimation = (
+    steps: AnimStep[],
+    finalHeap: number[],
+    opts?: { finalSortedOutput?: number[] }
+  ) => {
+    const tail: AnimStep = {
+      heap: finalHeap,
+      desc: "Done",
+      highlight: finalHeap.length > 0 ? { [0]: "root" } : {},
+      sortedOutput: opts?.finalSortedOutput,
+    };
+    setAnimSteps([...steps, tail]);
     setAnimIdx(0);
     setIsAnimating(true);
     setTimeout(() => setHeap(finalHeap), steps.length * 500 + 100);
   };
+
+  // While the animation plays, mirror each step's `sortedOutput` into local
+  // state so the strip under the heap grows in lock-step with the cytoscape.
+  useEffect(() => {
+    if (!isAnimating || animIdx < 0 || animIdx >= animSteps.length) return;
+    const so = animSteps[animIdx]?.sortedOutput;
+    if (so) setSortedOutput(so);
+  }, [animIdx, isAnimating, animSteps]);
 
   // ── Operations ────────────────────────────────────────────────────────────
 
@@ -272,8 +373,9 @@ export default function BinaryHeapVisualizer() {
     setError(null);
     setInputVal("");
     triggerMethod("insert");
-    const { heap: newHeap, steps } = heapInsert(heap, v);
-    addLog(`insert(${v}) → heap size: ${newHeap.length}, min: ${newHeap[0]}`);
+    setSortedOutput([]);
+    const { heap: newHeap, steps } = heapInsert(heap, v, heapMode);
+    addLog(`insert(${v}) → heap size: ${newHeap.length}, ${heapMode}: ${newHeap[0]}`);
     if (steps.length === 0) {
       setHeap(newHeap);
     } else {
@@ -281,13 +383,14 @@ export default function BinaryHeapVisualizer() {
     }
   };
 
-  const extractMin = () => {
+  const extractRoot = () => {
     if (heap.length === 0) { setError("Heap is empty"); return; }
     setError(null);
-    triggerMethod("extractMin");
-    const min = heap[0];
-    const { heap: newHeap, steps } = heapExtractMin(heap);
-    addLog(`extractMin() → ${min}, new min: ${newHeap.length > 0 ? newHeap[0] : "—"}`);
+    triggerMethod(heapMode === "min" ? "extractMin" : "extractMax");
+    setSortedOutput([]);
+    const root = heap[0];
+    const { heap: newHeap, steps } = heapExtractRoot(heap, heapMode);
+    addLog(`extract${rootLabel}() → ${root}, new ${heapMode}: ${newHeap.length > 0 ? newHeap[0] : "—"}`);
     if (steps.length === 0) {
       setHeap(newHeap);
     } else {
@@ -295,25 +398,51 @@ export default function BinaryHeapVisualizer() {
     }
   };
 
-  const peekMin = () => {
+  const peekRoot = () => {
     if (heap.length === 0) { setError("Heap is empty"); return; }
     setError(null);
-    triggerMethod("peekMin");
-    addLog(`peekMin() → ${heap[0]} (root)`);
+    triggerMethod(heapMode === "min" ? "peekMin" : "peekMax");
+    addLog(`peek${rootLabel}() → ${heap[0]} (root)`);
   };
 
   const heapifyRandom = () => {
     const arr = Array.from({ length: 7 }, () => Math.floor(Math.random() * 99) + 1);
-    const h   = buildMinHeap(arr);
+    const h   = buildHeap(arr, heapMode);
+    setSortedOutput([]);
     setHeap(h);
-    addLog(`Heapified random array: min = ${h[0]}`);
+    addLog(`Heapified random array: ${heapMode} = ${h[0]}`);
     setError(null);
   };
 
   const clear = () => {
     setHeap([]);
+    setSortedOutput([]);
     addLog("Heap cleared");
     setError(null);
+  };
+
+  const sort = () => {
+    if (heap.length === 0) { setError("Heap is empty — nothing to sort"); return; }
+    setError(null);
+    triggerMethod("heapSort");
+    const { sorted, steps } = heapSortSteps(heap, heapMode);
+    setSortedOutput([]);
+    addLog(`heapSort() → ${sorted.length} values (${heapMode === "min" ? "ascending" : "descending"})`);
+    playAnimation(steps, [], { finalSortedOutput: sorted });
+  };
+
+  // Swap modes — rebuild the heap so the property holds under the new ordering.
+  const toggleMode = () => {
+    const next: HeapMode = heapMode === "min" ? "max" : "min";
+    setHeapMode(next);
+    if (heap.length > 0) {
+      const rebuilt = buildHeap(heap, next);
+      setHeap(rebuilt);
+      addLog(`Switched to ${next === "min" ? "Min" : "Max"}-Heap — re-heapified (root = ${rebuilt[0]})`);
+    } else {
+      addLog(`Switched to ${next === "min" ? "Min" : "Max"}-Heap`);
+    }
+    setSortedOutput([]);
   };
 
   // Context menu actions
@@ -325,7 +454,7 @@ export default function BinaryHeapVisualizer() {
   const ctxDeleteAt = (idx: number) => {
     const val  = heap[idx];
     const next = heap.filter((_, i) => i !== idx);
-    const h    = buildMinHeap(next);
+    const h    = buildHeap(next, heapMode);
     setHeap(h);
     addLog(`deleted index ${idx} (value: ${val}), re-heapified`);
     setCtxMenu(null);
@@ -336,9 +465,34 @@ export default function BinaryHeapVisualizer() {
       {/* Header */}
       <div className="px-5 pt-6 pb-4" style={{ borderBottom: "1px solid var(--color-border)" }}>
         <div className="flex flex-wrap items-center gap-2 mb-1">
-          <Triangle size={20} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
+          <Triangle
+            size={20}
+            style={{
+              color: "var(--color-accent)",
+              flexShrink: 0,
+              // Visually flip the triangle to mirror the heap orientation —
+              // base-down for max-heap (largest at apex), apex-up for min-heap.
+              transform: heapMode === "max" ? "rotate(180deg)" : "none",
+              transition: "transform 0.2s",
+            }}
+            strokeWidth={1.75}
+          />
           <h1 className="text-2xl font-bold">Binary Heap</h1>
-          <Pill text="Min-Heap" purple />
+          <button
+            onClick={toggleMode}
+            disabled={isAnimating}
+            title="Toggle Min / Max heap"
+            className="text-xs font-mono px-2 py-0.5 rounded-full transition-colors"
+            style={{
+              background: "rgba(167,139,250,0.15)",
+              color: "#a78bfa",
+              border: "1px solid rgba(167,139,250,0.4)",
+              cursor: isAnimating ? "not-allowed" : "pointer",
+              opacity: isAnimating ? 0.5 : 1,
+            }}
+          >
+            {heapMode === "min" ? "Min-Heap" : "Max-Heap"} ⇄
+          </button>
           <Pill text="O(log n)" />
           <div className="ml-auto flex gap-2">
             <button
@@ -370,7 +524,7 @@ export default function BinaryHeapVisualizer() {
           </div>
         </div>
         <p className="text-sm" style={{ color: "var(--color-muted)" }}>
-          Complete binary tree satisfying the min-heap property: every parent is smaller than its children. Insert and extract-min both run in O(log n). Right-click any node for quick actions.
+          Complete binary tree satisfying the {heapMode}-heap property: every parent is {heapMode === "min" ? "smaller" : "larger"} than its children. Insert and extract-{heapMode === "min" ? "min" : "max"} both run in O(log n). Heap-sort yields a fully ordered output in O(n log n). Right-click any node for quick actions.
         </p>
       </div>
 
@@ -379,8 +533,9 @@ export default function BinaryHeapVisualizer() {
           {/* Stats */}
           <div className="flex flex-wrap gap-6">
             <DStat label="Size"      value={heap.length} />
-            <DStat label="Min (Root)" value={heap.length > 0 ? heap[0] : "—"} color="var(--color-accent)" />
+            <DStat label={`${rootLabel} (Root)`} value={heap.length > 0 ? heap[0] : "—"} color="var(--color-accent)" />
             <DStat label="Max Nodes" value={MAX_SIZE} color="var(--color-muted)" />
+            <DStat label="Sorted Out" value={sortedOutput.length || "—"} color="var(--color-state-sorted)" />
           </div>
 
           {/* Tree */}
@@ -389,7 +544,7 @@ export default function BinaryHeapVisualizer() {
           {/* Array view */}
           <div>
             <div className="text-xs mb-1" style={{ color: "var(--color-muted)" }}>
-              Heap Array (index 0 = min)
+              Heap Array (index 0 = {heapMode})
             </div>
             <div className="flex flex-wrap gap-1">
               {heap.map((val, i) => (
@@ -411,6 +566,43 @@ export default function BinaryHeapVisualizer() {
             </div>
           </div>
 
+          {/* Sorted output — shown only when a heap-sort has produced (or is
+              producing) results. Grows in lock-step with the animation. */}
+          {sortedOutput.length > 0 && (
+            <div>
+              <div className="text-xs mb-1 flex items-center gap-2">
+                <span style={{ color: "var(--color-muted)" }}>
+                  Sorted Output ({heapMode === "min" ? "ascending" : "descending"})
+                </span>
+                <span
+                  className="px-1.5 py-0.5 rounded font-mono"
+                  style={{
+                    background: "rgba(34,197,94,0.12)",
+                    color: "var(--color-state-sorted)",
+                    fontSize: 10,
+                  }}
+                >
+                  n={sortedOutput.length}
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {sortedOutput.map((val, i) => (
+                  <div
+                    key={i}
+                    className="px-2 py-1 rounded text-xs font-mono"
+                    style={{
+                      background: "rgba(34,197,94,0.08)",
+                      border: "1px solid rgba(34,197,94,0.35)",
+                      color: "var(--color-state-sorted)",
+                    }}
+                  >
+                    {val}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Controls */}
           <div className="flex flex-wrap gap-2 items-center">
             <input
@@ -422,8 +614,11 @@ export default function BinaryHeapVisualizer() {
               style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
             />
             <DBtn onClick={insert} primary disabled={isAnimating}>Insert</DBtn>
-            <DBtn onClick={extractMin} disabled={isAnimating}>Extract Min</DBtn>
-            <DBtn onClick={peekMin} disabled={isAnimating}>Peek Min</DBtn>
+            <DBtn onClick={extractRoot} disabled={isAnimating}>Extract {rootLabel}</DBtn>
+            <DBtn onClick={peekRoot} disabled={isAnimating}>Peek {rootLabel}</DBtn>
+            <DBtn onClick={sort} disabled={isAnimating || heap.length === 0}>
+              Sort ({heapMode === "min" ? "asc" : "desc"})
+            </DBtn>
             <DBtn onClick={heapifyRandom} disabled={isAnimating}>Heapify Random</DBtn>
             <DBtn onClick={clear} disabled={isAnimating}>Clear</DBtn>
           </div>
@@ -456,8 +651,8 @@ export default function BinaryHeapVisualizer() {
         </ContextMenu>
       )}
 
-      <PanelModal isOpen={isPanelOpen} onClose={() => setIsPanelOpen(false)} title="Binary Heap Info">
-        <SidePanel tab={panelTab} setTab={setPanelTab} heap={heap} log={log} />
+      <PanelModal isOpen={isPanelOpen} onClose={() => setIsPanelOpen(false)} title={`Binary ${rootLabel}-Heap Info`}>
+        <SidePanel tab={panelTab} setTab={setPanelTab} heap={heap} log={log} mode={heapMode} />
       </PanelModal>
 
       <CodeModal
@@ -470,10 +665,11 @@ export default function BinaryHeapVisualizer() {
   );
 }
 
-function SidePanel({ tab, setTab, heap, log }: {
+function SidePanel({ tab, setTab, heap, log, mode }: {
   tab: "info" | "code"; setTab: (t: "info" | "code") => void;
-  heap: number[]; log: string[];
+  heap: number[]; log: string[]; mode: HeapMode;
 }) {
+  const rootName = mode === "min" ? "min" : "max";
   // Build level display of the heap
   const levels: number[][] = [];
   let i = 0;
@@ -513,10 +709,11 @@ function SidePanel({ tab, setTab, heap, log }: {
           <div>
             <SectionLabel>Operations</SectionLabel>
             <OpsTable ops={[
-              { op: "insert(x)",    desc: "Add and percolate up",   time: "O(log n)" },
-              { op: "extractMin()", desc: "Remove min, sift down",  time: "O(log n)" },
-              { op: "peekMin()",    desc: "View minimum",           time: "O(1)" },
-              { op: "heapify()",    desc: "Build heap from array",  time: "O(n)" },
+              { op: "insert(x)",                  desc: "Add and percolate up",                                  time: "O(log n)" },
+              { op: `extract${mode === "min" ? "Min" : "Max"}()`, desc: `Remove ${rootName}, sift down`,         time: "O(log n)" },
+              { op: `peek${mode === "min" ? "Min" : "Max"}()`,    desc: `View ${rootName}`,                       time: "O(1)" },
+              { op: "heapify()",                  desc: "Build heap from array",                                 time: "O(n)" },
+              { op: "heapSort()",                 desc: `Repeated extract → ${mode === "min" ? "ascending" : "descending"} array`, time: "O(n log n)" },
             ]} />
           </div>
         </div>

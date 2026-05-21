@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
-import { TreeDeciduous, Play, Pause, SkipForward, RotateCcw, Zap, Search } from "lucide-react";
+import { TreeDeciduous, RotateCcw, Zap, Search, Dices, ListOrdered } from "lucide-react";
+import { StepTreeLayout, StepNav, SidebarSection, StepMessage, TraverseControls, TRAVERSAL_LABELS, type TraversalKind } from "./StepTreeLayout";
 
 // ── RB Node ───────────────────────────────────────────────────────────────────
 
@@ -520,6 +521,52 @@ class RBTree {
   }
 }
 
+// ── Traversal steps ───────────────────────────────────────────────────────────
+
+function buildRBTraversalSteps(root: RBNode | null, kind: TraversalKind): RBTStep[] {
+  const label = TRAVERSAL_LABELS[kind];
+  const base = { highlightEdges: [] as [number, number][], phase: "search" as RBTPhase };
+  if (!root) return [{ root: null, highlightNodes: [], description: `${label}: tree is empty.`, ...base }];
+
+  const order: RBNode[] = [];
+  if (kind === "bfs") {
+    const q: RBNode[] = [root];
+    while (q.length) {
+      const n = q.shift()!;
+      order.push(n);
+      if (n.left) q.push(n.left);
+      if (n.right) q.push(n.right);
+    }
+  } else {
+    const visit = (n: RBNode | null) => {
+      if (!n) return;
+      if (kind === "pre") order.push(n);
+      visit(n.left);
+      if (kind === "in") order.push(n);
+      visit(n.right);
+      if (kind === "post") order.push(n);
+    };
+    visit(root);
+  }
+
+  const how =
+    kind === "bfs" ? "dequeue a node, visit it, enqueue its children — level by level"
+    : kind === "pre" ? "visit the node, then recurse left, then right"
+    : kind === "in" ? "recurse left, visit the node, then recurse right"
+    : "recurse left, then right, then visit the node";
+
+  const steps: RBTStep[] = [{ root: cloneRBTree(root), highlightNodes: [], description: `${label} — ${how}.`, ...base }];
+  const visited: number[] = [];
+  order.forEach((n, i) => {
+    visited.push(n.val);
+    steps.push({ root: cloneRBTree(root), highlightNodes: [...visited], description: `${label}: visit ${n.val} (${i + 1}/${order.length})`, ...base });
+  });
+  const orderStr = order.map((n) => n.val).join(" → ");
+  const note = kind === "in" ? " — in-order on a BST yields keys in sorted order." : "";
+  steps.push({ root: cloneRBTree(root), highlightNodes: order.map((n) => n.val), description: `${label} complete: ${orderStr}.${note}`, phase: "done", highlightEdges: [] });
+  return steps;
+}
+
 // ── Invariant checker ─────────────────────────────────────────────────────────
 
 interface Invariants {
@@ -562,8 +609,10 @@ function checkInvariants(root: RBNode | null): Invariants {
 // ── SVG layout ────────────────────────────────────────────────────────────────
 
 interface LayoutRB {
-  val: number;
+  key: string;
+  val: number | null;   // null for NIL sentinel leaves
   color: "red" | "black";
+  nil: boolean;
   x: number;
   y: number;
   parentX: number | null;
@@ -572,35 +621,63 @@ interface LayoutRB {
 }
 
 const RB_R = 22;
+const RB_NIL_R = 10;     // NIL sentinels render smaller than real nodes
 const RB_LEVEL_H = 80;
-const RB_H_GAP = 52;
+const RB_H_GAP = 44;
+
+// Intermediate render tree: every real node, plus a black NIL sentinel in
+// place of each missing child. This makes the "every leaf is Black" invariant
+// visible, the way textbooks draw red-black trees.
+interface RNode {
+  id: string;
+  val: number | null;
+  color: "red" | "black";
+  nil: boolean;
+  left: RNode | null;
+  right: RNode | null;
+}
+
+function toRenderTree(node: RBNode | null, side: string, parentVal: number | null): RNode {
+  if (!node) {
+    return { id: `nil-${parentVal ?? "root"}-${side}`, val: null, color: "black", nil: true, left: null, right: null };
+  }
+  return {
+    id: `n-${node.val}`,
+    val: node.val,
+    color: node.color,
+    nil: false,
+    left: toRenderTree(node.left, "L", node.val),
+    right: toRenderTree(node.right, "R", node.val),
+  };
+}
 
 function layoutRB(root: RBNode | null): LayoutRB[] {
   const result: LayoutRB[] = [];
   if (!root) return result;
 
-  // Assign x positions via in-order traversal
-  const xMap = new Map<number, number>();
-  // We need unique keys — use a path-based key for duplicate protection
-  // Since RB trees don't have duplicates, val is unique
-  let xCounter = 0;
-  function inOrder(n: RBNode | null): void {
-    if (!n) return;
-    inOrder(n.left);
-    xMap.set(n.val, xCounter++ * RB_H_GAP);
-    inOrder(n.right);
-  }
-  inOrder(root);
+  const renderRoot = toRenderTree(root, "root", null);
 
-  function assign(n: RBNode | null, depth: number, pX: number | null, pY: number | null, pVal: number | null): void {
-    if (!n) return;
-    const x = xMap.get(n.val)!;
-    const y = depth * RB_LEVEL_H;
-    result.push({ val: n.val, color: n.color, x, y, parentX: pX, parentY: pY, parentVal: pVal });
-    assign(n.left, depth + 1, x, y, n.val);
-    assign(n.right, depth + 1, x, y, n.val);
+  // Assign x via in-order over the render tree (NIL leaves take real slots, so
+  // they never overlap their siblings).
+  const xMap = new Map<string, number>();
+  let xCounter = 0;
+  function inOrder(r: RNode | null): void {
+    if (!r) return;
+    inOrder(r.left);
+    xMap.set(r.id, xCounter++ * RB_H_GAP);
+    inOrder(r.right);
   }
-  assign(root, 0, null, null, null);
+  inOrder(renderRoot);
+
+  function assign(r: RNode | null, depth: number, pX: number | null, pY: number | null, pVal: number | null): void {
+    if (!r) return;
+    const x = xMap.get(r.id)!;
+    const y = depth * RB_LEVEL_H;
+    result.push({ key: r.id, val: r.val, color: r.color, nil: r.nil, x, y, parentX: pX, parentY: pY, parentVal: pVal });
+    assign(r.left, depth + 1, x, y, r.val);
+    assign(r.right, depth + 1, x, y, r.val);
+  }
+  assign(renderRoot, 0, null, null, null);
   return result;
 }
 
@@ -630,12 +707,16 @@ function RBSVG({
   const hlNodeSet = new Set(highlightNodes);
   const hlEdgeSet = new Set(highlightEdges.map(([p, c]) => `${p}-${c}`));
 
+  // Reasonable margin so node strokes, the highlight glow, and the top row
+  // never clip against the canvas edges as the tree loads / animates.
+  const MARGIN = RB_R + 20;
   const minX = Math.min(...nodes.map((n) => n.x));
   const maxX = Math.max(...nodes.map((n) => n.x));
   const maxY = Math.max(...nodes.map((n) => n.y));
-  const offsetX = -minX + RB_R + 16;
-  const svgW = Math.max(maxX - minX + RB_R * 2 + 32, 200);
-  const svgH = maxY + RB_R * 2 + 40;
+  const offsetX = -minX + MARGIN;
+  const offsetY = MARGIN;
+  const svgW = Math.max(maxX - minX + MARGIN * 2, 200);
+  const svgH = maxY + MARGIN * 2;
 
   return (
     <svg width="100%" viewBox={`0 0 ${svgW} ${svgH}`} style={{ display: "block", overflow: "visible" }}>
@@ -644,41 +725,72 @@ function RBSVG({
         if (n.parentX === null || n.parentY === null || n.parentVal === null) return null;
         const edgeKey = `${n.parentVal}-${n.val}`;
         const isHighlighted = hlEdgeSet.has(edgeKey);
+        const childR = n.nil ? RB_NIL_R : RB_R;
         return (
           <line
-            key={`e-${n.val}`}
+            key={`e-${n.key}`}
             x1={n.parentX + offsetX}
-            y1={n.parentY + RB_R}
+            y1={n.parentY + offsetY + RB_R}
             x2={n.x + offsetX}
-            y2={n.y - RB_R}
+            y2={n.y + offsetY - childR}
             stroke={isHighlighted ? "#f59e0b" : "var(--color-border)"}
-            strokeWidth={isHighlighted ? 3 : 2}
+            strokeWidth={isHighlighted ? 3 : n.nil ? 1.25 : 2}
+            strokeDasharray={n.nil ? "3 2" : undefined}
           />
         );
       })}
 
-      {/* Nodes */}
-      {nodes.map((n) => {
+      {/* NIL sentinels — small black squares, no value. Drawn under the real
+          nodes so the colored keys stay visually dominant. */}
+      {nodes.filter((n) => n.nil).map((n) => {
         const cx = n.x + offsetX;
-        const cy = n.y;
-        const isHighlighted = hlNodeSet.has(n.val);
+        const cy = n.y + offsetY;
+        return (
+          <g key={`nil-${n.key}`}>
+            <rect
+              x={cx - RB_NIL_R} y={cy - RB_NIL_R}
+              width={RB_NIL_R * 2} height={RB_NIL_R * 2}
+              rx={2}
+              fill="#0f172a"
+              stroke="#475569"
+              strokeWidth={1.25}
+            />
+            <text
+              x={cx} y={cy}
+              textAnchor="middle" dominantBaseline="central"
+              fontSize={7} fontFamily="monospace" fill="#64748b"
+            >
+              NIL
+            </text>
+          </g>
+        );
+      })}
 
-        // Node fill colors
-        const fillRed = "#ef4444";
-        const fillBlack = "#1e293b";
-        const fill = n.color === "red" ? fillRed : fillBlack;
+      {/* Real nodes */}
+      {nodes.filter((n) => !n.nil).map((n) => {
+        const cx = n.x + offsetX;
+        const cy = n.y + offsetY;
+        const isHighlighted = n.val !== null && hlNodeSet.has(n.val);
 
-        // Stroke: highlighted = golden accent, else subtle border
+        const fill = n.color === "red" ? "#ef4444" : "#1e293b";
         const stroke = isHighlighted ? "#f59e0b" : n.color === "red" ? "#dc2626" : "#475569";
         const strokeWidth = isHighlighted ? 3.5 : 2;
 
+        // Black nodes render as squares, Red nodes as circles — a shape cue
+        // that reads even without color (and in print / grayscale).
+        const isBlack = n.color === "black";
+
         return (
-          <g key={`n-${n.val}`}>
-            {/* Glow for highlighted */}
+          <g key={`n-${n.key}`}>
+            {/* Glow for highlighted — matches the node's shape */}
             {isHighlighted && (
-              <circle cx={cx} cy={cy} r={RB_R + 6} fill={n.color === "red" ? "rgba(239,68,68,0.2)" : "rgba(245,158,11,0.2)"} />
+              isBlack
+                ? <rect x={cx - RB_R - 6} y={cy - RB_R - 6} width={(RB_R + 6) * 2} height={(RB_R + 6) * 2} rx={4} fill="rgba(245,158,11,0.2)" />
+                : <circle cx={cx} cy={cy} r={RB_R + 6} fill="rgba(239,68,68,0.2)" />
             )}
-            <circle cx={cx} cy={cy} r={RB_R} fill={fill} stroke={stroke} strokeWidth={strokeWidth} />
+            {isBlack
+              ? <rect x={cx - RB_R} y={cy - RB_R} width={RB_R * 2} height={RB_R * 2} rx={3} fill={fill} stroke={stroke} strokeWidth={strokeWidth} />
+              : <circle cx={cx} cy={cy} r={RB_R} fill={fill} stroke={stroke} strokeWidth={strokeWidth} />}
             <text
               x={cx}
               y={cy}
@@ -787,6 +899,7 @@ export default function RedBlackTreeVisualizer() {
   const [inputVal, setInputVal] = useState("");
   const [searchVal, setSearchVal] = useState("");
   const [deleteVal, setDeleteVal] = useState("");
+  const [customList, setCustomList] = useState("");
   const [history, setHistory] = useState<string[]>([`Demo: inserted [${DEMO_VALS.join(", ")}]`]);
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -870,6 +983,71 @@ export default function RedBlackTreeVisualizer() {
     setHistory([`Auto-Demo: inserted [${DEMO_VALS.join(", ")}]`]);
   }, [tree, startAnimation]);
 
+  // Random guided lesson — fresh values, simulated up front to count the
+  // recolorings and rotations the fix-up will perform, then led by an
+  // instruction telling the learner what to watch for.
+  const handleRandomLesson = useCallback(() => {
+    const count = 6 + Math.floor(Math.random() * 4); // 6–9 values
+    const vals: number[] = [];
+    while (vals.length < count) {
+      const v = 1 + Math.floor(Math.random() * 99);
+      if (!vals.includes(v)) vals.push(v);
+    }
+    const lessonTree = new RBTree();
+    const allSteps: RBTStep[] = [];
+    let recolors = 0;
+    let rotations = 0;
+    for (const v of vals) {
+      const s = lessonTree.insert(v);
+      for (const st of s) {
+        if (st.phase === "recolor") recolors++;
+        if (st.phase === "rotate-left" || st.phase === "rotate-right") rotations++;
+      }
+      allSteps.push(...s);
+    }
+    const intro =
+      `Lesson — insert [${vals.join(", ")}], each new node Red. This run triggers ${recolors} recolor${recolors === 1 ? "" : "s"} and ${rotations} rotation${rotations === 1 ? "" : "s"}. Watch the fix-up cases fire whenever a Red node ends up with a Red parent.`;
+    allSteps.unshift({ root: null, highlightNodes: [], highlightEdges: [], description: intro, phase: "insert" });
+    tree.root = lessonTree.root;
+    startAnimation(allSteps);
+    setTreeRoot(cloneRBTree(tree.root));
+    setHistory([`Random Lesson: inserted [${vals.join(", ")}]`]);
+  }, [tree, startAnimation]);
+
+  const handleTraverse = useCallback((kind: TraversalKind) => {
+    startAnimation(buildRBTraversalSteps(tree.root, kind));
+    setHistory((h) => [`Traverse: ${TRAVERSAL_LABELS[kind]}`, ...h].slice(0, 20));
+  }, [tree, startAnimation]);
+
+  // Build a fresh Red-Black tree from a user-supplied list and play it.
+  const handleCustomDemo = useCallback(() => {
+    const vals = Array.from(new Set(
+      customList.split(/[^0-9-]+/).map((s) => parseInt(s, 10)).filter((n) => !Number.isNaN(n))
+    )).slice(0, 31);
+    if (vals.length === 0) { setHistory((h) => ["Enter a list, e.g. 10, 20, 30, 15", ...h].slice(0, 20)); return; }
+    const listTree = new RBTree();
+    const allSteps: RBTStep[] = [];
+    let recolors = 0;
+    let rotations = 0;
+    for (const v of vals) {
+      const s = listTree.insert(v);
+      for (const st of s) {
+        if (st.phase === "recolor") recolors++;
+        if (st.phase === "rotate-left" || st.phase === "rotate-right") rotations++;
+      }
+      allSteps.push(...s);
+    }
+    allSteps.unshift({
+      root: null, highlightNodes: [], highlightEdges: [],
+      description: `Custom demo — build a Red-Black tree from [${vals.join(", ")}]: ${recolors} recolor${recolors === 1 ? "" : "s"}, ${rotations} rotation${rotations === 1 ? "" : "s"}.`,
+      phase: "insert",
+    });
+    tree.root = listTree.root;
+    startAnimation(allSteps);
+    setTreeRoot(cloneRBTree(tree.root));
+    setHistory([`Custom demo: [${vals.join(", ")}]`]);
+  }, [customList, tree, startAnimation]);
+
   const handleReset = useCallback(() => {
     tree.root = null;
     setTreeRoot(null);
@@ -887,156 +1065,34 @@ export default function RedBlackTreeVisualizer() {
 
   const height = treeHeight(displayRoot);
 
-  return (
-    <div className="flex flex-col min-h-dvh" style={{ background: "var(--color-bg)" }}>
-      {/* Header */}
-      <div className="px-5 pt-6 pb-4" style={{ borderBottom: "1px solid var(--color-border)" }}>
-        <div className="flex flex-wrap items-center gap-2 mb-1">
-          <TreeDeciduous size={20} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
-          <h1 className="text-2xl font-bold">Red-Black Tree</h1>
-          <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(239,68,68,0.15)", color: "#ef4444" }}>
-            Self-Balancing BST
-          </span>
-          <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(167,139,250,0.12)", color: "#a78bfa" }}>
-            O(log n)
-          </span>
-          {height > 0 && (
-            <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(34,197,94,0.12)", color: "#22c55e" }}>
-              height = {height}
-            </span>
-          )}
-        </div>
-        <p className="text-sm" style={{ color: "var(--color-muted)" }}>
-          A self-balancing BST where each node carries a color bit (Red or Black). Five invariants guarantee
-          O(log n) height. Violations are fixed via recoloring and rotations.
-        </p>
-      </div>
+  const canvas = (
+    <div
+      className="rounded-xl overflow-auto h-full flex items-start"
+      style={{
+        background: "var(--color-surface-1)",
+        border: "1px solid var(--color-border)",
+        minHeight: 200,
+        padding: "16px 8px",
+      }}
+    >
+      <RBSVG
+        root={displayRoot}
+        highlightNodes={highlightNodes}
+        highlightEdges={highlightEdges}
+        phaseLabel={phaseLabel}
+      />
+    </div>
+  );
 
-      <div className="flex-1 px-5 pt-5 pb-4 flex flex-col gap-4">
-        {/* Status message */}
-        <div
-          className="rounded-lg px-4 py-3 text-sm min-h-10 flex items-center gap-2"
-          style={{ background: "var(--color-surface-2)" }}
-        >
-          {currentStep && (
-            <span
-              className="text-xs font-mono px-2 py-0.5 rounded-full font-bold shrink-0"
-              style={{ background: `${PHASE_COLORS[phase]}22`, color: PHASE_COLORS[phase] }}
-            >
-              {phaseLabel}
-            </span>
-          )}
-          <span style={{ color: "var(--color-accent)" }}>{description}</span>
-        </div>
+  const sidebar = (
+    <>
+      <StepMessage badge={currentStep ? phaseLabel : undefined} badgeColor={PHASE_COLORS[phase]}>
+        {description}
+      </StepMessage>
 
-        {/* Main layout: SVG + side panels */}
-        <div className="flex flex-col xl:flex-row gap-4">
-          {/* SVG Canvas */}
-          <div
-            className="rounded-xl overflow-auto flex-1"
-            style={{
-              background: "var(--color-surface-1)",
-              border: "1px solid var(--color-border)",
-              minHeight: 200,
-              padding: "16px 8px",
-            }}
-          >
-            <RBSVG
-              root={displayRoot}
-              highlightNodes={highlightNodes}
-              highlightEdges={highlightEdges}
-              phaseLabel={phaseLabel}
-            />
-          </div>
-
-          {/* Right panel */}
-          <div className="flex flex-col gap-3 xl:w-64 shrink-0">
-            {/* Invariants */}
-            <div
-              className="rounded-xl p-4"
-              style={{ background: "var(--color-surface-1)", border: "1px solid var(--color-border)" }}
-            >
-              <p className="text-xs font-semibold uppercase tracking-widest mb-3" style={{ color: "var(--color-muted)" }}>
-                RB Invariants
-              </p>
-              {[
-                { label: "Root is Black", ok: invariants.rootIsBlack },
-                { label: "No consecutive Reds", ok: invariants.noConsecutiveReds },
-                { label: "Black heights consistent", ok: invariants.blackHeightConsistent },
-              ].map(({ label, ok }) => (
-                <div key={label} className="flex items-center gap-2 mb-2">
-                  <span className="text-sm font-bold" style={{ color: ok ? "#22c55e" : "#ef4444" }}>
-                    {ok ? "✓" : "✗"}
-                  </span>
-                  <span className="text-xs" style={{ color: ok ? "var(--color-text)" : "#ef4444" }}>
-                    {label}
-                  </span>
-                </div>
-              ))}
-            </div>
-
-            {/* Legend */}
-            <div
-              className="rounded-xl p-4"
-              style={{ background: "var(--color-surface-1)", border: "1px solid var(--color-border)" }}
-            >
-              <p className="text-xs font-semibold uppercase tracking-widest mb-3" style={{ color: "var(--color-muted)" }}>
-                Legend
-              </p>
-              {[
-                { label: "Red node", bg: "#ef4444", border: "#dc2626" },
-                { label: "Black node", bg: "#1e293b", border: "#475569" },
-                { label: "Highlighted", bg: "#1e293b", border: "#f59e0b", glow: true },
-              ].map(({ label, bg, border, glow }) => (
-                <div key={label} className="flex items-center gap-2 mb-2">
-                  <div
-                    className="w-4 h-4 rounded-full shrink-0"
-                    style={{
-                      background: bg,
-                      border: `2px solid ${border}`,
-                      boxShadow: glow ? `0 0 6px ${border}` : undefined,
-                    }}
-                  />
-                  <span className="text-xs" style={{ color: "var(--color-muted)" }}>
-                    {label}
-                  </span>
-                </div>
-              ))}
-              <div className="flex items-center gap-2">
-                <div className="w-4 h-0.5 shrink-0" style={{ background: "#f59e0b" }} />
-                <span className="text-xs" style={{ color: "var(--color-muted)" }}>Highlighted edge</span>
-              </div>
-            </div>
-
-            {/* Operation log */}
-            <div
-              className="rounded-xl p-4 flex-1"
-              style={{ background: "var(--color-surface-1)", border: "1px solid var(--color-border)" }}
-            >
-              <p className="text-xs font-semibold uppercase tracking-widest mb-3" style={{ color: "var(--color-muted)" }}>
-                Operation Log
-              </p>
-              <div className="flex flex-col gap-1 max-h-40 overflow-y-auto">
-                {history.map((h, i) => (
-                  <div
-                    key={i}
-                    className="text-xs font-mono px-2 py-1 rounded"
-                    style={{
-                      background: i === 0 ? "rgba(124,106,247,0.1)" : "transparent",
-                      color: i === 0 ? "var(--color-accent)" : "var(--color-muted)",
-                    }}
-                  >
-                    {h}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Controls */}
-        <div className="flex flex-wrap gap-4">
-          {/* Insert */}
+      {/* Controls */}
+      <SidebarSection title="Operations">
+        <div className="flex flex-col gap-2">
           <div className="flex gap-2 items-center">
             <input
               type="number"
@@ -1044,17 +1100,11 @@ export default function RedBlackTreeVisualizer() {
               onChange={(e) => setInputVal(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") handleInsert(); }}
               placeholder="e.g. 42"
-              className="rounded-lg px-3 py-2 text-sm w-24 outline-none"
-              style={{
-                background: "var(--color-surface-2)",
-                border: "1px solid var(--color-border)",
-                color: "var(--color-text)",
-              }}
+              className="rounded-lg px-3 py-2 text-sm flex-1 min-w-0 outline-none"
+              style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
             />
             <Btn onClick={handleInsert} primary>Insert</Btn>
           </div>
-
-          {/* Search */}
           <div className="flex gap-2 items-center">
             <input
               type="number"
@@ -1062,17 +1112,11 @@ export default function RedBlackTreeVisualizer() {
               onChange={(e) => setSearchVal(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") handleSearch(); }}
               placeholder="e.g. 15"
-              className="rounded-lg px-3 py-2 text-sm w-24 outline-none"
-              style={{
-                background: "var(--color-surface-2)",
-                border: "1px solid var(--color-border)",
-                color: "var(--color-text)",
-              }}
+              className="rounded-lg px-3 py-2 text-sm flex-1 min-w-0 outline-none"
+              style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
             />
             <Btn onClick={handleSearch} icon={<Search size={13} />}>Search</Btn>
           </div>
-
-          {/* Delete */}
           <div className="flex gap-2 items-center">
             <input
               type="number"
@@ -1080,119 +1124,175 @@ export default function RedBlackTreeVisualizer() {
               onChange={(e) => setDeleteVal(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") handleDelete(); }}
               placeholder="e.g. 10"
-              className="rounded-lg px-3 py-2 text-sm w-24 outline-none"
-              style={{
-                background: "var(--color-surface-2)",
-                border: "1px solid var(--color-border)",
-                color: "var(--color-text)",
-              }}
+              className="rounded-lg px-3 py-2 text-sm flex-1 min-w-0 outline-none"
+              style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
             />
             <Btn onClick={handleDelete}>Delete</Btn>
           </div>
-
-          <Btn onClick={handleAutoDemo} icon={<Zap size={13} />}>Auto-Demo</Btn>
-          <Btn onClick={handleReset} icon={<RotateCcw size={13} />}>Clear</Btn>
+          <div className="flex flex-wrap gap-2">
+            <Btn onClick={handleRandomLesson} icon={<Dices size={13} />}>Random Lesson</Btn>
+            <Btn onClick={handleAutoDemo} icon={<Zap size={13} />}>Auto-Demo</Btn>
+            <Btn onClick={handleReset} icon={<RotateCcw size={13} />}>Clear</Btn>
+          </div>
         </div>
+      </SidebarSection>
 
-        {/* Playback controls */}
-        {steps.length > 0 && (
-          <div className="flex flex-wrap gap-2 items-center">
-            <Btn
-              onClick={() => setIsPlaying((p) => !p)}
-              disabled={stepIdx >= steps.length - 1 && !isPlaying}
-              icon={isPlaying ? <Pause size={13} /> : <Play size={13} />}
-            >
-              {isPlaying ? "Pause" : "Play"}
-            </Btn>
-            <Btn
-              onClick={() => setStepIdx((p) => Math.min(p + 1, steps.length - 1))}
-              disabled={stepIdx >= steps.length - 1}
-              icon={<SkipForward size={13} />}
-            >
-              Step
-            </Btn>
-            <Btn
-              onClick={() => { setStepIdx(0); setIsPlaying(false); }}
-              icon={<RotateCcw size={13} />}
-            >
-              Restart
-            </Btn>
-            <span className="text-xs" style={{ color: "var(--color-muted)" }}>
-              Step {stepIdx + 1} / {steps.length}
-            </span>
-            <div className="flex items-center gap-2 ml-2">
-              <span className="text-xs" style={{ color: "var(--color-muted)" }}>Speed</span>
-              <input
-                type="range"
-                min={150}
-                max={1200}
-                step={50}
-                value={1350 - speed}
-                onChange={(e) => setSpeed(1350 - Number(e.target.value))}
-                className="w-24"
-              />
+      {/* Custom list demo */}
+      <SidebarSection title="Custom list demo">
+        <div className="flex flex-col gap-2">
+          <input
+            type="text"
+            value={customList}
+            onChange={(e) => setCustomList(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") handleCustomDemo(); }}
+            placeholder="10, 20, 30, 15, 25, 5, 1"
+            className="rounded-lg px-3 py-2 text-sm w-full outline-none font-mono"
+            style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
+          />
+          <Btn onClick={handleCustomDemo} icon={<ListOrdered size={13} />}>Build &amp; demo list</Btn>
+        </div>
+      </SidebarSection>
+
+      {/* Traversal */}
+      <SidebarSection title="Traversal / search order">
+        <TraverseControls kinds={["bfs", "pre", "in", "post"]} onTraverse={handleTraverse} disabled={!treeRoot} />
+      </SidebarSection>
+
+      {/* Playback */}
+      {steps.length > 0 && (
+        <SidebarSection title="Playback">
+          <StepNav
+            stepIdx={stepIdx}
+            stepCount={steps.length}
+            isPlaying={isPlaying}
+            setIsPlaying={setIsPlaying}
+            setStepIdx={setStepIdx}
+            speed={speed}
+            setSpeed={setSpeed}
+          />
+        </SidebarSection>
+      )}
+
+      {/* Invariants */}
+      <SidebarSection title="RB Invariants">
+        <div className="flex flex-col gap-2">
+          {[
+            { label: "Root is Black", ok: invariants.rootIsBlack },
+            { label: "No consecutive Reds", ok: invariants.noConsecutiveReds },
+            { label: "Black heights consistent", ok: invariants.blackHeightConsistent },
+          ].map(({ label, ok }) => (
+            <div key={label} className="flex items-center gap-2">
+              <span className="text-sm font-bold" style={{ color: ok ? "#22c55e" : "#ef4444" }}>
+                {ok ? "✓" : "✗"}
+              </span>
+              <span className="text-xs" style={{ color: ok ? "var(--color-text)" : "#ef4444" }}>
+                {label}
+              </span>
             </div>
-          </div>
-        )}
+          ))}
+          {height > 0 && (
+            <div className="text-xs font-mono mt-1" style={{ color: "var(--color-muted)" }}>
+              height = <span style={{ color: "#22c55e" }}>{height}</span>
+            </div>
+          )}
+        </div>
+      </SidebarSection>
 
-        {/* Fix-up case reference */}
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--color-muted)" }}>
-            Insert fix-up cases
-          </p>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3" style={{ maxWidth: 720 }}>
-            {[
-              {
-                label: "Case 1 — Uncle Red",
-                trigger: "Parent & uncle both Red",
-                fix: "Recolor parent + uncle Black, grandparent Red. Move z up.",
-                color: "#fb923c",
-              },
-              {
-                label: "Case 2 — Uncle Black, zig-zag",
-                trigger: "LR or RL shape with uncle Black",
-                fix: "Rotate parent to straighten → becomes Case 3.",
-                color: "#a78bfa",
-              },
-              {
-                label: "Case 3 — Uncle Black, straight",
-                trigger: "LL or RR shape with uncle Black",
-                fix: "Rotate grandparent + swap colors of parent & grandparent.",
-                color: "#38bdf8",
-              },
-            ].map(({ label, trigger, fix, color }) => (
-              <div key={label} className="rounded-lg p-3" style={{ background: "var(--color-surface-2)" }}>
-                <div className="text-xs font-mono font-bold mb-1" style={{ color }}>{label}</div>
-                <div className="text-xs mb-1" style={{ color: "var(--color-muted)" }}>{trigger}</div>
-                <div className="text-xs font-mono" style={{ color: "var(--color-accent)" }}>{fix}</div>
-              </div>
-            ))}
+      {/* Legend */}
+      <SidebarSection title="Legend">
+        <div className="flex flex-col gap-2">
+          {[
+            { label: "Red node (circle)", bg: "#ef4444", border: "#dc2626", square: false, small: false },
+            { label: "Black node (square)", bg: "#1e293b", border: "#475569", square: true, small: false },
+            { label: "NIL leaf (black sentinel)", bg: "#0f172a", border: "#475569", square: true, small: true },
+            { label: "Highlighted", bg: "#1e293b", border: "#f59e0b", glow: true, square: true, small: false },
+          ].map(({ label, bg, border, glow, square, small }) => (
+            <div key={label} className="flex items-center gap-2">
+              <div
+                className={`shrink-0 ${small ? "w-2.5 h-2.5" : "w-4 h-4"} ${square ? "rounded-sm" : "rounded-full"}`}
+                style={{ background: bg, border: `${small ? 1.25 : 2}px solid ${border}`, boxShadow: glow ? `0 0 6px ${border}` : undefined }}
+              />
+              <span className="text-xs" style={{ color: "var(--color-muted)" }}>{label}</span>
+            </div>
+          ))}
+          <div className="flex items-center gap-2">
+            <div className="w-4 h-0.5 shrink-0" style={{ background: "#f59e0b" }} />
+            <span className="text-xs" style={{ color: "var(--color-muted)" }}>Highlighted edge</span>
           </div>
         </div>
+      </SidebarSection>
 
-        {/* Five invariants reference */}
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--color-muted)" }}>
-            The 5 Red-Black invariants
-          </p>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2" style={{ maxWidth: 900 }}>
-            {[
-              "Every node is Red or Black.",
-              "The root is Black.",
-              "Every nil leaf is Black.",
-              "If a node is Red, both children are Black.",
-              "All paths root→nil have equal Black-node count.",
-            ].map((inv, i) => (
-              <div key={i} className="rounded-lg px-3 py-2 flex gap-2" style={{ background: "var(--color-surface-2)" }}>
-                <span className="text-xs font-mono font-bold shrink-0" style={{ color: "var(--color-accent)" }}>
-                  {i + 1}.
-                </span>
-                <span className="text-xs" style={{ color: "var(--color-muted)" }}>{inv}</span>
-              </div>
-            ))}
-          </div>
+      {/* Operation log */}
+      <SidebarSection title="Operation Log" scroll>
+        <div className="flex flex-col gap-1">
+          {history.map((h, i) => (
+            <div
+              key={i}
+              className="text-xs font-mono px-2 py-1 rounded"
+              style={{
+                background: i === 0 ? "rgba(124,106,247,0.1)" : "transparent",
+                color: i === 0 ? "var(--color-accent)" : "var(--color-muted)",
+              }}
+            >
+              {h}
+            </div>
+          ))}
         </div>
-      </div>
-    </div>
+      </SidebarSection>
+
+      {/* Fix-up case reference */}
+      <SidebarSection title="Insert fix-up cases">
+        <div className="flex flex-col gap-2">
+          {[
+            { label: "Case 1 — Uncle Red", trigger: "Parent & uncle both Red", fix: "Recolor parent + uncle Black, grandparent Red. Move z up.", color: "#fb923c" },
+            { label: "Case 2 — Uncle Black, zig-zag", trigger: "LR or RL shape with uncle Black", fix: "Rotate parent to straighten → becomes Case 3.", color: "#a78bfa" },
+            { label: "Case 3 — Uncle Black, straight", trigger: "LL or RR shape with uncle Black", fix: "Rotate grandparent + swap colors of parent & grandparent.", color: "#38bdf8" },
+          ].map(({ label, trigger, fix, color }) => (
+            <div key={label} className="rounded-lg p-2.5" style={{ background: "var(--color-surface-3)" }}>
+              <div className="text-xs font-mono font-bold mb-1" style={{ color }}>{label}</div>
+              <div className="text-xs mb-1" style={{ color: "var(--color-muted)" }}>{trigger}</div>
+              <div className="text-xs font-mono" style={{ color: "var(--color-accent)" }}>{fix}</div>
+            </div>
+          ))}
+        </div>
+      </SidebarSection>
+
+      {/* Five invariants reference */}
+      <SidebarSection title="The 5 Red-Black invariants">
+        <div className="flex flex-col gap-1.5">
+          {[
+            "Every node is Red or Black.",
+            "The root is Black.",
+            "Every nil leaf is Black.",
+            "If a node is Red, both children are Black.",
+            "All paths root→nil have equal Black-node count.",
+          ].map((inv, i) => (
+            <div key={i} className="rounded-lg px-3 py-2 flex gap-2" style={{ background: "var(--color-surface-3)" }}>
+              <span className="text-xs font-mono font-bold shrink-0" style={{ color: "var(--color-accent)" }}>{i + 1}.</span>
+              <span className="text-xs" style={{ color: "var(--color-muted)" }}>{inv}</span>
+            </div>
+          ))}
+        </div>
+      </SidebarSection>
+    </>
+  );
+
+  return (
+    <StepTreeLayout
+      icon={<TreeDeciduous size={20} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />}
+      title="Red-Black Tree"
+      badges={
+        <>
+          <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(239,68,68,0.15)", color: "#ef4444" }}>Self-Balancing BST</span>
+          <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(167,139,250,0.12)", color: "#a78bfa" }}>O(log n)</span>
+          {height > 0 && (
+            <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(34,197,94,0.12)", color: "#22c55e" }}>height = {height}</span>
+          )}
+        </>
+      }
+      description="A self-balancing BST where each node carries a color bit (Red or Black). Five invariants guarantee O(log n) height. Violations are fixed via recoloring and rotations."
+      canvas={canvas}
+      sidebar={sidebar}
+    />
   );
 }

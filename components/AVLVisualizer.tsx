@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
-import { GitMerge, Play, Pause, SkipForward, RotateCcw, Zap } from "lucide-react";
+import { GitMerge, RotateCcw, Zap, Dices, ListOrdered } from "lucide-react";
+import { StepTreeLayout, StepNav, SidebarSection, StepMessage, TraverseControls, TRAVERSAL_LABELS, type TraversalKind } from "./StepTreeLayout";
 
 // ── AVL data structure ────────────────────────────────────────────────────────
 
@@ -186,6 +187,53 @@ function buildDeleteSteps(root: AVLNode | null, val: number): { steps: AVLStep[]
   steps.push({ root: cloneAVL(newRoot), highlighted: [], description: `Deleted ${val}, re-balancing...` });
   steps.push({ root: cloneAVL(newRoot), highlighted: [], description: `Tree balanced. Height = ${height(newRoot)}` });
   return { steps, newRoot };
+}
+
+// ── Traversal steps ───────────────────────────────────────────────────────────
+
+function buildTraversalSteps(root: AVLNode | null, kind: TraversalKind): AVLStep[] {
+  const label = TRAVERSAL_LABELS[kind];
+  if (!root) return [{ root: null, highlighted: [], description: `${label}: tree is empty.` }];
+
+  const order: AVLNode[] = [];
+  if (kind === "bfs") {
+    const q: AVLNode[] = [root];
+    while (q.length) {
+      const n = q.shift()!;
+      order.push(n);
+      if (n.left) q.push(n.left);
+      if (n.right) q.push(n.right);
+    }
+  } else {
+    const visit = (n: AVLNode | null) => {
+      if (!n) return;
+      if (kind === "pre") order.push(n);
+      visit(n.left);
+      if (kind === "in") order.push(n);
+      visit(n.right);
+      if (kind === "post") order.push(n);
+    };
+    visit(root);
+  }
+
+  const steps: AVLStep[] = [];
+  const how =
+    kind === "bfs" ? "dequeue a node, visit it, enqueue its children — level by level"
+    : kind === "pre" ? "visit the node, then recurse left, then right"
+    : kind === "in" ? "recurse left, visit the node, then recurse right"
+    : "recurse left, then right, then visit the node";
+  steps.push({ root: cloneAVL(root), highlighted: [], description: `${label} — ${how}.` });
+
+  const visited: string[] = [];
+  order.forEach((n, i) => {
+    visited.push(n.id);
+    steps.push({ root: cloneAVL(root), highlighted: [...visited], description: `${label}: visit ${n.val} (${i + 1}/${order.length})` });
+  });
+
+  const orderStr = order.map((n) => n.val).join(" → ");
+  const note = kind === "in" ? " — in-order on a BST yields keys in sorted order." : "";
+  steps.push({ root: cloneAVL(root), highlighted: order.map((n) => n.id), description: `${label} complete: ${orderStr}.${note}` });
+  return steps;
 }
 
 // ── SVG Layout ────────────────────────────────────────────────────────────────
@@ -382,15 +430,23 @@ function Btn({
 
 // ── Main component ────────────────────────────────────────────────────────────
 
+function buildInitialAVL(): AVLNode | null {
+  avlCounter = 0;
+  let r: AVLNode | null = null;
+  for (const v of [50, 30, 70, 20, 40, 60, 80]) r = avlInsert(r, v);
+  return r;
+}
+
 export default function AVLVisualizer() {
-  const [avlRoot, setAvlRoot] = useState<AVLNode | null>(null);
+  const [avlRoot, setAvlRoot] = useState<AVLNode | null>(buildInitialAVL);
   const [insertVal, setInsertVal] = useState("");
   const [deleteVal, setDeleteVal] = useState("");
+  const [customList, setCustomList] = useState("");
   const [steps, setSteps] = useState<AVLStep[]>([]);
   const [stepIdx, setStepIdx] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(700);
-  const [message, setMessage] = useState("Insert values or use Auto-Demo to see rotations.");
+  const [message, setMessage] = useState("Preset tree loaded. Insert/delete values, run a traversal, or try a Random Lesson.");
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const currentStep = steps[stepIdx] ?? null;
@@ -453,6 +509,66 @@ export default function AVLVisualizer() {
     startAnimation(allSteps);
   }, [startAnimation]);
 
+  // Random guided lesson — fresh values each time. Simulates the inserts up
+  // front to detect how many (and which) rotations will fire, then leads with
+  // an instruction telling the learner what to watch for in this scenario.
+  const handleRandomLesson = useCallback(() => {
+    avlCounter = 0;
+    const count = 5 + Math.floor(Math.random() * 4); // 5–8 values
+    const vals: number[] = [];
+    while (vals.length < count) {
+      const v = 1 + Math.floor(Math.random() * 99);
+      if (!vals.includes(v)) vals.push(v);
+    }
+    let root: AVLNode | null = null;
+    const allSteps: AVLStep[] = [];
+    let rotations = 0;
+    const rotTypes = new Set<string>();
+    for (const v of vals) {
+      const { steps: s, newRoot } = buildInsertSteps(root, v);
+      for (const st of s) if (st.rotationType) { rotations++; rotTypes.add(st.rotationType); }
+      allSteps.push(...s);
+      root = newRoot;
+    }
+    const intro =
+      rotations === 0
+        ? `Lesson — insert [${vals.join(", ")}]. This order happens to stay balanced on its own: no rotations fire. Step through and watch every balance factor (BF) hold within {−1, 0, 1}.`
+        : `Lesson — insert [${vals.join(", ")}]. Watch for ${rotations} rotation${rotations > 1 ? "s" : ""} (${[...rotTypes].join(", ")}): each fires the moment a node's BF leaves {−1, 0, 1}, restoring O(log n) height.`;
+    const introStep: AVLStep = { root: null, highlighted: [], description: intro };
+    setAvlRoot(root);
+    startAnimation([introStep, ...allSteps]);
+  }, [startAnimation]);
+
+  const handleTraverse = useCallback((kind: TraversalKind) => {
+    startAnimation(buildTraversalSteps(avlRoot, kind));
+  }, [avlRoot, startAnimation]);
+
+  // Build a fresh AVL tree from a user-supplied list and play the construction
+  // as a step-through demo.
+  const handleCustomDemo = useCallback(() => {
+    avlCounter = 0;
+    const vals = Array.from(new Set(
+      customList.split(/[^0-9-]+/).map((s) => parseInt(s, 10)).filter((n) => !Number.isNaN(n))
+    )).slice(0, 31);
+    if (vals.length === 0) { setMessage("Enter a comma-separated list of numbers, e.g. 50, 30, 70, 20, 40"); return; }
+    let root: AVLNode | null = null;
+    const allSteps: AVLStep[] = [];
+    let rotations = 0;
+    for (const v of vals) {
+      const { steps: s, newRoot } = buildInsertSteps(root, v);
+      for (const st of s) if (st.rotationType) rotations++;
+      allSteps.push(...s);
+      root = newRoot;
+    }
+    const intro: AVLStep = {
+      root: null,
+      highlighted: [],
+      description: `Custom demo — build an AVL tree from [${vals.join(", ")}]: ${rotations} rotation${rotations === 1 ? "" : "s"}. Step through to watch each insert and rebalance.`,
+    };
+    setAvlRoot(root);
+    startAnimation([intro, ...allSteps]);
+  }, [customList, startAnimation]);
+
   const handleReset = useCallback(() => {
     avlCounter = 0;
     setAvlRoot(null);
@@ -462,60 +578,27 @@ export default function AVLVisualizer() {
     setMessage("Tree cleared.");
   }, []);
 
-  return (
-    <div className="flex flex-col min-h-dvh" style={{ background: "var(--color-bg)" }}>
-      {/* Header */}
-      <div className="px-5 pt-6 pb-4" style={{ borderBottom: "1px solid var(--color-border)" }}>
-        <div className="flex flex-wrap items-center gap-2 mb-1">
-          <GitMerge size={20} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
-          <h1 className="text-2xl font-bold">AVL Tree</h1>
-          <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(124,106,247,0.15)", color: "var(--color-accent)" }}>Self-Balancing BST</span>
-          <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(167,139,250,0.12)", color: "#a78bfa" }}>O(log n)</span>
-        </div>
-        <p className="text-sm" style={{ color: "var(--color-muted)" }}>
-          A self-balancing BST where every node&apos;s balance factor (BF = left height − right height) stays within &#123;-1, 0, 1&#125;.
-        </p>
-      </div>
+  const canvas = (
+    <div
+      className="rounded-xl overflow-auto h-full flex items-start"
+      style={{
+        background: "var(--color-surface-1)",
+        border: "1px solid var(--color-border)",
+        minHeight: 200,
+        padding: "16px 8px",
+      }}
+    >
+      <AVLSVG root={displayRoot} highlighted={highlighted} rotLabel={rotLabel} />
+    </div>
+  );
 
-      <div className="flex-1 px-5 pt-5 pb-4 flex flex-col gap-4">
-        {/* Message */}
-        <div className="rounded-lg px-4 py-3 text-sm min-h-10" style={{ background: "var(--color-surface-2)", color: "var(--color-accent)" }}>
-          {rotLabel ? <span style={{ color: "#f59e0b" }}>{rotLabel} — </span> : null}{message}
-        </div>
+  const sidebar = (
+    <>
+      <StepMessage badge={rotLabel} badgeColor="#f59e0b">{message}</StepMessage>
 
-        {/* SVG Canvas */}
-        <div
-          className="rounded-xl overflow-auto"
-          style={{
-            background: "var(--color-surface-1)",
-            border: "1px solid var(--color-border)",
-            minHeight: 200,
-            padding: "16px 8px",
-          }}
-        >
-          <AVLSVG root={displayRoot} highlighted={highlighted} rotLabel={rotLabel} />
-        </div>
-
-        {/* Legend */}
-        <div className="flex flex-wrap gap-4">
-          {[
-            { label: "highlighted node", color: "var(--color-accent)" },
-            { label: "BF ∈ {-1,0,1} (ok)", color: "rgba(34,197,94,0.4)", badge: true, badgeColor: "#22c55e" },
-            { label: "|BF| > 1 (imbalanced)", color: "rgba(239,68,68,0.2)", badge: true, badgeColor: "#ef4444" },
-          ].map(({ label, color, badge, badgeColor }) => (
-            <div key={label} className="flex items-center gap-1.5">
-              <div className="w-3 h-3 rounded-full" style={{ background: color, border: badge ? `1.5px solid ${badgeColor}` : undefined }} />
-              <span className="text-xs" style={{ color: "var(--color-muted)" }}>{label}</span>
-            </div>
-          ))}
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs font-mono px-1 rounded" style={{ background: "rgba(245,158,11,0.2)", color: "#f59e0b" }}>BF</span>
-            <span className="text-xs" style={{ color: "var(--color-muted)" }}>= balance factor badge on each node</span>
-          </div>
-        </div>
-
-        {/* Insert / Delete controls */}
-        <div className="flex flex-wrap gap-4">
+      {/* Insert / Delete controls */}
+      <SidebarSection title="Operations">
+        <div className="flex flex-col gap-2">
           <div className="flex gap-2 items-center">
             <input
               type="number"
@@ -523,8 +606,8 @@ export default function AVLVisualizer() {
               onChange={(e) => setInsertVal(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") handleInsert(); }}
               placeholder="e.g. 42"
-              className="rounded-lg px-3 py-2 text-sm w-24 outline-none"
-              style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
+              className="rounded-lg px-3 py-2 text-sm flex-1 min-w-0 outline-none"
+              style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
             />
             <Btn onClick={handleInsert} primary>Insert</Btn>
           </div>
@@ -535,71 +618,108 @@ export default function AVLVisualizer() {
               onChange={(e) => setDeleteVal(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") handleDelete(); }}
               placeholder="e.g. 30"
-              className="rounded-lg px-3 py-2 text-sm w-24 outline-none"
-              style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
+              className="rounded-lg px-3 py-2 text-sm flex-1 min-w-0 outline-none"
+              style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
             />
             <Btn onClick={handleDelete}>Delete</Btn>
           </div>
-          <Btn onClick={handleAutoDemo} icon={<Zap size={13} />}>Auto-Demo</Btn>
-          <Btn onClick={handleReset} icon={<RotateCcw size={13} />}>Clear</Btn>
+          <div className="flex flex-wrap gap-2">
+            <Btn onClick={handleRandomLesson} icon={<Dices size={13} />}>Random Lesson</Btn>
+            <Btn onClick={handleAutoDemo} icon={<Zap size={13} />}>Auto-Demo</Btn>
+            <Btn onClick={handleReset} icon={<RotateCcw size={13} />}>Clear</Btn>
+          </div>
         </div>
+      </SidebarSection>
 
-        {/* Playback */}
-        {steps.length > 0 && (
-          <div className="flex flex-wrap gap-2 items-center">
-            <Btn
-              onClick={() => setPlaying((p) => !p)}
-              disabled={stepIdx >= steps.length - 1 && !playing}
-              icon={playing ? <Pause size={13} /> : <Play size={13} />}
-            >
-              {playing ? "Pause" : "Play"}
-            </Btn>
-            <Btn
-              onClick={() => setStepIdx((p) => Math.min(p + 1, steps.length - 1))}
-              disabled={stepIdx >= steps.length - 1}
-              icon={<SkipForward size={13} />}
-            >
-              Step
-            </Btn>
-            <Btn onClick={() => { setStepIdx(0); setPlaying(false); }} icon={<RotateCcw size={13} />}>
-              Restart
-            </Btn>
-            <span className="text-xs" style={{ color: "var(--color-muted)" }}>
-              Step {stepIdx + 1}/{steps.length}
-            </span>
-            <div className="flex items-center gap-2 ml-2">
-              <span className="text-xs" style={{ color: "var(--color-muted)" }}>Speed</span>
-              <input
-                type="range" min={150} max={1200} step={50}
-                value={1350 - speed}
-                onChange={(e) => setSpeed(1350 - Number(e.target.value))}
-                className="w-24"
-              />
+      {/* Custom list demo */}
+      <SidebarSection title="Custom list demo">
+        <div className="flex flex-col gap-2">
+          <input
+            type="text"
+            value={customList}
+            onChange={(e) => setCustomList(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") handleCustomDemo(); }}
+            placeholder="50, 30, 70, 20, 40, 60, 80"
+            className="rounded-lg px-3 py-2 text-sm w-full outline-none font-mono"
+            style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
+          />
+          <Btn onClick={handleCustomDemo} icon={<ListOrdered size={13} />}>Build &amp; demo list</Btn>
+        </div>
+      </SidebarSection>
+
+      {/* Traversal */}
+      <SidebarSection title="Traversal / search order">
+        <TraverseControls kinds={["bfs", "pre", "in", "post"]} onTraverse={handleTraverse} disabled={!avlRoot} />
+      </SidebarSection>
+
+      {/* Playback */}
+      {steps.length > 0 && (
+        <SidebarSection title="Playback">
+          <StepNav
+            stepIdx={stepIdx}
+            stepCount={steps.length}
+            isPlaying={playing}
+            setIsPlaying={setPlaying}
+            setStepIdx={setStepIdx}
+            speed={speed}
+            setSpeed={setSpeed}
+          />
+        </SidebarSection>
+      )}
+
+      {/* Legend */}
+      <SidebarSection title="Legend">
+        <div className="flex flex-col gap-2">
+          {[
+            { label: "highlighted node", color: "var(--color-accent)" },
+            { label: "BF ∈ {-1,0,1} (ok)", color: "rgba(34,197,94,0.4)", badge: true, badgeColor: "#22c55e" },
+            { label: "|BF| > 1 (imbalanced)", color: "rgba(239,68,68,0.2)", badge: true, badgeColor: "#ef4444" },
+          ].map(({ label, color, badge, badgeColor }) => (
+            <div key={label} className="flex items-center gap-1.5">
+              <div className="w-3 h-3 rounded-full shrink-0" style={{ background: color, border: badge ? `1.5px solid ${badgeColor}` : undefined }} />
+              <span className="text-xs" style={{ color: "var(--color-muted)" }}>{label}</span>
             </div>
-          </div>
-        )}
-
-        {/* Rotation guide */}
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--color-muted)" }}>
-            Rotation types
-          </p>
-          <div className="grid grid-cols-2 gap-3" style={{ maxWidth: 480 }}>
-            {[
-              { type: "LL rotation", trigger: "BF > 1, left-heavy left child", fix: "rotateRight(node)" },
-              { type: "RR rotation", trigger: "BF < -1, right-heavy right child", fix: "rotateLeft(node)" },
-              { type: "LR rotation", trigger: "BF > 1, right-heavy left child", fix: "rotateLeft(left) → rotateRight(node)" },
-              { type: "RL rotation", trigger: "BF < -1, left-heavy right child", fix: "rotateRight(right) → rotateLeft(node)" },
-            ].map(({ type, trigger, fix }) => (
-              <div key={type} className="rounded-lg p-2.5" style={{ background: "var(--color-surface-2)" }}>
-                <div className="text-xs font-mono font-bold" style={{ color: "#f59e0b" }}>{type}</div>
-                <div className="text-xs" style={{ color: "var(--color-muted)" }}>{trigger}</div>
-                <div className="text-xs font-mono mt-0.5" style={{ color: "var(--color-accent)" }}>{fix}</div>
-              </div>
-            ))}
+          ))}
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs font-mono px-1 rounded shrink-0" style={{ background: "rgba(245,158,11,0.2)", color: "#f59e0b" }}>BF</span>
+            <span className="text-xs" style={{ color: "var(--color-muted)" }}>= balance factor badge on each node</span>
           </div>
         </div>
-      </div>
-    </div>
+      </SidebarSection>
+
+      {/* Rotation guide */}
+      <SidebarSection title="Rotation types">
+        <div className="flex flex-col gap-2">
+          {[
+            { type: "LL rotation", trigger: "BF > 1, left-heavy left child", fix: "rotateRight(node)" },
+            { type: "RR rotation", trigger: "BF < -1, right-heavy right child", fix: "rotateLeft(node)" },
+            { type: "LR rotation", trigger: "BF > 1, right-heavy left child", fix: "rotateLeft(left) → rotateRight(node)" },
+            { type: "RL rotation", trigger: "BF < -1, left-heavy right child", fix: "rotateRight(right) → rotateLeft(node)" },
+          ].map(({ type, trigger, fix }) => (
+            <div key={type} className="rounded-lg p-2.5" style={{ background: "var(--color-surface-3)" }}>
+              <div className="text-xs font-mono font-bold" style={{ color: "#f59e0b" }}>{type}</div>
+              <div className="text-xs" style={{ color: "var(--color-muted)" }}>{trigger}</div>
+              <div className="text-xs font-mono mt-0.5" style={{ color: "var(--color-accent)" }}>{fix}</div>
+            </div>
+          ))}
+        </div>
+      </SidebarSection>
+    </>
+  );
+
+  return (
+    <StepTreeLayout
+      icon={<GitMerge size={20} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />}
+      title="AVL Tree"
+      badges={
+        <>
+          <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(124,106,247,0.15)", color: "var(--color-accent)" }}>Self-Balancing BST</span>
+          <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(167,139,250,0.12)", color: "#a78bfa" }}>O(log n)</span>
+        </>
+      }
+      description={<>A self-balancing BST where every node&apos;s balance factor (BF = left height − right height) stays within &#123;-1, 0, 1&#125;.</>}
+      canvas={canvas}
+      sidebar={sidebar}
+    />
   );
 }

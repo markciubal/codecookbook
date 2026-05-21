@@ -51,12 +51,32 @@ type SampleProof = {
   // re-deriving from the sample.
   failed: boolean;
   badIdx?: number; // index of the first out-of-order element in `after`
+  // Extra run context, populated from the live input:
+  bytesPerElement?: number;     // ~8 for number, ~32 for typical strings
+  totalInputBytes?: number;     // n × bytesPerElement (approx)
+  avgStrLen?: number;           // only for dataType === "string"
+  isAllInteger?: boolean;       // only for dataType === "integer"/"float" — true if every value passes Number.isInteger
+  decimalsMax?: number;         // only for dataType === "float" — max fractional digits seen
 };
 
-// Build a before/after proof for one algorithm. Pulls 20 evenly-spaced values
-// from the input (before-sort) and the same positions from a sorted copy.
-// Shared by the worker-isolation path (one-off pre-submit capture) and the
-// main-thread timed path so proofs appear in both modes.
+// Build a before/after proof for one algorithm.
+//
+// Capture strategy:
+//   1. Pull SAMPLE evenly-spaced values from the input — this is `before`.
+//   2. Run the algorithm on the FULL input copy → sortedFull.
+//   3. `after` is the same MULTISET of values as `before`, but in sorted order.
+//      We achieve this by counting the `before` values into a multiset, then
+//      walking sortedFull left-to-right and consuming any element that still
+//      has remaining count. This gives us same-values-different-order: every
+//      value visible in `after` was also visible in `before`.
+//   4. Validation: the verifier checks that sortedFull (the algorithm's
+//      ACTUAL output) is monotonically non-decreasing AND that every value
+//      in `before` was found in sortedFull (i.e., the algorithm didn't drop
+//      or duplicate values). Either failure flips `failed: true`.
+//
+// This preserves the visual story "the same values, just rearranged" while
+// still pinning correctness on the algorithm's real output, not on the
+// proof's own re-sort.
 function captureSampleProof(
   input: readonly (number | string)[],
   fn: (a: unknown[]) => unknown[],
@@ -67,41 +87,107 @@ function captureSampleProof(
   const before: (number | string)[] = Array.from({ length: SAMPLE }, (_, i) => input[i * stride]);
   const proofCopy = [...input];
   // If a custom sort throws here we still want to record a proof so the user
-  // can see the failure annotated. Mark `after` as the unsorted input so the
-  // verifier catches the breakage downstream.
-  let sortedArr: (number | string)[];
+  // can see the failure annotated. Mark sortedFull as the unsorted input so
+  // the verifier catches the breakage downstream.
+  let sortedFull: (number | string)[];
+  let threw = false;
   try {
     const sortedResult = fn(proofCopy as unknown[]);
-    sortedArr = (sortedResult ?? proofCopy) as (number | string)[];
+    sortedFull = (sortedResult ?? proofCopy) as (number | string)[];
   } catch {
-    sortedArr = proofCopy;
+    sortedFull = proofCopy;
+    threw = true;
   }
-  const after: (number | string)[] = Array.from({ length: SAMPLE }, (_, i) => sortedArr[i * stride]);
+  // Build `after` as the sample-multiset, walked through sortedFull in
+  // sort order. If the algorithm preserves the multiset AND produces a
+  // sorted output, `after` will visibly contain the same values as `before`
+  // in ascending order.
+  const remaining = new Map<number | string, number>();
+  for (const v of before) remaining.set(v, (remaining.get(v) ?? 0) + 1);
+  const after: (number | string)[] = [];
+  for (const v of sortedFull) {
+    const c = remaining.get(v) ?? 0;
+    if (c > 0) {
+      after.push(v);
+      remaining.set(v, c - 1);
+      if (after.length === before.length) break;
+    }
+  }
+  // Any leftover counts in `remaining` mean values from `before` are missing
+  // from sortedFull — the algorithm dropped or replaced them.
+  let lostValues = 0;
+  for (const c of remaining.values()) lostValues += c;
+  // Pad missing slots with a sentinel value so the row still has SAMPLE cells
+  // and the visualizer can mark them. Use minVal-like behaviour: a copy of the
+  // first leftover key so type stays consistent.
+  if (lostValues > 0) {
+    const leftover: (number | string)[] = [];
+    for (const [v, c] of remaining.entries()) for (let i = 0; i < c; i++) leftover.push(v);
+    after.push(...leftover);
+  }
   // Summary stats over the FULL input (not just the sample) — gives the user
   // accurate context about what was actually fed to the sort.
   let minVal: number | string | undefined;
   let maxVal: number | string | undefined;
   const seen = new Set<unknown>();
+  let totalStrLen = 0;
+  let strCount = 0;
+  let allInteger = true;       // for "integer"/"float" dataType
+  let maxDecimals = 0;         // for "float" dataType
   for (const v of input) {
     seen.add(v);
     if (minVal === undefined || (v as number | string) < minVal) minVal = v as number | string;
     if (maxVal === undefined || (v as number | string) > maxVal) maxVal = v as number | string;
+    if (typeof v === "string") {
+      totalStrLen += v.length;
+      strCount++;
+    } else if (typeof v === "number") {
+      if (!Number.isInteger(v)) {
+        allInteger = false;
+        // Count fractional digits: stringified, after the decimal point. Cap at
+        // 6 because JS doubles drop precision past ~15 sig digits anyway.
+        const s = v.toString();
+        const dot = s.indexOf(".");
+        if (dot >= 0) maxDecimals = Math.max(maxDecimals, Math.min(6, s.length - dot - 1));
+      }
+    }
   }
-  // Sortedness verification: every adjacent pair in `after` must be non-decreasing.
-  // The samples are evenly-spaced positions from the fully sorted output, so
-  // monotonicity at the sampled positions is necessary (though not sufficient)
-  // for correctness — a sort that broke between sampled positions could slip past,
-  // but any sort that returns the input unchanged, reversed, or with dropped
-  // chunks will fail this check.
+  // Element-byte heuristic: numbers ≈ 8 (PACKED_DOUBLE), strings ≈ 2×length + 24
+  // overhead per JS string (UTF-16 char + header). Strings vary; average length
+  // is more useful for the user than a constant.
+  const isStringType = meta.dataType === "string";
+  const avgStrLen = strCount > 0 ? totalStrLen / strCount : undefined;
+  const bytesPerElement = isStringType
+    ? (avgStrLen !== undefined ? Math.round(2 * avgStrLen + 24) : 32)
+    : 8;
+  const totalInputBytes = meta.n * bytesPerElement;
+  // Sortedness verification — run against the algorithm's FULL output, not
+  // the synthesised `after` sample (which is constructed from `before` to be
+  // sorted by construction, so checking it would always pass). We walk
+  // sortedFull and flag the first index where the non-decreasing invariant
+  // breaks, OR flag when any sample value got lost (multiset mismatch).
   let badIdx: number | undefined;
-  for (let i = 1; i < after.length; i++) {
-    if (after[i] < after[i - 1]) { badIdx = i; break; }
+  if (threw) {
+    badIdx = 0;
+  } else if (lostValues > 0) {
+    // The sample multiset wasn't preserved by the algorithm. Point `badIdx`
+    // at the first slot in `after` that we had to pad with a leftover —
+    // matches what the existing rendering highlights.
+    badIdx = after.length - lostValues;
+  } else {
+    for (let i = 1; i < sortedFull.length; i++) {
+      if (sortedFull[i] < sortedFull[i - 1]) { badIdx = i; break; }
+    }
   }
   return {
     before, after,
     n: meta.n, dataType: meta.dataType, scenario: meta.scenario,
     minVal, maxVal, distinctCount: seen.size,
     failed: badIdx !== undefined, badIdx,
+    bytesPerElement, totalInputBytes,
+    avgStrLen: isStringType ? avgStrLen : undefined,
+    isAllInteger: isStringType ? undefined : allInteger,
+    decimalsMax: meta.dataType === "float" ? maxDecimals : undefined,
   };
 }
 
@@ -168,6 +254,27 @@ function freshSortFn(original: (arr: number[]) => number[]): (arr: number[]) => 
 
 // Palette for numbered Logos custom variants
 const LC_COLORS = ["#555555", "#8B6000", "#2E4A7A", "#3D6B3D", "#6B3D6B", "#8B3333"];
+
+// Palette offered when adding/picking a color for a user-saved custom sort.
+// Chosen to be visually distinct from the built-in algorithm colors so multiple
+// custom sorts plotted on the same chart remain individually identifiable.
+const CUSTOM_PALETTE = [
+  "#e040fb", // magenta (original default)
+  "#00bcd4", // cyan
+  "#ff7043", // deep orange
+  "#9ccc65", // lime
+  "#5c6bc0", // indigo
+  "#ec407a", // hot pink
+  "#26c6da", // teal
+  "#ffca28", // amber
+  "#7e57c2", // violet
+  "#66bb6a", // green
+  "#ef5350", // red
+  "#42a5f5", // light blue
+];
+function defaultCustomColor(idx: number): string {
+  return CUSTOM_PALETTE[idx % CUSTOM_PALETTE.length];
+}
 
 // Makes a record return dynamic values for logos-custom-N keys
 function withLogosVariants<T>(base: Record<string, T>, fallback: (n: number) => T): Record<string, T> {
@@ -2271,6 +2378,866 @@ function Chart3D({
 //   - per-algorithm mini cards
 //   - mathematical / space complexity analysis
 // The shimmer animation lives in globals.css (.cc-skeleton).
+/*
+ * LiveMemoryChart — time-series of V8 heap usage during a benchmark run.
+ *
+ * Sits under the performance curve in the right pane. Styled to mirror
+ * CurveChart (same VW, padding, axes, polyline rendering) so the two read as a
+ * matching pair. Polls performance.memory at 100ms intervals and tags each
+ * sample with the algorithm that was running at the time. The chart renders
+ * one polyline segment per algorithm in that algorithm's color, with vertical
+ * boundary lines and labels at algorithm transitions.
+ *
+ * Live during a run; persisted after for review. Reset at the start of every
+ * fresh run.
+ */
+type MemSample = {
+  ts: number;           // ms since run started
+  used: number;         // performance.memory.usedJSHeapSize
+  total: number;        // performance.memory.totalJSHeapSize
+  algoId: string | null;
+  n: number | null;
+};
+function LiveMemoryChart({
+  samples, currentAlgo, currentN, isRunning, curveData,
+}: {
+  samples: MemSample[];
+  currentAlgo: string | null;
+  currentN: number | null;
+  isRunning: boolean;
+  /** The benchmark's per-algo curve data. Used to surface ACTUAL measured aux
+   *  (instrumented `allocBytes` and `performance.memory` `spaceBytes`) in the
+   *  per-algorithm drill-in alongside the live-sampled heap delta. */
+  curveData?: CurveData;
+}) {
+  // Layout — match CurveChart's VW so the two SVGs read as a pair.
+  const VW = 600, VH = 200;
+  const pL = 60, pR = 18, pT = 18, pB = 36;
+  const iW = VW - pL - pR;
+  const iH = VH - pT - pB;
+
+  // Top-level view mode: combined timeline (default) or per-algorithm drill-in.
+  const [view, setView] = useState<"timeline" | "perAlgo">("timeline");
+  // Currently inspected algorithm in per-algo mode. Auto-selects the first
+  // available algo when switching tabs if nothing is selected yet.
+  const [focusAlgo, setFocusAlgo] = useState<string | null>(null);
+
+  if (samples.length === 0) {
+    return (
+      <div className="rounded-xl p-4 mt-4" style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)" }}>
+        <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--color-muted)" }}>
+          Live memory usage
+        </p>
+        <p style={{ fontSize: 11, color: "var(--color-muted)", fontFamily: "monospace", fontStyle: "italic" }}>
+          {isRunning ? "polling…" : "Run a benchmark to record heap usage over time."}
+        </p>
+      </div>
+    );
+  }
+
+  const t0 = samples[0].ts;
+  const tMax = samples[samples.length - 1].ts;
+  const tRange = Math.max(1, tMax - t0);
+  const usedMax = Math.max(...samples.map(s => s.used), 1);
+  const totalMax = Math.max(...samples.map(s => s.total), 1);
+  const yMax = Math.max(usedMax, totalMax);
+  const usedMin = Math.min(...samples.map(s => s.used), 0);
+
+  // Map sample time/value into chart space.
+  const xAt = (t: number) => pL + ((t - t0) / tRange) * iW;
+  const yAt = (v: number) => pT + iH - (v / yMax) * iH;
+
+  // Group consecutive samples by algoId to build colored polyline segments.
+  // We allow null algoId between sorts (idle gap) and skip those.
+  type Segment = { algoId: string | null; pts: MemSample[] };
+  const segments: Segment[] = [];
+  let cur: Segment | null = null;
+  for (const s of samples) {
+    if (!cur || cur.algoId !== s.algoId) {
+      cur = { algoId: s.algoId, pts: [s] };
+      segments.push(cur);
+    } else {
+      cur.pts.push(s);
+    }
+  }
+
+  // Y-axis ticks — 4 evenly spaced values from 0 → yMax.
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map(f => ({ v: f * yMax, y: yAt(f * yMax) }));
+  // X-axis ticks — show seconds elapsed.
+  const xTickCount = 5;
+  const xTicks = Array.from({ length: xTickCount }, (_, i) => {
+    const t = t0 + (tRange * i) / (xTickCount - 1);
+    return { t, x: xAt(t), label: `${((t - t0) / 1000).toFixed(1)}s` };
+  });
+
+  // Per-algo peak (max used while that algo was running).
+  type AlgoStat = { id: string; color: string; peak: number; samples: number; lastN: number | null };
+  const algoStatsMap = new Map<string, AlgoStat>();
+  for (const s of samples) {
+    if (!s.algoId) continue;
+    const existing = algoStatsMap.get(s.algoId);
+    if (existing) {
+      existing.peak = Math.max(existing.peak, s.used);
+      existing.samples++;
+      if (s.n != null) existing.lastN = s.n;
+    } else {
+      algoStatsMap.set(s.algoId, {
+        id: s.algoId,
+        color: ALGO_COLORS[s.algoId] ?? "#888",
+        peak: s.used,
+        samples: 1,
+        lastN: s.n,
+      });
+    }
+  }
+  const algoStats = [...algoStatsMap.values()].sort((a, b) => b.peak - a.peak);
+
+  const currentSample = samples[samples.length - 1];
+
+  return (
+    <div className="rounded-xl p-4 mt-4" style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)" }}>
+      <div className="flex items-center gap-2 mb-2">
+        {isRunning && (
+          <span style={{
+            display: "inline-block", width: 8, height: 8, borderRadius: "50%",
+            background: "var(--color-state-swap)",
+            animation: "cc-pulse 1s steps(1, end) infinite",
+          }} />
+        )}
+        <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)", flex: 1 }}>
+          Live memory usage
+          {!isRunning && <span style={{ marginLeft: 6, opacity: 0.6, fontStyle: "italic", textTransform: "none", letterSpacing: 0 }}>(from last run)</span>}
+        </p>
+        {/* View tabs — Timeline (combined) vs Per-algorithm (drill-in) */}
+        <div style={{ display: "inline-flex", borderRadius: 5, border: "1px solid var(--color-border)", overflow: "hidden" }}>
+          {(["timeline", "perAlgo"] as const).map((v, i) => (
+            <button
+              key={v}
+              onClick={() => {
+                setView(v);
+                if (v === "perAlgo" && !focusAlgo && algoStats.length > 0) {
+                  setFocusAlgo(algoStats[0].id);
+                }
+              }}
+              style={{
+                padding: "3px 10px", fontSize: 10, fontFamily: "monospace",
+                cursor: "pointer", border: "none",
+                borderLeft: i > 0 ? "1px solid var(--color-border)" : "none",
+                background: view === v ? "var(--color-accent)" : "transparent",
+                color: view === v ? "#fff" : "var(--color-muted)",
+                fontWeight: view === v ? 600 : 400,
+              }}
+            >
+              {v === "timeline" ? "Timeline" : "Per-algorithm"}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ───── Timeline view (combined, all algos) ─────────────────────────── */}
+      {view === "timeline" && <>
+      {/* Big real-time figures */}
+      <div className="flex flex-wrap gap-4 mb-3" style={{ fontFamily: "monospace" }}>
+        <div>
+          <p style={{ fontSize: 9, color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>current used</p>
+          <p style={{ fontSize: 16, fontWeight: 700, color: "var(--color-accent)" }}>{fmtBytes(currentSample.used)}</p>
+        </div>
+        <div>
+          <p style={{ fontSize: 9, color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>current total</p>
+          <p style={{ fontSize: 16, fontWeight: 700, color: "#ffb74d" }}>{fmtBytes(currentSample.total)}</p>
+        </div>
+        <div>
+          <p style={{ fontSize: 9, color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>peak used</p>
+          <p style={{ fontSize: 16, fontWeight: 700, color: "var(--color-text)" }}>{fmtBytes(usedMax)}</p>
+        </div>
+        <div>
+          <p style={{ fontSize: 9, color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>elapsed</p>
+          <p style={{ fontSize: 16, fontWeight: 700, color: "var(--color-text)" }}>{((tMax - t0) / 1000).toFixed(1)}s</p>
+        </div>
+        {currentAlgo && isRunning && (
+          <div style={{ marginLeft: "auto", textAlign: "right" }}>
+            <p style={{ fontSize: 9, color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>now sorting</p>
+            <p style={{ fontSize: 13, fontWeight: 700, color: ALGO_COLORS[currentAlgo] ?? "var(--color-text)" }}>
+              {ALGO_NAMES[currentAlgo] ?? currentAlgo}
+              {currentN != null && <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.7 }}> · n={currentN.toLocaleString()}</span>}
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* SVG chart — same VW / padding as CurveChart so the two read as a pair */}
+      <svg viewBox={`0 0 ${VW} ${VH}`} preserveAspectRatio="none" style={{ width: "100%", height: "auto", display: "block" }}>
+        {/* Plot background */}
+        <rect x={pL} y={pT} width={iW} height={iH} fill="var(--color-surface-1)" />
+
+        {/* Y-axis grid + labels */}
+        {yTicks.map((t, i) => (
+          <g key={`y${i}`}>
+            <line x1={pL} y1={t.y} x2={pL + iW} y2={t.y} stroke="var(--color-border)" strokeWidth={0.5} opacity={0.5} />
+            <text x={pL - 6} y={t.y + 3} textAnchor="end" fontSize={8.5} fontFamily="monospace" fill="var(--color-muted)">
+              {fmtBytes(t.v)}
+            </text>
+          </g>
+        ))}
+
+        {/* X-axis ticks + labels */}
+        {xTicks.map((t, i) => (
+          <g key={`x${i}`}>
+            <line x1={t.x} y1={pT + iH} x2={t.x} y2={pT + iH + 3} stroke="var(--color-border)" strokeWidth={0.5} />
+            <text x={t.x} y={pT + iH + 14} textAnchor="middle" fontSize={8.5} fontFamily="monospace" fill="var(--color-muted)">
+              {t.label}
+            </text>
+          </g>
+        ))}
+        <text x={pL + iW / 2} y={VH - 3} textAnchor="middle" fontSize={8} fontFamily="monospace" fill="var(--color-muted)" opacity={0.7}>
+          time elapsed
+        </text>
+
+        {/* Total-heap line (faint, behind used) */}
+        {samples.length >= 2 && (
+          <polyline
+            fill="none"
+            stroke="#ffb74d"
+            strokeWidth={1}
+            strokeDasharray="2 3"
+            opacity={0.6}
+            points={samples.map(s => `${xAt(s.ts).toFixed(1)},${yAt(s.total).toFixed(1)}`).join(" ")}
+          />
+        )}
+
+        {/* Per-algo used-heap polylines, one segment per consecutive run */}
+        {segments.map((seg, i) => {
+          if (seg.pts.length < 2) return null;
+          const color = seg.algoId ? (ALGO_COLORS[seg.algoId] ?? "#888") : "var(--color-muted)";
+          return (
+            <polyline
+              key={`seg-${i}`}
+              fill="none"
+              stroke={color}
+              strokeWidth={2}
+              opacity={seg.algoId ? 0.95 : 0.4}
+              points={seg.pts.map(s => `${xAt(s.ts).toFixed(1)},${yAt(s.used).toFixed(1)}`).join(" ")}
+            />
+          );
+        })}
+
+        {/* Algorithm-transition vertical guides + labels */}
+        {(() => {
+          const transitions: { ts: number; algoId: string }[] = [];
+          for (let i = 1; i < samples.length; i++) {
+            if (samples[i].algoId && samples[i].algoId !== samples[i - 1].algoId) {
+              transitions.push({ ts: samples[i].ts, algoId: samples[i].algoId! });
+            }
+          }
+          // Always mark the first algo too
+          if (samples[0].algoId) transitions.unshift({ ts: samples[0].ts, algoId: samples[0].algoId });
+          return transitions.map((tr, i) => {
+            const x = xAt(tr.ts);
+            const color = ALGO_COLORS[tr.algoId] ?? "#888";
+            const label = (ALGO_NAMES[tr.algoId] ?? tr.algoId).replace(" Sort", "");
+            return (
+              <g key={`tr-${i}`} style={{ pointerEvents: "none" }}>
+                <line x1={x} y1={pT} x2={x} y2={pT + iH} stroke={color} strokeWidth={0.5} strokeDasharray="2 3" opacity={0.4} />
+                <text x={x + 2} y={pT + 8} fontSize={7} fontFamily="monospace" fill={color} opacity={0.85}>
+                  {label}
+                </text>
+              </g>
+            );
+          });
+        })()}
+
+        {/* Current position marker (last sample) */}
+        {samples.length > 0 && (() => {
+          const last = samples[samples.length - 1];
+          const cx = xAt(last.ts);
+          const cy = yAt(last.used);
+          const color = last.algoId ? (ALGO_COLORS[last.algoId] ?? "#888") : "var(--color-muted)";
+          return (
+            <g style={{ pointerEvents: "none" }}>
+              {isRunning && (
+                <circle cx={cx} cy={cy} r={5} fill="none" stroke={color} strokeWidth={1.5} opacity={0.5}>
+                  <animate attributeName="r" values="5;9;5" dur="1.2s" repeatCount="indefinite" />
+                  <animate attributeName="opacity" values="0.5;0;0.5" dur="1.2s" repeatCount="indefinite" />
+                </circle>
+              )}
+              <circle cx={cx} cy={cy} r={3} fill={color} stroke="var(--color-surface-1)" strokeWidth={1.5} />
+            </g>
+          );
+        })()}
+      </svg>
+
+      </>}
+
+      {/* Algorithm picker — clickable chips. Shown in BOTH views so the user
+          can switch focus without leaving the per-algorithm tab. Clicking a
+          chip switches to per-algorithm view (or just changes focus if
+          already there). */}
+      {algoStats.length > 0 && (
+        <div className="mt-3" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 6 }}>
+          {algoStats.map(a => {
+            const isFocused = view === "perAlgo" && focusAlgo === a.id;
+            return (
+              <button
+                key={a.id}
+                type="button"
+                onClick={() => {
+                  setFocusAlgo(a.id);
+                  if (view !== "perAlgo") setView("perAlgo");
+                }}
+                title={`Inspect ${ALGO_NAMES[a.id] ?? a.id} in the Per-algorithm tab`}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6,
+                  padding: "4px 8px", borderRadius: 5,
+                  background: isFocused ? `${a.color}26` /* ~15% */ : "var(--color-surface-1)",
+                  border: `1px solid ${isFocused ? a.color : "var(--color-border)"}`,
+                  cursor: "pointer",
+                  textAlign: "left",
+                  transition: "background 0.15s, border-color 0.15s",
+                }}
+              >
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: a.color, flexShrink: 0 }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <p style={{ fontSize: 10, fontFamily: "monospace", color: "var(--color-text)", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {ALGO_NAMES[a.id] ?? a.id}
+                  </p>
+                  <p style={{ fontSize: 9, fontFamily: "monospace", color: "var(--color-muted)" }}>
+                    peak <span style={{ color: a.color, fontWeight: 600 }}>{fmtBytes(a.peak)}</span>
+                    {a.lastN != null && <span style={{ opacity: 0.7 }}> @ n={fmtN(a.lastN)}</span>}
+                  </p>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ───── Per-algorithm view (drill-in) ──────────────────────────────── */}
+      {view === "perAlgo" && (() => {
+        if (!focusAlgo || algoStats.length === 0) {
+          return (
+            <p style={{ fontSize: 11, color: "var(--color-muted)", marginTop: 12, fontFamily: "monospace", fontStyle: "italic" }}>
+              Select an algorithm above to drill in.
+            </p>
+          );
+        }
+        // Filter samples to just this algorithm
+        const algoSamples = samples.filter(s => s.algoId === focusAlgo);
+        if (algoSamples.length === 0) {
+          return (
+            <p style={{ fontSize: 11, color: "var(--color-muted)", marginTop: 12, fontFamily: "monospace", fontStyle: "italic" }}>
+              No samples recorded for {ALGO_NAMES[focusAlgo] ?? focusAlgo} yet.
+            </p>
+          );
+        }
+        const color = ALGO_COLORS[focusAlgo] ?? "#888";
+        const aStart = algoSamples[0];
+        const aEnd   = algoSamples[algoSamples.length - 1];
+        const aPeak  = algoSamples.reduce((m, s) => Math.max(m, s.used), 0);
+        const aPeakDelta = aPeak - aStart.used;
+        const aEndDelta  = aEnd.used - aStart.used;
+        const duration = (aEnd.ts - aStart.ts) / 1000;
+
+        // Sub-segment by n (each (algo, n) window separately).
+        type NWindow = { n: number | null; samples: MemSample[]; peak: number; peakDelta: number; duration: number };
+        const nWindows: NWindow[] = [];
+        let cur: NWindow | null = null;
+        for (const s of algoSamples) {
+          if (!cur || cur.n !== s.n) {
+            cur = { n: s.n, samples: [s], peak: s.used, peakDelta: 0, duration: 0 };
+            nWindows.push(cur);
+          } else {
+            cur.samples.push(s);
+            if (s.used > cur.peak) cur.peak = s.used;
+          }
+        }
+        for (const w of nWindows) {
+          w.peakDelta = w.peak - w.samples[0].used;
+          w.duration = (w.samples[w.samples.length - 1].ts - w.samples[0].ts) / 1000;
+        }
+
+        // Look up actual measured aux from the benchmark's curveData. We prefer
+        // the instrumented byte count (`allocBytes`) because it's deterministic;
+        // fall back to `performance.memory` heap delta if instrumentation didn't
+        // capture (e.g., the algo uses TypedArray which the patcher doesn't see).
+        const maxN = Math.max(...nWindows.map(w => w.n ?? 0));
+        const algoCurvePts = curveData?.[focusAlgo] ?? [];
+        const lookupActual = (n: number | null): { measured: number | null; source: "alloc" | "heap" | null } => {
+          if (n == null) return { measured: null, source: null };
+          const pt = algoCurvePts.find(p => p.n === n);
+          if (!pt) return { measured: null, source: null };
+          if (pt.allocBytes != null && pt.allocBytes > 0) return { measured: pt.allocBytes, source: "alloc" };
+          if (pt.spaceBytes != null && pt.spaceBytes > 0) return { measured: pt.spaceBytes, source: "heap" };
+          return { measured: null, source: null };
+        };
+        const headlineActual = lookupActual(maxN);
+        const theoreticalAux = maxN > 0 ? theoreticalSpaceBytes(focusAlgo, maxN) : 0;
+
+        // Isolated chart for just this algo
+        const localT0 = aStart.ts;
+        const localTRange = Math.max(1, aEnd.ts - aStart.ts);
+        const localUsedMin = Math.min(...algoSamples.map(s => s.used));
+        const localUsedMax = Math.max(...algoSamples.map(s => s.used));
+        const localYMin = localUsedMin;
+        const localYMax = Math.max(localUsedMax, localYMin + 1);
+        const xAtLocal = (t: number) => pL + ((t - localT0) / localTRange) * iW;
+        const yAtLocal = (v: number) => pT + iH - ((v - localYMin) / (localYMax - localYMin)) * iH;
+
+        const localYTicks = [0, 0.25, 0.5, 0.75, 1].map(f => {
+          const v = localYMin + f * (localYMax - localYMin);
+          return { v, y: yAtLocal(v) };
+        });
+        const localXTicks = Array.from({ length: 5 }, (_, i) => {
+          const t = localT0 + (localTRange * i) / 4;
+          return { x: xAtLocal(t), label: `${((t - localT0) / 1000).toFixed(2)}s` };
+        });
+
+        return (
+          <div className="mt-2">
+            {/* Header for the drill-in */}
+            <div className="flex items-center gap-2 mb-3">
+              <span style={{ width: 10, height: 10, borderRadius: "50%", background: color, flexShrink: 0 }} />
+              <p style={{ fontSize: 13, fontWeight: 700, color: "var(--color-text)" }}>
+                {ALGO_NAMES[focusAlgo] ?? focusAlgo}
+              </p>
+              <span style={{ fontSize: 9, fontFamily: "monospace", color: "var(--color-muted)", marginLeft: "auto" }}>
+                {algoSamples.length.toLocaleString()} samples · {duration.toFixed(2)}s on-CPU
+              </span>
+            </div>
+
+            {/* Detail stats */}
+            <div className="flex flex-wrap gap-4 mb-3" style={{ fontFamily: "monospace" }}>
+              <div>
+                <p style={{ fontSize: 9, color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>start heap</p>
+                <p style={{ fontSize: 14, fontWeight: 700, color: "var(--color-text)" }}>{fmtBytes(aStart.used)}</p>
+              </div>
+              <div>
+                <p style={{ fontSize: 9, color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>peak heap</p>
+                <p style={{ fontSize: 14, fontWeight: 700, color }}>{fmtBytes(aPeak)}</p>
+              </div>
+              <div>
+                <p style={{ fontSize: 9, color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>end heap</p>
+                <p style={{ fontSize: 14, fontWeight: 700, color: "var(--color-text)" }}>{fmtBytes(aEnd.used)}</p>
+              </div>
+              <div>
+                <p style={{ fontSize: 9, color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>peak Δ</p>
+                <p style={{ fontSize: 14, fontWeight: 700, color: aPeakDelta > 0 ? "#ffb74d" : "var(--color-muted)" }}>
+                  {aPeakDelta > 0 ? "+" : ""}{fmtBytes(aPeakDelta)}
+                </p>
+              </div>
+              <div>
+                <p style={{ fontSize: 9, color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>end Δ</p>
+                <p style={{ fontSize: 14, fontWeight: 700, color: aEndDelta >= 0 ? "var(--color-text)" : "#7ec88a" }}>
+                  {aEndDelta >= 0 ? "+" : ""}{fmtBytes(aEndDelta)}
+                </p>
+              </div>
+              <div>
+                <p style={{ fontSize: 9, color: "var(--color-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                  actual aux @ n={fmtN(maxN)}
+                  {headlineActual.source && (
+                    <span style={{ marginLeft: 4, fontSize: 7, opacity: 0.7 }}>
+                      ({headlineActual.source === "alloc" ? "instr." : "heap"})
+                    </span>
+                  )}
+                </p>
+                <p style={{ fontSize: 14, fontWeight: 700, color: headlineActual.measured != null ? color : "var(--color-muted)" }}>
+                  {headlineActual.measured != null ? fmtBytes(headlineActual.measured) : "—"}
+                </p>
+                <p style={{ fontSize: 8, color: "var(--color-muted)", fontFamily: "monospace", marginTop: 1 }}>
+                  theoretical {fmtBytes(theoreticalAux)}
+                </p>
+              </div>
+            </div>
+
+            {/* Zoomed-in chart of just this algorithm's samples */}
+            <svg viewBox={`0 0 ${VW} ${VH}`} preserveAspectRatio="none" style={{ width: "100%", height: "auto", display: "block" }}>
+              <rect x={pL} y={pT} width={iW} height={iH} fill="var(--color-surface-1)" />
+              {localYTicks.map((t, i) => (
+                <g key={`yL${i}`}>
+                  <line x1={pL} y1={t.y} x2={pL + iW} y2={t.y} stroke="var(--color-border)" strokeWidth={0.5} opacity={0.5} />
+                  <text x={pL - 6} y={t.y + 3} textAnchor="end" fontSize={8.5} fontFamily="monospace" fill="var(--color-muted)">{fmtBytes(t.v)}</text>
+                </g>
+              ))}
+              {localXTicks.map((t, i) => (
+                <g key={`xL${i}`}>
+                  <line x1={t.x} y1={pT + iH} x2={t.x} y2={pT + iH + 3} stroke="var(--color-border)" strokeWidth={0.5} />
+                  <text x={t.x} y={pT + iH + 14} textAnchor="middle" fontSize={8.5} fontFamily="monospace" fill="var(--color-muted)">{t.label}</text>
+                </g>
+              ))}
+              <text x={pL + iW / 2} y={VH - 3} textAnchor="middle" fontSize={8} fontFamily="monospace" fill="var(--color-muted)" opacity={0.7}>
+                time on {ALGO_NAMES[focusAlgo] ?? focusAlgo}
+              </text>
+
+              {/* n-window vertical guides + labels */}
+              {nWindows.length > 1 && nWindows.map((w, i) => {
+                if (!w.n) return null;
+                const x = xAtLocal(w.samples[0].ts);
+                return (
+                  <g key={`nw-${i}`}>
+                    <line x1={x} y1={pT} x2={x} y2={pT + iH} stroke={color} strokeWidth={0.5} strokeDasharray="2 3" opacity={0.45} />
+                    <text x={x + 2} y={pT + 8} fontSize={7} fontFamily="monospace" fill={color} opacity={0.85}>
+                      n={fmtN(w.n)}
+                    </text>
+                  </g>
+                );
+              })}
+
+              {/* Polyline of used heap */}
+              {algoSamples.length >= 2 && (
+                <polyline
+                  fill="none" stroke={color} strokeWidth={2}
+                  points={algoSamples.map(s => `${xAtLocal(s.ts).toFixed(1)},${yAtLocal(s.used).toFixed(1)}`).join(" ")}
+                />
+              )}
+            </svg>
+
+            {/* Per-n breakdown table */}
+            {nWindows.length > 0 && (
+              <div className="mt-3">
+                <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--color-muted)" }}>
+                  Per-n breakdown
+                </p>
+                <table style={{ fontSize: 10, fontFamily: "monospace", borderCollapse: "collapse", width: "100%" }}>
+                  <thead>
+                    <tr style={{ color: "var(--color-muted)" }}>
+                      {[
+                        { h: "n",                  align: "left"  as const, tip: undefined },
+                        { h: "samples",            align: "right" as const, tip: "Number of 100 ms memory samples captured while this (algo, n) was running" },
+                        { h: "duration",           align: "right" as const, tip: "Wall-clock time the algorithm spent at this n (live-sampled)" },
+                        { h: "peak heap Δ",        align: "right" as const, tip: "ACTUAL live-sampled heap growth during this window (peak − start)" },
+                        { h: "measured aux",       align: "right" as const, tip: "ACTUAL aux memory from the dedicated space-measurement pass (instrumented Array.method byte count when available, else performance.memory heap delta)" },
+                        { h: "theoretical",        align: "right" as const, tip: "Predicted aux derived from the algorithm's space complexity class — reference only" },
+                      ].map(({ h, align, tip }) => (
+                        <th key={h} title={tip} style={{ textAlign: align, padding: "3px 6px", borderBottom: "1px solid var(--color-border)", fontWeight: 400 }}>
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {nWindows.map((w, i) => {
+                      const theo = w.n ? theoreticalSpaceBytes(focusAlgo, w.n) : 0;
+                      const actual = lookupActual(w.n);
+                      return (
+                        <tr key={i}>
+                          <td style={{ padding: "3px 6px", color: "var(--color-text)" }}>{w.n != null ? fmtN(w.n) : "—"}</td>
+                          <td style={{ padding: "3px 6px", textAlign: "right", color: "var(--color-text)" }}>{w.samples.length.toLocaleString()}</td>
+                          <td style={{ padding: "3px 6px", textAlign: "right", color: "var(--color-text)" }}>{w.duration.toFixed(2)}s</td>
+                          <td style={{ padding: "3px 6px", textAlign: "right", color: w.peakDelta > 0 ? "#ffb74d" : "var(--color-muted)" }}
+                            title="Live-sampled heap delta (peak − start) during this window — actual">
+                            {w.peakDelta > 0 ? "+" : ""}{fmtBytes(w.peakDelta)}
+                          </td>
+                          <td style={{ padding: "3px 6px", textAlign: "right", color: actual.measured != null ? color : "var(--color-muted)" }}
+                            title={actual.source === "alloc"
+                              ? "Instrumented byte count via patched Array methods — actual"
+                              : actual.source === "heap"
+                                ? "performance.memory heap delta from dedicated space pass — actual"
+                                : "No measurement captured at this n yet"}>
+                            {actual.measured != null
+                              ? <>{fmtBytes(actual.measured)}<span style={{ opacity: 0.5, fontSize: 8, marginLeft: 3 }}>{actual.source === "alloc" ? "i" : "h"}</span></>
+                              : "—"}
+                          </td>
+                          <td style={{ padding: "3px 6px", textAlign: "right", color: "var(--color-muted)", opacity: 0.7 }}>{fmtBytes(theo)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <p style={{ fontSize: 9, color: "var(--color-muted)", fontFamily: "monospace", marginTop: 4, fontStyle: "italic" }}>
+                  <span style={{ color }}>i</span> = instrumented (patched Array methods, deterministic)
+                  {" · "}
+                  <span style={{ color }}>h</span> = heap delta (<code>performance.memory</code>, ~1MB resolution)
+                </p>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      <p style={{ fontSize: 9, color: "var(--color-muted)", marginTop: 8, lineHeight: 1.4, fontStyle: "italic" }}>
+        Used (solid) and total (dashed) heap from <code>performance.memory</code> sampled at 100 ms. V8/Chromium only · ~1 MB resolution · post-GC snapshot.
+      </p>
+    </div>
+  );
+}
+
+// Legacy left-pane dashboard — kept here only in case anything imports it.
+// The active live-memory UI is LiveMemoryChart, rendered under the curve.
+function MemoryDashboard({
+  currentAlgo, currentN, progress, dataType,
+}: {
+  currentAlgo: string | null;
+  currentN: number | null;
+  progress: { done: number; total: number };
+  dataType: DataType;
+}) {
+  type MemSnap = { used: number; total: number; limit: number };
+  const [snap, setSnap] = useState<MemSnap | null>(null);
+  const [history, setHistory] = useState<number[]>([]);
+  const [supported, setSupported] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    const tick = () => {
+      const perf = performance as unknown as { memory?: { usedJSHeapSize: number; totalJSHeapSize: number; jsHeapSizeLimit: number } };
+      if (perf.memory && typeof perf.memory.usedJSHeapSize === "number") {
+        setSupported(true);
+        const s = { used: perf.memory.usedJSHeapSize, total: perf.memory.totalJSHeapSize, limit: perf.memory.jsHeapSizeLimit };
+        setSnap(s);
+        setHistory(h => {
+          const next = h.length >= 100 ? [...h.slice(1), s.used] : [...h, s.used];
+          return next;
+        });
+      } else {
+        setSupported(false);
+      }
+    };
+    tick();
+    const id = setInterval(tick, 100);
+    return () => clearInterval(id);
+  }, []);
+
+  const theoreticalAux = currentAlgo && currentN ? theoreticalSpaceBytes(currentAlgo, currentN) : 0;
+  // Element width heuristic: numbers ≈ 8 bytes (PACKED_DOUBLE), strings ≈ 32 bytes
+  // (UTF-16 + JS string overhead) for typical fixed-length test strings.
+  const elemBytes = dataType === "string" ? 32 : 8;
+  const inputBytes = currentN ? currentN * elemBytes : 0;
+  const totalExpected = inputBytes + theoreticalAux;
+
+  // Sparkline range — auto-scales to the visible history so the line uses the full vertical space.
+  const sparkMin = history.length > 0 ? Math.min(...history) : 0;
+  const sparkMax = history.length > 0 ? Math.max(...history) : 1;
+  const sparkRange = Math.max(1, sparkMax - sparkMin);
+
+  return (
+    <div
+      className="rounded-xl p-4 flex flex-col gap-4"
+      style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)" }}
+    >
+      <div>
+        <div className="flex items-center gap-2 mb-1">
+          <span style={{
+            display: "inline-block", width: 8, height: 8, borderRadius: "50%",
+            background: "var(--color-state-swap)",
+            animation: "cc-pulse 1s steps(1, end) infinite",
+          }} />
+          <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
+            Live memory — benchmark running
+          </p>
+        </div>
+        <p style={{ fontSize: 14, fontWeight: 700, color: "var(--color-text)", marginTop: 4 }}>
+          {currentAlgo ? (ALGO_NAMES[currentAlgo] ?? currentAlgo) : "…"}
+        </p>
+        <p style={{ fontSize: 11, fontFamily: "monospace", color: "var(--color-muted)", marginTop: 2 }}>
+          n = {currentN?.toLocaleString() ?? "…"}
+          {" · "}
+          <span style={{ color: "var(--color-text)" }}>{progress.done}/{progress.total}</span>
+          {progress.total > 0 && (
+            <span style={{ opacity: 0.7 }}> ({Math.round((progress.done / progress.total) * 100)}%)</span>
+          )}
+          {" · "}
+          <span style={{ color: "var(--color-accent)" }}>{dataType}</span>
+        </p>
+      </div>
+
+      {/* Live heap snapshot (V8 only) */}
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--color-muted)" }}>
+          V8 JS heap
+        </p>
+        {supported === false ? (
+          <p style={{ fontSize: 10, fontFamily: "monospace", color: "var(--color-muted)", fontStyle: "italic" }}>
+            performance.memory unavailable — V8/Chromium only.
+          </p>
+        ) : snap ? (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", gap: "3px 10px", fontSize: 11, fontFamily: "monospace", alignItems: "center" }}>
+              <span style={{ color: "var(--color-muted)" }}>used</span>
+              <div style={{ height: 7, borderRadius: 3, background: "var(--color-surface-3)", overflow: "hidden" }}>
+                <div style={{
+                  height: "100%", width: `${Math.min(100, (snap.used / snap.limit) * 100)}%`,
+                  background: "var(--color-accent)", transition: "width 0.1s linear",
+                }} />
+              </div>
+              <span style={{ color: "var(--color-text)", whiteSpace: "nowrap" }}>{fmtBytes(snap.used)}</span>
+
+              <span style={{ color: "var(--color-muted)" }}>total</span>
+              <div style={{ height: 7, borderRadius: 3, background: "var(--color-surface-3)", overflow: "hidden" }}>
+                <div style={{
+                  height: "100%", width: `${Math.min(100, (snap.total / snap.limit) * 100)}%`,
+                  background: "#ffb74d", opacity: 0.7, transition: "width 0.1s linear",
+                }} />
+              </div>
+              <span style={{ color: "var(--color-text)", whiteSpace: "nowrap" }}>{fmtBytes(snap.total)}</span>
+
+              <span style={{ color: "var(--color-muted)" }}>limit</span>
+              <div style={{ height: 7, borderRadius: 3, background: "var(--color-surface-3)" }} />
+              <span style={{ color: "var(--color-text)", whiteSpace: "nowrap" }}>{fmtBytes(snap.limit)}</span>
+            </div>
+
+            {/* Sparkline of last ~100 samples */}
+            <div style={{ marginTop: 8 }}>
+              <p style={{ fontSize: 8, fontFamily: "monospace", color: "var(--color-muted)", marginBottom: 2 }}>
+                Used heap · last {history.length} samples · range {fmtBytes(sparkMin)} – {fmtBytes(sparkMax)}
+              </p>
+              <svg viewBox="0 0 200 36" preserveAspectRatio="none" style={{ width: "100%", height: 36, display: "block" }}>
+                {history.length >= 2 && (
+                  <polyline
+                    fill="none"
+                    stroke="var(--color-accent)"
+                    strokeWidth={1.5}
+                    points={history.map((v, i) => {
+                      const x = (i / Math.max(1, history.length - 1)) * 200;
+                      const y = 34 - ((v - sparkMin) / sparkRange) * 32;
+                      return `${x.toFixed(1)},${y.toFixed(1)}`;
+                    }).join(" ")}
+                  />
+                )}
+                <line x1={0} y1={35} x2={200} y2={35} stroke="var(--color-border)" strokeWidth={0.5} />
+              </svg>
+            </div>
+          </>
+        ) : (
+          <p style={{ fontSize: 10, fontFamily: "monospace", color: "var(--color-muted)" }}>polling…</p>
+        )}
+      </div>
+
+      {/* Theoretical breakdown for the active (algo, n) */}
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--color-muted)" }}>
+          Theoretical footprint @ n = {currentN?.toLocaleString() ?? "…"}
+        </p>
+        <table style={{ fontSize: 11, fontFamily: "monospace", borderCollapse: "collapse", width: "100%" }}>
+          <tbody>
+            <tr>
+              <td style={{ padding: "2px 5px", color: "var(--color-muted)", width: "40%" }}>
+                input array
+                <span style={{ fontSize: 9, opacity: 0.7, marginLeft: 4 }}>(n × {elemBytes}B)</span>
+              </td>
+              <td style={{ padding: "2px 5px", color: "var(--color-text)", textAlign: "right" }}>{fmtBytes(inputBytes)}</td>
+            </tr>
+            <tr>
+              <td style={{ padding: "2px 5px", color: "var(--color-muted)", borderTop: "1px solid var(--color-border)" }}>
+                aux ({currentAlgo ? (ALGO_SPACE[currentAlgo] ?? "—") : "—"})
+              </td>
+              <td style={{ padding: "2px 5px", color: "var(--color-text)", textAlign: "right", borderTop: "1px solid var(--color-border)" }}>
+                {fmtBytes(theoreticalAux)}
+              </td>
+            </tr>
+            <tr>
+              <td style={{ padding: "2px 5px", color: "var(--color-muted)", borderTop: "1px solid var(--color-border)", fontWeight: 600 }}>
+                total
+              </td>
+              <td style={{ padding: "2px 5px", color: "var(--color-accent)", textAlign: "right", borderTop: "1px solid var(--color-border)", fontWeight: 600 }}>
+                {fmtBytes(totalExpected)}
+              </td>
+            </tr>
+            {currentAlgo && currentN && (() => {
+              const cl = cacheLevel(currentAlgo, currentN);
+              return (
+                <tr>
+                  <td style={{ padding: "2px 5px", color: "var(--color-muted)", borderTop: "1px solid var(--color-border)" }}>cache level</td>
+                  <td style={{ padding: "2px 5px", color: cl.color, textAlign: "right", borderTop: "1px solid var(--color-border)", fontWeight: 600 }}>
+                    {cl.label}
+                  </td>
+                </tr>
+              );
+            })()}
+          </tbody>
+        </table>
+        <p style={{ fontSize: 9, color: "var(--color-muted)", marginTop: 6, lineHeight: 1.4, fontStyle: "italic" }}>
+          Heap numbers come from <code>performance.memory</code> — V8 only, ~1 MB resolution, async post-GC snapshot. Theoretical numbers are derived from the algorithm&apos;s known space complexity.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/*
+ * ColorPicker — small swatch button that opens a popover palette.
+ *
+ * Used on each saved-sort row so the user can recolor a sort directly inside
+ * the list. Choosing a swatch closes the popover. A small `#RRGGBB` text input
+ * lets the user paste a custom hex if the palette doesn't have what they want.
+ */
+function ColorPicker({ value, onChange }: { value: string; onChange: (c: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [hex, setHex] = useState(value);
+  useEffect(() => { setHex(value); }, [value]);
+  return (
+    <div style={{ position: "relative", flexShrink: 0 }}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        title={`Color: ${value} — click to change`}
+        style={{
+          width: 14, height: 14, borderRadius: 3, padding: 0,
+          background: value, border: "1px solid var(--color-border)",
+          cursor: "pointer", marginTop: 1,
+        }}
+      />
+      {open && (
+        <>
+          {/* Backdrop to close on outside click */}
+          <div
+            onClick={() => setOpen(false)}
+            style={{ position: "fixed", inset: 0, zIndex: 90 }}
+          />
+          {/* Palette popover */}
+          <div style={{
+            position: "absolute", top: 18, left: 0, zIndex: 91,
+            display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 4,
+            padding: 8, borderRadius: 6,
+            background: "var(--color-surface-2)",
+            border: "1px solid var(--color-border)",
+            boxShadow: "0 4px 14px rgba(0,0,0,0.25)",
+            width: 96,
+          }}>
+            {CUSTOM_PALETTE.map(c => (
+              <button
+                key={c}
+                type="button"
+                onClick={() => { onChange(c); setOpen(false); }}
+                title={c}
+                style={{
+                  width: 18, height: 18, padding: 0, borderRadius: 3,
+                  background: c,
+                  border: `2px solid ${c === value ? "var(--color-text)" : "transparent"}`,
+                  cursor: "pointer",
+                }}
+              />
+            ))}
+            <input
+              type="text"
+              value={hex}
+              onChange={e => setHex(e.target.value)}
+              onBlur={() => {
+                // Accept only well-formed hex; ignore garbage.
+                if (/^#[0-9a-fA-F]{6}$/.test(hex)) onChange(hex);
+                else setHex(value);
+              }}
+              onKeyDown={e => {
+                if (e.key === "Enter") {
+                  if (/^#[0-9a-fA-F]{6}$/.test(hex)) { onChange(hex); setOpen(false); }
+                  else setHex(value);
+                }
+              }}
+              placeholder="#rrggbb"
+              style={{
+                gridColumn: "1 / span 4",
+                fontFamily: "monospace", fontSize: 9, padding: "3px 5px",
+                borderRadius: 3,
+                background: "var(--color-surface-1)",
+                border: "1px solid var(--color-border)",
+                color: "var(--color-text)", outline: "none",
+                marginTop: 2,
+              }}
+            />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ResultsSkeleton({ algoCount }: { algoCount: number }) {
   const cards = Math.min(6, Math.max(2, algoCount));
   const bar = (h: number, w: string = "100%") => (
@@ -2687,10 +3654,23 @@ function MathPanel({
                     const verified = !sp.failed;
                     const badIdx = sp.badIdx ?? -1;
 
-                    // Numeric bar scaling — only used when values are numeric. For strings
-                    // we use length as the bar metric so the user still sees per-cell shape.
-                    const numericForBars = (v: number | string): number =>
-                      isStr ? (v as string).length : (v as number);
+                    // Bar scaling.
+                    //   • Numbers (int/float): bar height ∝ value
+                    //   • Strings: bar height ∝ LEXICOGRAPHIC RANK among the values in
+                    //     this sample. Using s.length is uninformative because our
+                    //     generator produces fixed-length 6-char strings — every bar
+                    //     would be identical. Ranking by sort order gives a visible
+                    //     increasing staircase in the `after` row, which is what
+                    //     proves the sort worked.
+                    let numericForBars: (v: number | string) => number;
+                    if (isStr) {
+                      const uniqueSorted = [...new Set([...sp.before, ...sp.after] as string[])].sort();
+                      const rankMap = new Map<string, number>();
+                      uniqueSorted.forEach((s, i) => rankMap.set(s, i));
+                      numericForBars = (v) => rankMap.get(v as string) ?? 0;
+                    } else {
+                      numericForBars = (v) => v as number;
+                    }
                     const all = [...sp.before, ...sp.after].map(numericForBars);
                     const maxV = Math.max(...all, 1);
                     const minV = Math.min(...all, 0);
@@ -2698,11 +3678,16 @@ function MathPanel({
 
                     const fmtCell = (v: number | string): string => {
                       if (typeof v === "string") {
-                        // Truncate long strings so the row stays readable
-                        return v.length > 6 ? v.slice(0, 5) + "…" : v;
+                        // Show up to 8 chars verbatim so 6-char generated strings appear
+                        // fully ("abc123"), and longer/unicode strings still get truncated.
+                        return v.length > 8 ? v.slice(0, 7) + "…" : v;
                       }
                       if (Number.isInteger(v)) return v.toString();
-                      return v.toFixed(2);
+                      // For floats: scale precision to the captured `decimalsMax` so
+                      // values like 12345.6789 don't get clipped to 12345.68 if more
+                      // precision is meaningful for the run.
+                      const decimals = sp.decimalsMax != null ? Math.min(4, Math.max(2, sp.decimalsMax)) : 2;
+                      return v.toFixed(decimals);
                     };
                     const renderRow = (vals: (number | string)[], valueColor: string) => (
                       <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 1 }}>
@@ -2775,6 +3760,21 @@ function MathPanel({
                           </span>
                         </div>
 
+                        {/* Generator explanation — describes how the values were produced */}
+                        <div style={{
+                          fontSize: 8, fontFamily: "monospace", color: "var(--color-muted)",
+                          marginBottom: 4, padding: "3px 6px", borderRadius: 4,
+                          background: "var(--color-surface-1)", border: "1px solid var(--color-border)",
+                          lineHeight: 1.4,
+                        }}>
+                          <strong style={{ color: "var(--color-text)" }}>Generator: </strong>
+                          {isStr
+                            ? `6-char base-36 strings padded with zeros (e.g., "000abc", "fooz23"). Generated by generateStringInput() with the "${sp.scenario ?? "random"}" scenario shape.`
+                            : isFloat
+                              ? `Integer in range + Math.random() fractional part (e.g., 4123.7890). Generated by generateFloatInput() with the "${sp.scenario ?? "random"}" scenario shape.`
+                              : `Random integers in [0, ~9999]. Generated by generateBenchmarkInput() with the "${sp.scenario ?? "random"}" scenario shape.`}
+                        </div>
+
                         {/* Per-run stats summarising what was actually fed in */}
                         <div style={{ display: "flex", gap: 10, fontSize: 8, fontFamily: "monospace", color: "var(--color-muted)", marginBottom: 6, flexWrap: "wrap" }}>
                           <span title="Smallest value across the full input">
@@ -2786,6 +3786,7 @@ function MathPanel({
                           {sp.distinctCount !== undefined && (
                             <span title="Number of distinct values across the full input">
                               distinct <span style={{ color: "var(--color-text)" }}>{sp.distinctCount.toLocaleString()}</span>
+                              {sp.distinctCount < sp.n && <span style={{ opacity: 0.6 }}> / {sp.n.toLocaleString()}</span>}
                             </span>
                           )}
                           {!isStr && sp.minVal !== undefined && sp.maxVal !== undefined && typeof sp.minVal === "number" && typeof sp.maxVal === "number" && (
@@ -2793,11 +3794,45 @@ function MathPanel({
                               span <span style={{ color: "var(--color-text)" }}>{((sp.maxVal - sp.minVal) as number).toLocaleString()}</span>
                             </span>
                           )}
-                          {isStr && (
-                            <span title="Bar heights below use character length, since lexicographic order doesn't map to a single numeric axis.">
-                              <span style={{ color: "var(--color-text)" }}>bar height = length</span>
+                          {sp.totalInputBytes !== undefined && (
+                            <span title={`n × ~${sp.bytesPerElement} bytes/element = total input memory footprint (approx)`}>
+                              size <span style={{ color: "var(--color-text)" }}>{fmtBytes(sp.totalInputBytes)}</span>
+                              <span style={{ opacity: 0.6 }}> (~{sp.bytesPerElement} B/elem)</span>
                             </span>
                           )}
+                          {isStr && sp.avgStrLen !== undefined && (
+                            <span title="Mean character length across the full input">
+                              avg len <span style={{ color: "var(--color-text)" }}>{sp.avgStrLen.toFixed(1)}</span>
+                            </span>
+                          )}
+                          {isFloat && sp.decimalsMax !== undefined && (
+                            <span title="Maximum number of fractional digits observed in the input (capped at 6)">
+                              decimals <span style={{ color: "var(--color-text)" }}>≤{sp.decimalsMax}</span>
+                            </span>
+                          )}
+                          {sp.isAllInteger === false && !isFloat && (
+                            <span title="At least one value has a fractional part — sort behaviour may differ from pure-integer expectations" style={{ color: "#ffb74d" }}>
+                              ⚠ contains non-integers
+                            </span>
+                          )}
+                          {isStr && (
+                            <span title="Bar heights below scale with each value's lexicographic rank among the sample. A clean staircase in the `after` row visually proves the sort produced ascending order.">
+                              <span style={{ color: "var(--color-text)" }}>bar = lex rank</span>
+                            </span>
+                          )}
+                          {/* Sort time at this n, if curveData is available */}
+                          {(() => {
+                            const pt = (data[id] ?? []).find(p => p.n === sp.n);
+                            if (!pt) return null;
+                            return (
+                              <span title="Best timed run at this n (post-warmup)" style={{ color: "var(--color-muted)" }}>
+                                sort time <span style={{ color: "var(--color-text)" }}>{fmtTime(pt.timeMs)}</span>
+                                {pt.meanMs != null && pt.stdDev != null && (
+                                  <span style={{ opacity: 0.7 }}> (μ {fmtTime(pt.meanMs)} ±{fmtTime(pt.stdDev)})</span>
+                                )}
+                              </span>
+                            );
+                          })()}
                         </div>
 
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -4972,6 +6007,12 @@ export default function BenchmarkVisualizer() {
   // Browsers throttle/queue timer callbacks in background tabs, so timings
   // captured while hidden are unreliable. We surface a banner when this trips.
   const [tabHiddenDuringRun, setTabHiddenDuringRun] = useState(false);
+  // ── Live memory timeline ────────────────────────────────────────────────────
+  // Sampled heap usage during a run, tagged with the algorithm + n that was
+  // active at the time. Rendered as a time-series chart under the performance
+  // curve. Polling runs only while `status === "running"` (see effect below);
+  // samples persist after the run so the user can review the timeline.
+  const [memSamples, setMemSamples] = useState<MemSample[]>([]);
   // ── Ghost mode ─────────────────────────────────────────────────────────────
   // Persisted ring buffer (last 20 runs per algorithm) of (n, timeMs, spaceBytes)
   // tuples. When ghostMode is enabled, the curve chart draws these past runs as
@@ -4988,6 +6029,12 @@ export default function BenchmarkVisualizer() {
   const [curveData, setCurveData] = useState<CurveData>({});
   const [currentN, setCurrentN] = useState<number | null>(null);
   const [currentAlgo, setCurrentAlgo] = useState<string | null>(null);
+  // Refs mirroring currentN/currentAlgo so the memory-sampling interval can
+  // read the *latest* values without being re-created on every state change.
+  const currentNRef = useRef<number | null>(null);
+  const currentAlgoRef = useRef<string | null>(null);
+  useEffect(() => { currentNRef.current = currentN; }, [currentN]);
+  useEffect(() => { currentAlgoRef.current = currentAlgo; }, [currentAlgo]);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [runConfig, setRunConfig] = useState<{
     sizes: number[]; scenarios: BenchmarkScenario[]; rounds: number; warmup: number; algos: string[];
@@ -5012,7 +6059,9 @@ export default function BenchmarkVisualizer() {
   const customSortHydratedRef = useRef(false);
   // Saved-sorts library. Initial value is [] on both server and client so SSR
   // hydration matches; the real saved data is loaded in a useEffect after mount.
-  const [savedSorts, setSavedSorts] = useState<{ id: string; name: string; code: string; notes: string; savedAt: string }[]>([]);
+  // Each saved sort now carries an `enabled` flag and a `color` so multiple
+  // can be included in a benchmark run at once, each plotted in its own hue.
+  const [savedSorts, setSavedSorts] = useState<{ id: string; name: string; code: string; notes: string; savedAt: string; enabled?: boolean; color?: string }[]>([]);
   const [codeAlgo, setCodeAlgo] = useState<string | null>(null);
   const [codeCopied, setCodeCopied] = useState(false);
   const [customSortError, setCustomSortError] = useState<string | null>(null);
@@ -5028,6 +6077,10 @@ export default function BenchmarkVisualizer() {
   const [pendingCustomN, setPendingCustomN] = useState<number | null>(null);
   const [customPreSorted, setCustomPreSorted] = useState(0);
   const [customDuplicates, setCustomDuplicates] = useState(0);
+  // Integer-only options: guarantee unique values, or sample from the full
+  // signed 32-bit range instead of the legacy [0, 10000) range.
+  const [intUniqueOnly, setIntUniqueOnly] = useState(false);
+  const [intFullInt32, setIntFullInt32] = useState(false);
   const [quickPivot, setQuickPivot] = useState<QuickPivot>("median3");
   const [shellGaps, setShellGaps] = useState<ShellGaps>("ciura");
   const [dataType, setDataType] = useState<DataType>("integer");
@@ -5111,6 +6164,55 @@ export default function BenchmarkVisualizer() {
       localStorage.setItem("codecookbook.ghostMode", ghostMode ? "on" : "off");
     } catch { /* ignore */ }
   }, [ghostMode]);
+
+  // Sync saved-sort metadata into ALGO_NAMES / ALGO_COLORS so chart lookups,
+  // mini cards, rankings, etc. all resolve `custom-${id}` ids to the user's
+  // chosen name and color. This runs SYNCHRONOUSLY during render (not in
+  // useEffect) so children see the latest names on the same render cycle the
+  // user renames or recolors a saved sort — useEffect would lag by one frame
+  // and the chart would briefly show the stale name. The maps are Proxy
+  // targets whose `get` trap consults the underlying object first, so direct
+  // assignment is the simplest way to extend without rewriting every consumer.
+  // useMemo gives us "run only when savedSorts changes" for free.
+  useMemo(() => {
+    const namesObj  = ALGO_NAMES  as Record<string, string>;
+    const colorsObj = ALGO_COLORS as Record<string, string>;
+    savedSorts.forEach((s, i) => {
+      const key = `custom-${s.id}`;
+      namesObj[key]  = s.name || `Custom ${i + 1}`;
+      colorsObj[key] = s.color || defaultCustomColor(i);
+    });
+    return savedSorts.length;
+  }, [savedSorts]);
+
+  // Memory-sampling timer: only ticks while a benchmark is running. Records a
+  // sample every 100 ms tagged with the currentAlgo + currentN at the moment
+  // of sampling. Samples accumulate into memSamples and survive after the run
+  // so the user can scrub the timeline.
+  useEffect(() => {
+    if (status !== "running") return;
+    if (typeof performance === "undefined") return;
+    const startedAt = performance.now();
+    const tick = () => {
+      const perfMem = (performance as unknown as { memory?: { usedJSHeapSize: number; totalJSHeapSize: number } }).memory;
+      if (!perfMem) return;
+      const sample: MemSample = {
+        ts: performance.now() - startedAt,
+        used: perfMem.usedJSHeapSize,
+        total: perfMem.totalJSHeapSize,
+        algoId: currentAlgoRef.current,
+        n: currentNRef.current,
+      };
+      // Cap at 4000 samples (~6.5 min @ 100ms) to keep render cheap.
+      setMemSamples(prev => prev.length >= 4000 ? [...prev.slice(1), sample] : [...prev, sample]);
+    };
+    tick();
+    const id = setInterval(tick, 100);
+    return () => clearInterval(id);
+    // The effect re-runs only on status change; currentAlgo/currentN are read
+    // through refs so we don't re-create the interval on every state update.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]);
 
   // Page-visibility listener: flag any time the tab goes hidden while a
   // benchmark is running so we can warn the user that timings collected during
@@ -5289,6 +6391,212 @@ export default function BenchmarkVisualizer() {
     URL.revokeObjectURL(url);
   };
 
+  /*
+   * Build a human-readable plain-text benchmark report.
+   *
+   * Layout:
+   *   1. Header: timestamp, run config (sizes, scenarios, rounds/warmup, etc.)
+   *   2. SUMMARY block: cross-algorithm comparison numbers — winner, finish
+   *      order at the largest n, head-to-head ratios, fitted complexity
+   *      exponents, failure flags. This is the part that lets a reader
+   *      compare without scrolling.
+   *   3. Per-algorithm sections (in finishing order): every measured n,
+   *      best/mean/stdev, space numbers, theoretical aux, peak heap delta if
+   *      live-memory samples exist, sortedness check.
+   */
+  const exportReportText = () => {
+    const algos = Object.keys(curveDataExt).filter(id => (curveDataExt[id] ?? []).some(p => !p.timedOut && p.timeMs > 0));
+    const sizes = [...selectedSizes].sort((a, b) => a - b);
+    const largestN = sizes[sizes.length - 1] ?? 0;
+    const pad = (s: string, n: number) => s.padEnd(n);
+    const padR = (s: string, n: number) => s.padStart(n);
+
+    // ── Header ────────────────────────────────────────────────────────────
+    const lines: string[] = [];
+    lines.push("=".repeat(72));
+    lines.push("  CODECOOKBOOK BENCHMARK REPORT");
+    lines.push(`  Generated: ${new Date().toISOString()}`);
+    lines.push("=".repeat(72));
+    lines.push("");
+    lines.push("CONFIGURATION");
+    lines.push("-".repeat(72));
+    lines.push(`  data type        : ${dataType}`);
+    lines.push(`  input sizes      : ${sizes.map(n => n.toLocaleString()).join(", ")}`);
+    lines.push(`  scenarios        : ${runConfig?.scenarios.join(", ") ?? [...scenarios].join(", ")}`);
+    lines.push(`  rounds / warmup  : ${runConfig?.rounds ?? rounds} rounds, ${runConfig?.warmup ?? warmup} discarded`);
+    lines.push(`  worker isolation : ${useWorkerIsolation ? "ON" : "off"}`);
+    lines.push(`  adversarial input: ${adversarialEnabled ? "ON" : "off"}`);
+    lines.push(`  per-sort timeout : ${timeoutEnabled ? `${timeoutSec}s` : "uncapped"}`);
+    if (tabHiddenDuringRun) lines.push(`  ⚠ tab was backgrounded during this run — timings may be throttled`);
+    lines.push("");
+
+    // ── Cross-algo summary (sorted by best time at largestN) ──────────────
+    type RowSummary = {
+      id: string;
+      name: string;
+      bestAtMaxN: number;
+      meanAtMaxN: number | null;
+      stdDevAtMaxN: number | null;
+      fitExp: number | null;
+      fitK: number | null;
+      timedOut: boolean;
+      failed: boolean;
+      auxBytes: number | null;
+      auxSource: "instrumented" | "heap" | "theoretical";
+    };
+    const rows: RowSummary[] = algos.map(id => {
+      const pts = curveDataExt[id] ?? [];
+      const pt = pts.find(p => p.n === largestN) ?? pts[pts.length - 1];
+      // Fit empirical exponent from log-log regression of mean times.
+      const validPts = pts.filter(p => !p.timedOut && p.timeMs > 0).map(p => ({ n: p.n, val: p.meanMs ?? p.timeMs }));
+      const fit = validPts.length >= 2 ? fitLogLog(validPts) : null;
+      // Pick the best actual aux measurement source available.
+      let auxBytes: number | null = null;
+      let auxSource: RowSummary["auxSource"] = "theoretical";
+      if (pt) {
+        if (pt.allocBytes != null && pt.allocBytes > 0) { auxBytes = pt.allocBytes; auxSource = "instrumented"; }
+        else if (pt.spaceBytes != null && pt.spaceBytes > 0) { auxBytes = pt.spaceBytes; auxSource = "heap"; }
+        else { auxBytes = theoreticalSpaceBytes(id, largestN); auxSource = "theoretical"; }
+      }
+      return {
+        id,
+        name: ALGO_NAMES[id] ?? id,
+        bestAtMaxN: pt?.timeMs ?? Infinity,
+        meanAtMaxN: pt?.meanMs ?? null,
+        stdDevAtMaxN: pt?.stdDev ?? null,
+        fitExp: fit?.exp ?? null,
+        fitK: fit?.k ?? null,
+        timedOut: !!pt?.timedOut,
+        failed: !!sampleProofs[id]?.failed,
+        auxBytes,
+        auxSource,
+      };
+    }).sort((a, b) => a.bestAtMaxN - b.bestAtMaxN);
+
+    const winner = rows[0];
+    lines.push("SUMMARY");
+    lines.push("-".repeat(72));
+    if (rows.length > 0 && winner) {
+      lines.push(`  🏆 Winner @ n=${largestN.toLocaleString()}: ${winner.name} (${fmtTime(winner.bestAtMaxN)})`);
+      const failures = rows.filter(r => r.failed);
+      if (failures.length > 0) {
+        lines.push(`  ✗ Failed sortedness check: ${failures.map(f => f.name).join(", ")}`);
+      }
+      const timeouts = rows.filter(r => r.timedOut);
+      if (timeouts.length > 0) {
+        lines.push(`  ⌛ Timed out: ${timeouts.map(t => t.name).join(", ")}`);
+      }
+      lines.push("");
+
+      // Cross-algorithm ranking table — fixed-width columns aligned for plain-text viewing.
+      const NAME_W = Math.max(20, Math.max(...rows.map(r => r.name.length)) + 2);
+      lines.push(`  ${pad("Rank Algorithm", NAME_W + 5)} ${padR("Time", 12)} ${padR("× winner", 10)} ${padR("Mean ± stdev", 22)} ${padR("Fit", 10)} ${padR("Aux mem", 14)}`);
+      lines.push(`  ${"-".repeat(NAME_W + 5 + 12 + 10 + 22 + 10 + 14 + 5)}`);
+      rows.forEach((r, i) => {
+        const ratio = i === 0 ? "0×" : `${(r.bestAtMaxN / winner.bestAtMaxN).toFixed(2)}×`;
+        const flag = r.failed ? " ✗" : r.timedOut ? " ⌛" : "";
+        const meanStr = r.meanAtMaxN != null
+          ? `μ ${fmtTime(r.meanAtMaxN)}${r.stdDevAtMaxN != null ? ` ±${fmtTime(r.stdDevAtMaxN)}` : ""}`
+          : "—";
+        const fitStr = r.fitExp != null ? `n^${r.fitExp.toFixed(2)}` : "—";
+        const auxStr = r.auxBytes != null
+          ? `${fmtBytes(r.auxBytes)}${r.auxSource === "instrumented" ? " i" : r.auxSource === "heap" ? " h" : " t"}`
+          : "—";
+        lines.push(`  ${padR(String(i + 1), 4)} ${pad(r.name + flag, NAME_W)} ${padR(fmtTime(r.bestAtMaxN), 12)} ${padR(ratio, 10)} ${padR(meanStr, 22)} ${padR(fitStr, 10)} ${padR(auxStr, 14)}`);
+      });
+      lines.push("");
+      lines.push(`  Aux source legend: i = instrumented (deterministic byte count from patched Array methods)`);
+      lines.push(`                     h = heap delta (performance.memory snapshot, ~1MB resolution)`);
+      lines.push(`                     t = theoretical (derived from the algorithm's space-complexity class)`);
+      lines.push("");
+
+      // Head-to-head: how much faster is the winner vs everyone else?
+      if (rows.length >= 2) {
+        lines.push(`  Speedup vs ${winner.name}:`);
+        rows.slice(1).forEach(r => {
+          const x = r.bestAtMaxN / winner.bestAtMaxN;
+          lines.push(`    ${pad(r.name, NAME_W)} ${padR(`${x.toFixed(2)}× slower`, 16)}  (${fmtTime(r.bestAtMaxN - winner.bestAtMaxN)} extra)`);
+        });
+        lines.push("");
+      }
+    } else {
+      lines.push(`  (no algorithms produced timing data)`);
+      lines.push("");
+    }
+
+    // ── Per-algorithm sections (in winner-first order) ───────────────────
+    lines.push("PER-ALGORITHM DETAIL");
+    lines.push("-".repeat(72));
+    lines.push("");
+    rows.forEach((r, i) => {
+      const pts = (curveDataExt[r.id] ?? []).slice().sort((a, b) => a.n - b.n);
+      lines.push(`#${i + 1} — ${r.name}${r.failed ? "  ✗ BROKEN" : r.timedOut ? "  ⌛ TIMED OUT" : ""}`);
+      lines.push(`  id              : ${r.id}`);
+      lines.push(`  time class      : ${ALGO_TIME[r.id] ?? "—"}`);
+      lines.push(`  space class     : aux ${ALGO_SPACE[r.id] ?? "—"} · total ${totalSpaceLabel(r.id)}`);
+      lines.push(`  stable          : ${ALGO_STABLE[r.id] === true ? "stable" : ALGO_STABLE[r.id] === false ? "unstable" : "—"}`);
+      lines.push(`  online          : ${ALGO_ONLINE[r.id] === true ? "yes" : ALGO_ONLINE[r.id] === false ? "no" : "—"}`);
+      if (r.fitExp != null && r.fitK != null) {
+        lines.push(`  empirical fit   : T(n) ≈ ${r.fitK.toExponential(3)} · n^${r.fitExp.toFixed(3)} ms`);
+      }
+      if (sampleProofs[r.id]) {
+        const sp = sampleProofs[r.id];
+        if (sp.minVal !== undefined && sp.maxVal !== undefined) {
+          lines.push(`  input range     : ${fmtRangeVal(sp.minVal)} … ${fmtRangeVal(sp.maxVal)}`);
+        }
+        if (sp.distinctCount !== undefined) {
+          lines.push(`  distinct values : ${sp.distinctCount.toLocaleString()}${sp.distinctCount < sp.n ? ` / ${sp.n.toLocaleString()}` : ""}`);
+        }
+        if (sp.totalInputBytes !== undefined) {
+          lines.push(`  input bytes     : ${fmtBytes(sp.totalInputBytes)} (~${sp.bytesPerElement} B/elem)`);
+        }
+        lines.push(`  sortedness check: ${sp.failed ? `✗ out-of-order at sample index ${sp.badIdx}` : "✓ verified"}`);
+      }
+
+      lines.push("");
+      lines.push(`    ${padR("n", 12)} ${padR("Best", 12)} ${padR("Mean", 12)} ${padR("Stdev", 12)} ${padR("Aux bytes", 14)} ${padR("Status", 12)}`);
+      lines.push(`    ${"-".repeat(12 + 12 + 12 + 12 + 14 + 12 + 5)}`);
+      pts.forEach(p => {
+        const status = p.timedOut ? "timeout" : "ok";
+        const aux = p.allocBytes != null && p.allocBytes > 0 ? `${fmtBytes(p.allocBytes)} i`
+                  : p.spaceBytes != null && p.spaceBytes > 0 ? `${fmtBytes(p.spaceBytes)} h`
+                  : "—";
+        lines.push(`    ${padR(p.n.toLocaleString(), 12)} ${padR(p.timedOut ? ">" + (timeoutSec ?? 10) + "s" : fmtTime(p.timeMs), 12)} ${padR(p.meanMs != null ? fmtTime(p.meanMs) : "—", 12)} ${padR(p.stdDev != null ? fmtTime(p.stdDev) : "—", 12)} ${padR(aux, 14)} ${padR(status, 12)}`);
+      });
+
+      // Live memory peak delta during this algo's window, if recorded.
+      const algoMemSamples = memSamples.filter(s => s.algoId === r.id);
+      if (algoMemSamples.length > 0) {
+        const startHeap = algoMemSamples[0].used;
+        const peakHeap = Math.max(...algoMemSamples.map(s => s.used));
+        lines.push("");
+        lines.push(`    live heap peak Δ : +${fmtBytes(peakHeap - startHeap)} across ${algoMemSamples.length.toLocaleString()} samples`);
+      }
+      lines.push("");
+    });
+
+    lines.push("=".repeat(72));
+    lines.push(`  end of report · ${rows.length} algorithms × ${sizes.length} sizes`);
+    lines.push("=".repeat(72));
+
+    const text = lines.join("\n");
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    a.href = url;
+    a.download = `benchmark-report-${stamp}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Helper for range stats: handles both numeric and string min/max from proof
+  function fmtRangeVal(v: number | string): string {
+    if (typeof v === "string") return v.length > 12 ? `"${v.slice(0, 11)}…"` : `"${v}"`;
+    if (Number.isInteger(v)) return v.toString();
+    return v.toFixed(3);
+  }
+
   const exportMarkdown = () => {
     const algos = Object.keys(curveDataExt);
     const sizes = [...selectedSizes].sort((a, b) => a - b);
@@ -5311,8 +6619,11 @@ export default function BenchmarkVisualizer() {
     });
   };
 
-  const canRun = activeAlgos.length > 0 && selectedSizes.size > 0 && scenarios.size > 0 && status !== "running";
-  const canRunCustomOnly = customSortEnabled && !!customSortCode.trim() && !customSortError && selectedSizes.size > 0 && scenarios.size > 0 && status !== "running";
+  // The list of enabled saved sorts — those that will actually run.
+  // The editor's draft no longer runs directly; it must be Saved first.
+  const enabledSavedSorts = savedSorts.filter(s => s.enabled);
+  const canRun = (activeAlgos.length > 0 || enabledSavedSorts.length > 0) && selectedSizes.size > 0 && scenarios.size > 0 && status !== "running";
+  const canRunCustomOnly = enabledSavedSorts.length > 0 && selectedSizes.size > 0 && scenarios.size > 0 && status !== "running";
 
   const getLogosCustomParams = (id: string): LogosParams | null => {
     const m = id.match(/^logos-custom-(\d+)$/);
@@ -5323,8 +6634,17 @@ export default function BenchmarkVisualizer() {
   const run = useCallback(async (algoOverride?: string[]) => {
     const maxSz = selectedSizes.size > 0 ? Math.max(...selectedSizes) : 0;
     // Mirror slowDisabled exactly so the run list matches the checked-off checkboxes.
-    const algos = algoOverride ?? [...selected, ...(customSortEnabled && customSortCode.trim() ? ["custom"] : [])].filter(id =>
-      id === "custom" || (
+    // Custom sorts are ONLY run if they've been saved to the library and the
+    // user enabled them. Unsaved editor draft code is never executed by the
+    // benchmark — saving is the explicit "commit" step that makes a sort
+    // eligible. This protects against half-edited code accidentally running
+    // and produces a stable record (with name + id) for the chart.
+    const enabledCustomIds = savedSorts.filter(s => s.enabled).map(s => `custom-${s.id}`);
+    const algos = algoOverride ?? [
+      ...selected,
+      ...enabledCustomIds,
+    ].filter(id =>
+      id.startsWith("custom-") || (
         !(SLOW_IDS.has(id) && maxSz > SLOW_THRESHOLD) &&
         !(MEDIUM_LIMITS[id] !== undefined && maxSz > MEDIUM_LIMITS[id].threshold) &&
         !(!UNLIMITED_IDS.has(id) && maxSz > LARGE_THRESHOLD)
@@ -5353,6 +6673,8 @@ export default function BenchmarkVisualizer() {
     // Reset the visibility-warning flag for the new run, then seed it correctly
     // if the tab is already hidden when Run is clicked (e.g., from a script).
     setTabHiddenDuringRun(typeof document !== "undefined" && document.visibilityState === "hidden");
+    // Reset the live memory timeline for the new run.
+    setMemSamples([]);
     setCurveData({});
     setSampleProofs({});
     setActiveProofAlgo(null);
@@ -5385,7 +6707,9 @@ export default function BenchmarkVisualizer() {
     const prerunArr = generateBenchmarkInput(PRERUN_N, "random");
     const prerunStepsAcc: Record<string, SortStep[]> = {};
     for (const id of algos) {
+      const savedCustomPre = id.startsWith("custom-") ? savedSorts.find(s => `custom-${s.id}` === id) : null;
       const fn = id === "custom"                       ? buildCustomFn(customSortCode, setCustomSortError) :
+                 savedCustomPre                        ? buildCustomFn(savedCustomPre.code) :
                  id === "quick"                        ? makeQuickSort(quickPivot) :
                  id === "shell"                        ? makeShellSort(shellGaps) :
                  getLogosCustomParams(id) !== null     ? makeLogosSort(getLogosCustomParams(id)!) :
@@ -5431,9 +6755,15 @@ export default function BenchmarkVisualizer() {
       setCurrentN(sz);
 
       // Generate inputs once per size so every algorithm sorts the exact same data each round
+      const intFlagsOn = dataType === "integer" && (intUniqueOnly || intFullInt32);
       const customDist: CustomDistribution | undefined =
-        customPreSorted > 0 || customDuplicates > 0
-          ? { preSortedPct: customPreSorted, duplicatePct: customDuplicates }
+        (customPreSorted > 0 || customDuplicates > 0 || intFlagsOn)
+          ? {
+              preSortedPct: customPreSorted,
+              duplicatePct: customDuplicates,
+              ...(intUniqueOnly && dataType === "integer" ? { uniqueOnly: true } : {}),
+              ...(intFullInt32  && dataType === "integer" ? { fullInt32: true } : {}),
+            }
           : undefined;
       // Build weighted pool: "sorted" appears once, all others three times — so it's rare in the mix.
       const weightedScenarios = scenarioList.flatMap(sc => sc === "sorted" ? [sc] : [sc, sc, sc]);
@@ -5460,7 +6790,10 @@ export default function BenchmarkVisualizer() {
         // closures per run. For everything else we rebuild SORT_FNS[id] via
         // freshSortFn so a prior data-type run can't leave it megamorphically
         // deoptimized — see the freshSortFn comment for the full rationale.
+        // Resolve a saved-sort custom function by its id, if any.
+        const savedCustom = id.startsWith("custom-") ? savedSorts.find(s => `custom-${s.id}` === id) : null;
         const fn: ((arr: unknown[]) => unknown[]) | null = id === "custom" ? buildCustomFn(customSortCode, setCustomSortError) :
+                   savedCustom                          ? buildCustomFn(savedCustom.code, () => { /* per-saved errors swallowed; reflected via failed proof */ }) :
                    id === "quick"                       ? makeQuickSort(quickPivot) as never :
                    id === "shell"                       ? makeShellSort(shellGaps) as never :
                    getLogosCustomParams(id) !== null    ? makeLogosSort(getLogosCustomParams(id)!) as never :
@@ -5524,7 +6857,10 @@ export default function BenchmarkVisualizer() {
               shellGaps: id === "shell" ? shellGaps : undefined,
               logosParams: logosP,
               adversarialInput: adversarialEnabled ? makeAdversarialInput(id, sz, quickPivot) : undefined,
-              customFnStr: id === "custom" ? customSortCode : undefined,
+              // For both the editor's "custom" slot and any saved sort
+              // (id === "custom-XYZ"), ship the function source string so the
+              // worker can compile and run it in its own isolate.
+              customFnStr: id === "custom" ? customSortCode : (savedCustom ? savedCustom.code : undefined),
               // 0 means "uncapped" — the worker treats >0 as the timeout in ms.
               timeoutMs: timeoutEnabled ? timeoutSec * 1000 : 0,
             });
@@ -5728,7 +7064,23 @@ export default function BenchmarkVisualizer() {
 
     setStatus("done");
 
-  }, [selected, selectedSizes, scenarios, rounds, warmup, customPreSorted, customDuplicates, quickPivot, shellGaps, customLogosVariants, adversarialEnabled, useWorkerIsolation, customSortEnabled, customSortCode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [
+    selected, selectedSizes, scenarios, rounds, warmup,
+    customPreSorted, customDuplicates, quickPivot, shellGaps, customLogosVariants,
+    adversarialEnabled, useWorkerIsolation,
+    customSortEnabled, customSortCode,
+    // The run closure also reads these — without them, switching dataType or
+    // toggling the timeout would silently use the stale value captured the
+    // last time `run` was memoised. (Symptom we just diagnosed: dataType="float"
+    // selected in UI but proof shows integers because the run still used the
+    // previous "integer" dataType from the cached closure.)
+    dataType,
+    timeoutEnabled, timeoutSec,
+    savedSorts,
+    // Integer-only generator flags — without these in the dep list, toggling
+    // them won't take effect until something else triggers a re-memo.
+    intUniqueOnly, intFullInt32,
+  ]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const stop = () => {
     stopRef.current = true;
@@ -6306,7 +7658,7 @@ export default function BenchmarkVisualizer() {
                   {customSortOpen && (
                     <div className="mt-2 flex flex-col gap-2">
                       {/* Note: how to actually wire the custom sort into the run */}
-                      {!customSortEnabled && customSortCode.trim() && (
+                      {customSortCode.trim() && (
                         <div style={{
                           fontSize: 10, fontFamily: "monospace", lineHeight: 1.5,
                           padding: "6px 9px", borderRadius: 5,
@@ -6314,11 +7666,12 @@ export default function BenchmarkVisualizer() {
                           border: "1px solid rgba(255,183,77,0.35)",
                           color: "var(--color-muted)",
                         }}>
-                          <span style={{ color: "#ffb74d", fontWeight: 700 }}>Tip · </span>
-                          You have custom code loaded, but it won&apos;t run until you tick{" "}
-                          <strong style={{ color: "var(--color-text)" }}>Enable custom sort</strong>{" "}
-                          below. Once enabled, it joins the next benchmark run as the{" "}
-                          <code style={{ color: "var(--color-accent)" }}>custom</code> algorithm.
+                          <span style={{ color: "#ffb74d", fontWeight: 700 }}>Save to run · </span>
+                          Editor drafts are not executed. Click{" "}
+                          <strong style={{ color: "var(--color-text)" }}>Save</strong>{" "}
+                          below to add this sort to the saved-sorts list — it&apos;ll auto-enable
+                          for the next benchmark run with its own color. Rename it in the list
+                          anytime; charts and rankings update live.
                         </div>
                       )}
                       {!customSortCode.trim() && (
@@ -6451,12 +7804,17 @@ export default function BenchmarkVisualizer() {
                             type="button"
                             disabled={!customSortCode.trim()}
                             onClick={() => {
+                              // Default new saves to enabled=true so the user's expected
+                              // mental model holds: "I saved it → it'll run on next click".
+                              // They can untick the saved-row checkbox to exclude later.
                               const entry = {
                                 id: crypto.randomUUID(),
                                 name: customSortName.trim() || `Custom ${new Date().toLocaleTimeString()}`,
                                 code: customSortCode,
                                 notes: customSortNotes,
                                 savedAt: new Date().toISOString(),
+                                color: defaultCustomColor(savedSorts.length),
+                                enabled: true,
                               };
                               const next = [...savedSorts, entry];
                               setSavedSorts(next);
@@ -6484,41 +7842,116 @@ export default function BenchmarkVisualizer() {
                         />
                       </div>
 
-                      {/* Saved sorts list */}
-                      {savedSorts.length > 0 && (
-                        <div className="flex flex-col gap-1" style={{ borderTop: "1px solid var(--color-border)", paddingTop: 8 }}>
-                          <p className="text-[10px]" style={{ color: "var(--color-muted)" }}>Saved sorts</p>
-                          {savedSorts.map(s => (
-                            <div key={s.id} style={{ display: "flex", alignItems: "flex-start", gap: 6, padding: "5px 7px", borderRadius: 6, background: "var(--color-surface-1)", border: "1px solid var(--color-border)" }}>
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <button
-                                  type="button"
-                                  onClick={() => { setCustomSortCode(s.code); setCustomSortName(s.name); setCustomSortNotes(s.notes); setCustomSortError(null); }}
-                                  style={{ background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left", width: "100%" }}
-                                >
-                                  <span style={{ fontSize: 10, fontFamily: "monospace", color: "var(--color-accent)", fontWeight: 600 }}>{s.name}</span>
-                                  <span style={{ fontSize: 9, color: "var(--color-muted)", marginLeft: 6 }}>{new Date(s.savedAt).toLocaleDateString()}</span>
-                                </button>
-                                {s.notes && (
-                                  <p style={{ fontSize: 9, color: "var(--color-muted)", marginTop: 2, fontFamily: "monospace", whiteSpace: "pre-wrap" }}>{s.notes}</p>
+                      {/* Saved sorts list — each row has an enable toggle, color
+                          swatch (click to cycle), name → loads into editor on click,
+                          and a delete button. Multiple enabled sorts all run together. */}
+                      {savedSorts.length > 0 && (() => {
+                        const updateSaved = (next: typeof savedSorts) => {
+                          setSavedSorts(next);
+                          try { localStorage.setItem("codecookbook.savedSorts", JSON.stringify(next)); } catch { /* quota */ }
+                        };
+                        const enabledCount = savedSorts.filter(s => s.enabled).length;
+                        return (
+                          <div className="flex flex-col gap-1" style={{ borderTop: "1px solid var(--color-border)", paddingTop: 8 }}>
+                            <div className="flex items-center gap-2 mb-1">
+                              <p className="text-[10px]" style={{ color: "var(--color-muted)", flex: 1 }}>
+                                Saved sorts
+                                {enabledCount > 0 && (
+                                  <span style={{ marginLeft: 6, color: "var(--color-accent)", fontWeight: 600 }}>
+                                    · {enabledCount} enabled
+                                  </span>
                                 )}
-                              </div>
+                              </p>
                               <button
                                 type="button"
-                                title="Delete"
-                                onClick={() => {
-                                  const next = savedSorts.filter(x => x.id !== s.id);
-                                  setSavedSorts(next);
-                                  try { localStorage.setItem("codecookbook.savedSorts", JSON.stringify(next)); } catch { /* quota */ }
+                                onClick={() => updateSaved(savedSorts.map(s => ({ ...s, enabled: enabledCount < savedSorts.length })))}
+                                style={{
+                                  fontSize: 9, fontFamily: "monospace", padding: "1px 6px", borderRadius: 3,
+                                  background: "var(--color-surface-3)", border: "1px solid var(--color-border)",
+                                  color: "var(--color-muted)", cursor: "pointer",
                                 }}
-                                style={{ fontSize: 9, color: "var(--color-muted)", background: "none", border: "none", cursor: "pointer", flexShrink: 0, padding: "0 2px" }}
                               >
-                                ✕
+                                {enabledCount < savedSorts.length ? "enable all" : "disable all"}
                               </button>
                             </div>
-                          ))}
-                        </div>
-                      )}
+                            {savedSorts.map((s, idx) => {
+                              const swatchColor = s.color || defaultCustomColor(idx);
+                              return (
+                                <div key={s.id} style={{
+                                  display: "flex", alignItems: "flex-start", gap: 6,
+                                  padding: "5px 7px", borderRadius: 6,
+                                  background: s.enabled ? `${swatchColor}1f` /* ~12% */ : "var(--color-surface-1)",
+                                  border: `1px solid ${s.enabled ? swatchColor : "var(--color-border)"}`,
+                                  transition: "background 0.15s, border-color 0.15s",
+                                }}>
+                                  {/* Enable checkbox */}
+                                  <input
+                                    type="checkbox"
+                                    checked={!!s.enabled}
+                                    onChange={e => updateSaved(savedSorts.map(x => x.id === s.id ? { ...x, enabled: e.target.checked } : x))}
+                                    title={s.enabled ? "Disable: skip this sort in the next benchmark run" : "Enable: include this sort in the next benchmark run"}
+                                    style={{ marginTop: 2, accentColor: swatchColor, flexShrink: 0, cursor: "pointer" }}
+                                  />
+                                  {/* Color picker — color swatch button that opens a palette popover */}
+                                  <ColorPicker
+                                    value={swatchColor}
+                                    onChange={c => updateSaved(savedSorts.map(x => x.id === s.id ? { ...x, color: c } : x))}
+                                  />
+                                  <div style={{ flex: 1, minWidth: 0 }}>
+                                    {/* Inline-editable name. Typing updates the saved sort
+                                        in place; the synchronous ALGO_NAMES sync above
+                                        means rankings/cards/charts pick up the new name on
+                                        the next render. */}
+                                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                      <input
+                                        type="text"
+                                        value={s.name}
+                                        onChange={e => updateSaved(savedSorts.map(x => x.id === s.id ? { ...x, name: e.target.value } : x))}
+                                        title="Edit name — changes appear in charts and rankings immediately"
+                                        style={{
+                                          flex: 1, minWidth: 0,
+                                          fontSize: 10, fontFamily: "monospace", fontWeight: 600,
+                                          color: swatchColor,
+                                          background: "transparent",
+                                          border: "1px dashed transparent",
+                                          padding: "1px 3px", borderRadius: 3,
+                                          outline: "none",
+                                        }}
+                                        onFocus={e => { e.currentTarget.style.borderColor = "var(--color-border)"; e.currentTarget.style.background = "var(--color-surface-1)"; }}
+                                        onBlur={e => { e.currentTarget.style.borderColor = "transparent"; e.currentTarget.style.background = "transparent"; }}
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() => { setCustomSortCode(s.code); setCustomSortName(s.name); setCustomSortNotes(s.notes); setCustomSortError(null); }}
+                                        title="Load this sort into the editor for inspection / editing"
+                                        style={{
+                                          fontSize: 8, fontFamily: "monospace", padding: "1px 5px", borderRadius: 3,
+                                          background: "var(--color-surface-3)", border: "1px solid var(--color-border)",
+                                          color: "var(--color-muted)", cursor: "pointer", flexShrink: 0,
+                                        }}
+                                      >
+                                        load
+                                      </button>
+                                      <span style={{ fontSize: 9, color: "var(--color-muted)", flexShrink: 0 }}>{new Date(s.savedAt).toLocaleDateString()}</span>
+                                    </div>
+                                    {s.notes && (
+                                      <p style={{ fontSize: 9, color: "var(--color-muted)", marginTop: 2, fontFamily: "monospace", whiteSpace: "pre-wrap" }}>{s.notes}</p>
+                                    )}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    title="Delete"
+                                    onClick={() => updateSaved(savedSorts.filter(x => x.id !== s.id))}
+                                    style={{ fontSize: 9, color: "var(--color-muted)", background: "none", border: "none", cursor: "pointer", flexShrink: 0, padding: "0 2px" }}
+                                  >
+                                    ✕
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );
+                      })()}
                     </div>
                   )}
                 </div>
@@ -6734,11 +8167,17 @@ export default function BenchmarkVisualizer() {
                         {([
                           { label: "% pre-sorted prefix", value: customPreSorted, set: setCustomPreSorted },
                           { label: "% duplicate injection", value: customDuplicates, set: setCustomDuplicates },
-                        ] as const).map(({ label, value, set }) => (
-                          <div key={label} className="flex items-center gap-3">
+                        ] as const).map(({ label, value, set }) => {
+                          // Duplicate-injection is mutually exclusive with the
+                          // "unique values" integer flag; grey it out so the
+                          // conflict is visible.
+                          const disabled = label.startsWith("% duplicate") && intUniqueOnly && dataType === "integer";
+                          return (
+                          <div key={label} className="flex items-center gap-3" style={{ opacity: disabled ? 0.4 : 1 }}>
                             <span className="text-xs font-mono shrink-0" style={{ color: "var(--color-muted)", width: 150 }}>{label}</span>
                             <input
                               type="range" min={0} max={100} step={5} value={value}
+                              disabled={disabled}
                               onChange={e => set(Number(e.target.value))}
                               style={{ flex: 1, accentColor: "var(--color-accent)" }}
                             />
@@ -6746,9 +8185,57 @@ export default function BenchmarkVisualizer() {
                               {value}%
                             </span>
                           </div>
-                        ))}
+                        );})}
                       </div>
                     </div>
+
+                    {/* Integer-only options — only visible when dataType === "integer".
+                        Float and string have their own generators that don't need these. */}
+                    {dataType === "integer" && (
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-wider mb-1.5" style={{ color: "var(--color-muted)" }}>
+                          Integer options
+                        </p>
+                        <div className="flex flex-col gap-2">
+                          <label className="flex items-start gap-2" style={{ cursor: "pointer" }}>
+                            <input
+                              type="checkbox"
+                              checked={intUniqueOnly}
+                              onChange={e => setIntUniqueOnly(e.target.checked)}
+                              style={{ marginTop: 2, accentColor: "var(--color-accent)" }}
+                            />
+                            <div>
+                              <span className="text-xs font-semibold" style={{ color: "var(--color-text)" }}>
+                                Unique values only
+                              </span>
+                              <p className="text-xs mt-0.5" style={{ color: "var(--color-muted)" }}>
+                                Guarantees no duplicates across the input — generated via Fisher–Yates shuffle of the value range
+                                (or rejection sampling when the range is wide). Mutually exclusive with the duplicate-injection
+                                slider above; that slider greys out while this is on.
+                              </p>
+                            </div>
+                          </label>
+                          <label className="flex items-start gap-2" style={{ cursor: "pointer" }}>
+                            <input
+                              type="checkbox"
+                              checked={intFullInt32}
+                              onChange={e => setIntFullInt32(e.target.checked)}
+                              style={{ marginTop: 2, accentColor: "var(--color-accent)" }}
+                            />
+                            <div>
+                              <span className="text-xs font-semibold" style={{ color: "var(--color-text)" }}>
+                                Full 32-bit range
+                              </span>
+                              <p className="text-xs mt-0.5" style={{ color: "var(--color-muted)" }}>
+                                Sample from <code>[-2,147,483,648, 2,147,483,647]</code> instead of the default <code>[0, 10000)</code>.
+                                <span style={{ color: "#ffb74d" }}> Disables counting-sort&apos;s O(n+k) advantage</span> — its
+                                bucket array would be 4 GB, so it falls back to comparison performance like everyone else.
+                              </p>
+                            </div>
+                          </label>
+                        </div>
+                      </div>
+                    )}
 
                     {/* Adversarial input toggle */}
                     <div>
@@ -6926,7 +8413,7 @@ export default function BenchmarkVisualizer() {
                 ) : (
                   <>
                     <span>
-                      {[...activeAlgos, ...(customSortEnabled && customSortCode.trim() && !customSortError ? ["custom"] : [])]
+                      {[...activeAlgos, ...enabledSavedSorts.map(s => `custom-${s.id}`)]
                         .map(id => ALGO_NAMES[id] ?? id)
                         .join(", ") || <span style={{ color: "#ef5350" }}>no algorithms selected</span>}
                     </span>
@@ -6977,7 +8464,7 @@ export default function BenchmarkVisualizer() {
             {/* Skeleton previews — show what will appear once the benchmark runs.
                 Visible only when we haven't run yet AND aren't currently running. */}
             {!hasCurveData && status !== "running" && (
-              <ResultsSkeleton algoCount={Math.max(1, [...activeAlgos].length + (customSortEnabled && customSortCode.trim() ? 1 : 0))} />
+              <ResultsSkeleton algoCount={Math.max(1, [...activeAlgos].length + enabledSavedSorts.length)} />
             )}
             {(hasCurveData || status === "running") && (
               <div
@@ -7093,6 +8580,15 @@ export default function BenchmarkVisualizer() {
                         style={btn("secondary", { padding: "2px 8px", fontSize: 9 })}
                       >
                         ↓ CSV
+                      </button>
+                    )}
+                    {status === "done" && hasCurveData && (
+                      <button
+                        onClick={exportReportText}
+                        title="Download a plain-text report: top-of-document cross-algorithm summary + comparisons, followed by per-algorithm detail sections in finishing order"
+                        style={btn("secondary", { padding: "2px 8px", fontSize: 9 })}
+                      >
+                        ↓ Report
                       </button>
                     )}
                     {status === "done" && hasCurveData && (
@@ -7362,6 +8858,20 @@ export default function BenchmarkVisualizer() {
                     style={{ height: 230, color: "var(--color-muted)", fontSize: 11 }}>
                     Waiting for first result…
                   </div>
+                )}
+
+                {/* Live memory timeline — mirrors the performance curve's
+                    styling, plotting V8 heap usage over the run with per-algo
+                    colored segments. Visible while running and after, so the
+                    user can compare timings against memory pressure. */}
+                {(status === "running" || memSamples.length > 0) && (
+                  <LiveMemoryChart
+                    samples={memSamples}
+                    currentAlgo={currentAlgo}
+                    currentN={currentN}
+                    isRunning={status === "running"}
+                    curveData={curveDataExt}
+                  />
                 )}
 
                 {/* Proof slider */}
@@ -7774,7 +9284,11 @@ export default function BenchmarkVisualizer() {
                               <span style={{ display: "block", fontSize: 7, color: "var(--color-muted)", marginTop: 1 }}>μ {fmtTime(row.meanMs)}{row.stdDev != null ? ` ±${fmtTime(row.stdDev)}` : ""}</span>
                             )}
                           </div>
-                          <div style={cell("var(--color-muted)", 1)}>{row.rank === 1 ? "—" : `${(row.timeMs / summaryFastest).toFixed(1)}×`}</div>
+                          {/* "× slower than 1st place" multiplier. The winner gets
+                              "0×" (zero times slower than itself) so the column's
+                              text width is consistent across all rows — previous
+                              "—" was one character and broke visual alignment. */}
+                          <div style={cell("var(--color-muted)", 1)}>{row.rank === 1 ? "0×" : `${(row.timeMs / summaryFastest).toFixed(1)}×`}</div>
                           <div style={{ ...cell("var(--color-text)", 1), opacity: 0.75, cursor: "default" }} title={ALGO_TIME[row.id]} onMouseEnter={() => setHoverBigO({ id: row.id, type: "time" })} onMouseLeave={() => setHoverBigO(null)}>
                             {isHoverT && tPct !== null ? fmtPct(tPct) : tBigOLabel}
                           </div>

@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
-import { BarChart2, Play, Pause, SkipForward, RotateCcw } from "lucide-react";
+import { BarChart2, Dices, ListOrdered } from "lucide-react";
+import { StepTreeLayout, StepNav, SidebarSection, StepMessage, TraverseControls, TRAVERSAL_LABELS, type TraversalKind } from "./StepTreeLayout";
 
 // ── Segment Tree data structure ───────────────────────────────────────────────
 
@@ -139,6 +140,50 @@ function buildUpdateSteps(root: STNode | null, idx: number, val: number): STStep
   findPath(root);
   const newRoot = updateST(root, idx, val);
   steps.push({ root: newRoot, highlighted: [], updated: [], description: `Update complete. New sum at root: ${newRoot?.value}` });
+  return steps;
+}
+
+// ── Traversal steps ───────────────────────────────────────────────────────────
+
+function buildTraversalSteps(root: STNode | null, kind: TraversalKind): STStep[] {
+  const label = TRAVERSAL_LABELS[kind];
+  if (!root) return [{ root: null, highlighted: [], updated: [], description: `${label}: build the tree first.` }];
+
+  const order: STNode[] = [];
+  if (kind === "bfs") {
+    const q: STNode[] = [root];
+    while (q.length) {
+      const n = q.shift()!;
+      order.push(n);
+      if (n.left) q.push(n.left);
+      if (n.right) q.push(n.right);
+    }
+  } else {
+    const visit = (n: STNode | null) => {
+      if (!n) return;
+      if (kind === "pre") order.push(n);
+      visit(n.left);
+      if (kind === "in") order.push(n);
+      visit(n.right);
+      if (kind === "post") order.push(n);
+    };
+    visit(root);
+  }
+
+  const how =
+    kind === "bfs" ? "dequeue a node, visit it, enqueue its children — level by level"
+    : kind === "pre" ? "visit the node, then recurse left, then right"
+    : kind === "in" ? "recurse left, visit the node, then recurse right (leaves come out in array order)"
+    : "recurse left, then right, then visit the node — the order the tree is built in";
+
+  const nodeText = (n: STNode) => `[${n.range[0]},${n.range[1]}]=${n.value}`;
+  const steps: STStep[] = [{ root, highlighted: [], updated: [], description: `${label} — ${how}.` }];
+  const visited: string[] = [];
+  order.forEach((n, i) => {
+    visited.push(n.id);
+    steps.push({ root, highlighted: [...visited], updated: [], description: `${label}: visit ${nodeText(n)} (${i + 1}/${order.length})` });
+  });
+  steps.push({ root, highlighted: order.map((n) => n.id), updated: [], description: `${label} complete — visited ${order.length} nodes.` });
   return steps;
 }
 
@@ -330,16 +375,17 @@ const DEFAULT_ARRAY = [4, 2, 7, 1, 5, 3, 8, 6];
 
 export default function SegmentTreeVisualizer() {
   const [arr, setArr] = useState<number[]>(DEFAULT_ARRAY);
-  const [root, setRoot] = useState<STNode | null>(null);
+  const [root, setRoot] = useState<STNode | null>(() => buildST(DEFAULT_ARRAY, 0, DEFAULT_ARRAY.length - 1));
   const [steps, setSteps] = useState<STStep[]>([]);
   const [stepIdx, setStepIdx] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(700);
-  const [message, setMessage] = useState("Edit the array values, then click Build.");
+  const [message, setMessage] = useState("Preset tree built. Run a range query, point update, traversal, or Random Lesson — or edit the array and re-Build.");
   const [queryL, setQueryL] = useState("0");
   const [queryR, setQueryR] = useState("3");
   const [updateIdx, setUpdateIdx] = useState("0");
   const [updateVal, setUpdateVal] = useState("10");
+  const [customList, setCustomList] = useState("");
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const currentStep = steps[stepIdx] ?? null;
@@ -387,6 +433,66 @@ export default function SegmentTreeVisualizer() {
     startAnimation(buildQuerySteps(root, l, r));
   }, [root, queryL, queryR, arr.length, startAnimation]);
 
+  const handleTraverse = useCallback((kind: TraversalKind) => {
+    if (!root) { setMessage("Build the tree first!"); return; }
+    startAnimation(buildTraversalSteps(root, kind));
+  }, [root, startAnimation]);
+
+  // Replace the array with a user-supplied list (values clamped to 1–99) and
+  // play the build as a step-through demo.
+  const handleCustomDemo = useCallback(() => {
+    const parsed = customList
+      .split(/[^0-9]+/)
+      .map((s) => parseInt(s, 10))
+      .filter((n) => !Number.isNaN(n))
+      .map((n) => Math.max(1, Math.min(99, n)))
+      .slice(0, 16);
+    if (parsed.length === 0) { setMessage("Enter a comma-separated list of numbers (1–99), e.g. 4, 2, 7, 1, 5, 3"); return; }
+    setArr(parsed);
+    const newRoot = buildST(parsed, 0, parsed.length - 1);
+    setRoot(newRoot);
+    const lessonSteps: STStep[] = [{
+      root: newRoot, highlighted: [], updated: [],
+      description: `Custom demo — build a segment tree over [${parsed.join(", ")}] (total sum = ${parsed.reduce((a, b) => a + b, 0)}).`,
+    }];
+    lessonSteps.push(...buildBuildSteps(parsed));
+    startAnimation(lessonSteps);
+  }, [customList, startAnimation]);
+
+  // Random guided lesson — fresh array, then a random range query and a random
+  // point update, stitched into one walkthrough led by an instruction.
+  const handleRandomLesson = useCallback(() => {
+    const size = 8;
+    const newArr = Array.from({ length: size }, () => 1 + Math.floor(Math.random() * 99));
+    const l = Math.floor(Math.random() * size);
+    const r = l + Math.floor(Math.random() * (size - l));
+    const idx = Math.floor(Math.random() * size);
+    const newVal = 1 + Math.floor(Math.random() * 99);
+
+    const builtRoot = buildST(newArr, 0, size - 1);
+    const expectedSum = newArr.slice(l, r + 1).reduce((a, b) => a + b, 0);
+
+    const intro =
+      `Lesson — build a tree over [${newArr.join(", ")}], then range-sum [${l}, ${r}] (= ${expectedSum}) and point-update index ${idx} → ${newVal}. Watch the query split into O(log n) canonical segments, then the update walk a single root-to-leaf path re-summing as it returns.`;
+
+    const lessonSteps: STStep[] = [{ root: builtRoot, highlighted: [], updated: [], description: intro }];
+    lessonSteps.push(...buildBuildSteps(newArr));
+    lessonSteps.push(...buildQuerySteps(builtRoot, l, r));
+    lessonSteps.push(...buildUpdateSteps(builtRoot, idx, newVal));
+
+    const finalArr = [...newArr];
+    finalArr[idx] = newVal;
+    const finalRoot = updateST(builtRoot, idx, newVal);
+
+    setArr(finalArr);
+    setRoot(finalRoot);
+    setQueryL(String(l));
+    setQueryR(String(r));
+    setUpdateIdx(String(idx));
+    setUpdateVal(String(newVal));
+    startAnimation(lessonSteps);
+  }, [startAnimation]);
+
   const handleUpdate = useCallback(() => {
     if (!root) { setMessage("Build the tree first!"); return; }
     const idx = parseInt(updateIdx, 10);
@@ -405,114 +511,90 @@ export default function SegmentTreeVisualizer() {
     setRoot(newRoot);
   }, [root, updateIdx, updateVal, arr, startAnimation]);
 
-  return (
-    <div className="flex flex-col min-h-dvh" style={{ background: "var(--color-bg)" }}>
-      {/* Header */}
-      <div className="px-5 pt-6 pb-4" style={{ borderBottom: "1px solid var(--color-border)" }}>
-        <div className="flex flex-wrap items-center gap-2 mb-1">
-          <BarChart2 size={20} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />
-          <h1 className="text-2xl font-bold">Segment Tree</h1>
-          <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(124,106,247,0.15)", color: "var(--color-accent)" }}>Range Queries</span>
-          <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(167,139,250,0.12)", color: "#a78bfa" }}>O(log n)</span>
-        </div>
-        <p className="text-sm" style={{ color: "var(--color-muted)" }}>
-          A binary tree for efficiently answering range sum queries and point updates.
-        </p>
-      </div>
+  const canvas = (
+    <div
+      className="rounded-xl overflow-auto h-full flex items-start"
+      style={{
+        background: "var(--color-surface-1)",
+        border: "1px solid var(--color-border)",
+        minHeight: 200,
+        padding: "16px 8px",
+      }}
+    >
+      <SegTreeSVG root={displayRoot} highlighted={highlighted} updated={updatedNodes} />
+    </div>
+  );
 
-      <div className="flex-1 px-5 pt-5 pb-4 flex flex-col gap-4">
-        {/* Array inputs */}
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--color-muted)" }}>
-            Array values (1–99)
-          </p>
-          <div className="flex flex-wrap gap-2 items-end">
-            {arr.map((v, i) => (
-              <div key={i} className="flex flex-col items-center gap-1">
-                <span className="text-xs" style={{ color: "var(--color-muted)" }}>[{i}]</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={99}
-                  value={v}
-                  onChange={(e) => {
-                    const n = Math.max(1, Math.min(99, parseInt(e.target.value, 10) || 1));
-                    const next = [...arr];
-                    next[i] = n;
-                    setArr(next);
-                  }}
-                  className="w-12 rounded-lg px-2 py-1.5 text-sm text-center outline-none"
-                  style={{
-                    background: "var(--color-surface-2)",
-                    border: "1px solid var(--color-border)",
-                    color: "var(--color-text)",
-                  }}
-                />
-              </div>
-            ))}
-            <Btn onClick={handleBuild} primary>Build</Btn>
-          </div>
-        </div>
+  const sidebar = (
+    <>
+      <StepMessage>{message}</StepMessage>
 
-        {/* Message */}
-        <div className="rounded-lg px-4 py-3 text-sm min-h-10" style={{ background: "var(--color-surface-2)", color: "var(--color-accent)" }}>
-          {message}
-        </div>
-
-        {/* SVG Canvas */}
-        <div
-          className="rounded-xl overflow-auto"
-          style={{
-            background: "var(--color-surface-1)",
-            border: "1px solid var(--color-border)",
-            minHeight: 200,
-            padding: "16px 8px",
-          }}
-        >
-          <SegTreeSVG root={displayRoot} highlighted={highlighted} updated={updatedNodes} />
-        </div>
-
-        {/* Legend */}
-        <div className="flex flex-wrap gap-4">
-          {[
-            { label: "queried path", color: "rgba(124,106,247,0.5)", stroke: "var(--color-accent)" },
-            { label: "update path", color: "rgba(34,197,94,0.3)", stroke: "#22c55e" },
-            { label: "leaf", color: "var(--color-surface-3)", stroke: "var(--color-border)" },
-            { label: "internal", color: "var(--color-surface-2)", stroke: "var(--color-border)" },
-          ].map(({ label, color, stroke }) => (
-            <div key={label} className="flex items-center gap-1.5">
-              <div className="w-6 h-3 rounded" style={{ background: color, border: `1.5px solid ${stroke}` }} />
-              <span className="text-xs" style={{ color: "var(--color-muted)" }}>{label}</span>
+      {/* Array inputs */}
+      <SidebarSection title="Array values (1–99)">
+        <div className="flex flex-wrap gap-2 items-end">
+          {arr.map((v, i) => (
+            <div key={i} className="flex flex-col items-center gap-1">
+              <span className="text-xs" style={{ color: "var(--color-muted)" }}>[{i}]</span>
+              <input
+                type="number"
+                min={1}
+                max={99}
+                value={v}
+                onChange={(e) => {
+                  const n = Math.max(1, Math.min(99, parseInt(e.target.value, 10) || 1));
+                  const next = [...arr];
+                  next[i] = n;
+                  setArr(next);
+                }}
+                className="w-12 rounded-lg px-2 py-1.5 text-sm text-center outline-none"
+                style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
+              />
             </div>
           ))}
         </div>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Btn onClick={handleBuild} primary>Build</Btn>
+          <Btn onClick={handleRandomLesson} icon={<Dices size={13} />}>Random Lesson</Btn>
+        </div>
+        <div className="mt-3 flex flex-col gap-2">
+          <span className="text-xs" style={{ color: "var(--color-muted)" }}>Or paste a custom list (1–99):</span>
+          <input
+            type="text"
+            value={customList}
+            onChange={(e) => setCustomList(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") handleCustomDemo(); }}
+            placeholder="4, 2, 7, 1, 5, 3, 8, 6"
+            className="rounded-lg px-3 py-2 text-sm w-full outline-none font-mono"
+            style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
+          />
+          <Btn onClick={handleCustomDemo} icon={<ListOrdered size={13} />}>Build &amp; demo list</Btn>
+        </div>
+      </SidebarSection>
 
-        {/* Query/Update controls */}
-        <div className="flex flex-wrap gap-4">
-          {/* Query */}
+      {/* Query / Update controls */}
+      <SidebarSection title="Query &amp; Update">
+        <div className="flex flex-col gap-3">
           <div className="flex flex-wrap gap-2 items-end">
             <div className="flex flex-col gap-1">
-              <span className="text-xs" style={{ color: "var(--color-muted)" }}>Left index</span>
+              <span className="text-xs" style={{ color: "var(--color-muted)" }}>Left</span>
               <input
                 type="number" min={0} max={arr.length - 1} value={queryL}
                 onChange={(e) => setQueryL(e.target.value)}
                 className="w-16 rounded-lg px-2 py-1.5 text-sm text-center outline-none"
-                style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
+                style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
               />
             </div>
             <div className="flex flex-col gap-1">
-              <span className="text-xs" style={{ color: "var(--color-muted)" }}>Right index</span>
+              <span className="text-xs" style={{ color: "var(--color-muted)" }}>Right</span>
               <input
                 type="number" min={0} max={arr.length - 1} value={queryR}
                 onChange={(e) => setQueryR(e.target.value)}
                 className="w-16 rounded-lg px-2 py-1.5 text-sm text-center outline-none"
-                style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
+                style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
               />
             </div>
-            <Btn onClick={handleQuery} disabled={!root}>Range Sum Query</Btn>
+            <Btn onClick={handleQuery} disabled={!root}>Range Sum</Btn>
           </div>
-
-          {/* Update */}
           <div className="flex flex-wrap gap-2 items-end">
             <div className="flex flex-col gap-1">
               <span className="text-xs" style={{ color: "var(--color-muted)" }}>Index</span>
@@ -520,7 +602,7 @@ export default function SegmentTreeVisualizer() {
                 type="number" min={0} max={arr.length - 1} value={updateIdx}
                 onChange={(e) => setUpdateIdx(e.target.value)}
                 className="w-16 rounded-lg px-2 py-1.5 text-sm text-center outline-none"
-                style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
+                style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
               />
             </div>
             <div className="flex flex-col gap-1">
@@ -529,60 +611,84 @@ export default function SegmentTreeVisualizer() {
                 type="number" min={1} max={99} value={updateVal}
                 onChange={(e) => setUpdateVal(e.target.value)}
                 className="w-16 rounded-lg px-2 py-1.5 text-sm text-center outline-none"
-                style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
+                style={{ background: "var(--color-surface-3)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
               />
             </div>
             <Btn onClick={handleUpdate} disabled={!root}>Point Update</Btn>
           </div>
         </div>
+      </SidebarSection>
 
-        {/* Playback */}
-        {steps.length > 0 && (
-          <div className="flex flex-wrap gap-2 items-center">
-            <Btn
-              onClick={() => setPlaying((p) => !p)}
-              disabled={stepIdx >= steps.length - 1 && !playing}
-              icon={playing ? <Pause size={13} /> : <Play size={13} />}
-            >
-              {playing ? "Pause" : "Play"}
-            </Btn>
-            <Btn onClick={() => setStepIdx((p) => Math.min(p + 1, steps.length - 1))} disabled={stepIdx >= steps.length - 1} icon={<SkipForward size={13} />}>
-              Step
-            </Btn>
-            <Btn onClick={() => { setStepIdx(0); setPlaying(false); }} icon={<RotateCcw size={13} />}>
-              Restart
-            </Btn>
-            <span className="text-xs" style={{ color: "var(--color-muted)" }}>
-              Step {stepIdx + 1}/{steps.length}
-            </span>
-            <div className="flex items-center gap-2 ml-2">
-              <span className="text-xs" style={{ color: "var(--color-muted)" }}>Speed</span>
-              <input
-                type="range" min={150} max={1200} step={50}
-                value={1350 - speed}
-                onChange={(e) => setSpeed(1350 - Number(e.target.value))}
-                className="w-24"
-              />
+      {/* Traversal */}
+      <SidebarSection title="Traversal / search order">
+        <TraverseControls kinds={["bfs", "pre", "in", "post"]} onTraverse={handleTraverse} disabled={!root} />
+      </SidebarSection>
+
+      {/* Playback */}
+      {steps.length > 0 && (
+        <SidebarSection title="Playback">
+          <StepNav
+            stepIdx={stepIdx}
+            stepCount={steps.length}
+            isPlaying={playing}
+            setIsPlaying={setPlaying}
+            setStepIdx={setStepIdx}
+            speed={speed}
+            setSpeed={setSpeed}
+          />
+        </SidebarSection>
+      )}
+
+      {/* Legend */}
+      <SidebarSection title="Legend">
+        <div className="flex flex-col gap-2">
+          {[
+            { label: "queried path", color: "rgba(124,106,247,0.5)", stroke: "var(--color-accent)" },
+            { label: "update path", color: "rgba(34,197,94,0.3)", stroke: "#22c55e" },
+            { label: "leaf", color: "var(--color-surface-3)", stroke: "var(--color-border)" },
+            { label: "internal", color: "var(--color-surface-2)", stroke: "var(--color-border)" },
+          ].map(({ label, color, stroke }) => (
+            <div key={label} className="flex items-center gap-1.5">
+              <div className="w-6 h-3 rounded shrink-0" style={{ background: color, border: `1.5px solid ${stroke}` }} />
+              <span className="text-xs" style={{ color: "var(--color-muted)" }}>{label}</span>
             </div>
-          </div>
-        )}
+          ))}
+        </div>
+      </SidebarSection>
 
-        {/* Info table */}
-        <div className="grid grid-cols-2 gap-3 mt-2" style={{ maxWidth: 480 }}>
+      {/* Complexity */}
+      <SidebarSection title="Complexity">
+        <div className="grid grid-cols-2 gap-2">
           {[
             { op: "build(arr)",    time: "O(n)",     desc: "Build tree from array" },
             { op: "query(l, r)",   time: "O(log n)", desc: "Range sum query" },
             { op: "update(i, v)",  time: "O(log n)", desc: "Point update" },
             { op: "Space",         time: "O(n)",     desc: "4n nodes in tree" },
           ].map(({ op, time, desc }) => (
-            <div key={op} className="rounded-lg p-2.5" style={{ background: "var(--color-surface-2)" }}>
+            <div key={op} className="rounded-lg p-2.5" style={{ background: "var(--color-surface-3)" }}>
               <div className="text-xs font-mono" style={{ color: "var(--color-accent)" }}>{op}</div>
               <div className="text-xs font-bold" style={{ color: "var(--color-text)" }}>{time}</div>
               <div className="text-xs" style={{ color: "var(--color-muted)" }}>{desc}</div>
             </div>
           ))}
         </div>
-      </div>
-    </div>
+      </SidebarSection>
+    </>
+  );
+
+  return (
+    <StepTreeLayout
+      icon={<BarChart2 size={20} style={{ color: "var(--color-accent)", flexShrink: 0 }} strokeWidth={1.75} />}
+      title="Segment Tree"
+      badges={
+        <>
+          <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(124,106,247,0.15)", color: "var(--color-accent)" }}>Range Queries</span>
+          <span className="text-xs font-mono px-2 py-0.5 rounded-full" style={{ background: "rgba(167,139,250,0.12)", color: "#a78bfa" }}>O(log n)</span>
+        </>
+      }
+      description="A binary tree for efficiently answering range sum queries and point updates."
+      canvas={canvas}
+      sidebar={sidebar}
+    />
   );
 }
