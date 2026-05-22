@@ -3,146 +3,126 @@
 
 export const BENCHMARK_SOURCE: Record<string, string> = {
 
-  logos: `function logosSort(input: number[], p: LogosParams = DEFAULT_LOGOS_PARAMS): number[] {
-  /*
-   * Logos Sort — dual-pivot introsort hybrid.
-   *
-   * "In the beginning was the Word (Logos), and the Word was with God,
-   *  and the Word was God." — John 1:1
-   *
-   * Logos is the Greek for the ordering principle beneath apparent chaos —
-   * the pattern that was always there, waiting to be revealed rather than imposed.
-   *
-   * Technical: a dual-pivot introsort hybrid with adaptive shortcuts.
-   * O(n log n) worst-case guaranteed. O(n) on structured input.
-   */
-  const PHI  = p.phi;   // φ⁻¹ ≈ 0.61803399
-  const PHI2 = p.phi2;  // φ⁻² ≈ 0.38196601
-  const BASE = p.base;  // insertion-sort threshold (default 48)
-  const arr = [...input];
-  const arraySize = arr.length;
+  logos: `// Logos Sort — LogosAdaptive (v3.7.1)
+// Single dispatcher over two compilation-isolated paths (numbers, strings).
+// Mutates \`arr\` and returns it. Each path lives in its own IIFE so V8 compiles
+// it as a separate unit — bundling them drops optimization on the string path.
+const logosSortNumbers: (arr: number[]) => number[] = (() => {
+  const INSERTION_SORT_THRESHOLD = 24, COUNTING_SORT_K = 4;
+  const NEARLY_SORTED_INV_RATIO = 0.05, MOMENTUM_THRESHOLD = 50_000;
+  const MAX_RUNS_FOR_MERGE = 32, FLOAT_RADIX_THRESHOLD = 4096;
+  const FLASH_SORT_THRESHOLD = 4096, FLASH_SAFETY_RATIO = 0.05, MIN_GALLOP = 7;
+  const INT32_MIN_L = -2147483648, INT32_MAX_L = 2147483647;
 
-  // ── Space audit ────────────────────────────────────────────────────────────
-  // Path 1 (recursion): O(log n) call stack — tail-call elimination on largest partition
-  // Path 2 (counting sort, line ~346): O(valueRange) ≤ O(4n) — but typically O(k) where
-  //   k = value range (e.g. ~10000 for random integers), which is O(1) relative to large n
-  // Path 3 (fallback, line ~296): O(subArraySize) slice + TimSort merge buffer ≤ O(n),
-  //   fires only when depth 2·log₂n + 4 is exhausted — adversarial input only
-  // Worst-case auxiliary: O(n)   Typical auxiliary: O(log n)
-  // ─────────────────────────────────────────────────────────────────────────
-
-  // Cryptographically seeded xoshiro128+ PRNG
-  const seedBuffer = new Uint32Array(4);
-  crypto.getRandomValues(seedBuffer);
-  if (!seedBuffer[0] && !seedBuffer[1] && !seedBuffer[2] && !seedBuffer[3]) seedBuffer[0] = 1;
-  let state0 = seedBuffer[0], state1 = seedBuffer[1], state2 = seedBuffer[2], state3 = seedBuffer[3];
-  function xrand(): number {
-    const rawOutput = (state0 + state3) >>> 0;
-    const mixedBits = state1 << 9;
-    state2 ^= state0; state3 ^= state1; state1 ^= state2; state0 ^= state3;
-    state2 ^= mixedBits;
-    state3 = (state3 << 11) | (state3 >>> 21);
-    return (rawOutput >>> 1) / 0x80000000; // uniform in (0, 1]
-  }
-  if (arraySize < 2) return arr;
-
-  // Introsort depth limit: 2⌊log₂n⌋ + 4
-  const depthLimit = p.depthMult * Math.floor(Math.log2(arraySize)) + p.depthAdd;
-
-  // Median of three via sorting network
-  function median3(x: number, y: number, z: number): number {
-    if (x > y) { const temp = x; x = y; y = temp; }
-    if (y > z) { const temp = y; y = z; z = temp; }
-    if (x > y) { const temp = x; x = y; y = temp; }
-    return y;
-  }
-
-  // Local median refinement (ninther)
-  function ninther(lower: number, upper: number, centerIndex: number): number {
-    return median3(arr[Math.max(lower, centerIndex - 1)], arr[centerIndex], arr[Math.min(upper, centerIndex + 1)]);
-  }
-
-  // Dual-pivot partition (Dutch National Flag, extended)
-  function dualPartition(lower: number, upper: number, leftPivot: number, rightPivot: number): [number, number] {
-    if (leftPivot > rightPivot) { const t = leftPivot; leftPivot = rightPivot; rightPivot = t; }
-    let leftBoundary = lower, rightBoundary = upper, scanner = lower;
-    while (scanner <= rightBoundary) {
-      if      (arr[scanner] < leftPivot) { [arr[leftBoundary], arr[scanner]] = [arr[scanner], arr[leftBoundary]]; leftBoundary++; scanner++; }
-      else if (arr[scanner] > rightPivot) { [arr[scanner], arr[rightBoundary]] = [arr[rightBoundary], arr[scanner]]; rightBoundary--; }
-      else                                { scanner++; }
-    }
-    return [leftBoundary, rightBoundary];
-  }
-
-  function sort(lower: number, upper: number, depth: number): void {
-    while (lower < upper) {
-      const subArraySize = upper - lower + 1;
-
-      // Introsort fallback: depth exhausted → platform sort
-      if (depth <= 0) {
-        const fallbackSorted = arr.slice(lower, upper + 1).sort((x, y) => x - y);
-        for (let i = lower; i <= upper; i++) arr[i] = fallbackSorted[i - lower];
-        return;
-      }
-
-      // Insertion sort for small subarrays (≤ BASE elements)
-      if (subArraySize <= BASE) {
-        for (let insertPass = lower + 1; insertPass <= upper; insertPass++) {
-          const key = arr[insertPass]; let shiftIndex = insertPass - 1;
-          while (shiftIndex >= lower && arr[shiftIndex] > key) { arr[shiftIndex + 1] = arr[shiftIndex]; shiftIndex--; }
-          arr[shiftIndex + 1] = key;
-        }
-        return;
-      }
-
-      // Counting sort shortcut for dense integer ranges
-      let minValue = arr[lower], maxValue = arr[lower];
-      for (let i = lower + 1; i <= upper; i++) { if (arr[i] < minValue) minValue = arr[i]; if (arr[i] > maxValue) maxValue = arr[i]; }
-      const valueRange = maxValue - minValue;
-      if (Number.isInteger(minValue) && valueRange < subArraySize * p.countingMult) {
-        const counts = new Array(valueRange + 1).fill(0);
-        for (let i = lower; i <= upper; i++) counts[arr[i] - minValue]++;
-        let writePos = lower;
-        for (let v = 0; v <= valueRange; v++) { while (counts[v]-- > 0) arr[writePos++] = v + minValue; }
-        return;
-      }
-
-      // Sorted / reversed early exit
-      if (arr[lower] <= arr[lower + 1] && arr[lower + 1] <= arr[lower + 2]) {
-        let sorted = true;
-        for (let i = lower; i < upper; i++) { if (arr[i] > arr[i + 1]) { sorted = false; break; } }
-        if (sorted) return;
-        let reversed = true;
-        for (let i = lower; i < upper; i++) { if (arr[i] < arr[i + 1]) { reversed = false; break; } }
-        if (reversed) { for (let l = lower, r = upper; l < r; l++, r--) { [arr[l], arr[r]] = [arr[r], arr[l]]; } return; }
-      }
-
-      // Golden-ratio pivot placement with per-level xoshiro128+ jitter
-      const jitterScale = p.randomScaleMin + xrand() * (p.randomScaleMax - p.randomScaleMin);
-      const randomFactor = (xrand() * 2 - 1) * PHI * jitterScale;
-      const indexRange = upper - lower;
-      const leftPivotIndex  = lower + Math.max(0, Math.min(indexRange, Math.floor(indexRange * PHI2 * randomFactor)));
-      const rightPivotIndex = lower + Math.max(0, Math.min(indexRange, Math.floor(indexRange * PHI  * randomFactor)));
-      const pivot1 = ninther(lower, upper, leftPivotIndex);
-      const pivot2 = ninther(lower, upper, rightPivotIndex);
-
-      const [leftEnd, rightEnd] = dualPartition(lower, upper, pivot1, pivot2);
-
-      // Recurse on two smaller regions; loop on the largest (O(log n) stack)
-      const regions: [number, number, number][] = [
-        [leftEnd - lower,          lower,       leftEnd - 1],
-        [rightEnd - leftEnd + 1,   leftEnd,     rightEnd   ],
-        [upper - rightEnd,         rightEnd + 1, upper     ],
-      ];
-      regions.sort((x, y) => x[0] - y[0]);
-      if (regions[0][1] < regions[0][2]) sort(regions[0][1], regions[0][2], depth - 1);
-      if (regions[1][1] < regions[1][2]) sort(regions[1][1], regions[1][2], depth - 1);
-      lower = regions[2][1]; upper = regions[2][2]; depth--;
+  function insertionSort(a: number[], lo: number, hi: number): void {
+    for (let i = lo + 1; i <= hi; i++) {
+      const k = a[i]; let j = i - 1;
+      while (j >= lo && a[j] > k) { a[j + 1] = a[j]; j--; }
+      a[j + 1] = k;
     }
   }
+  // momentum insertion (large nearly-sorted), heapsort, dual-pivot quicksort
+  // with median-of-5 / Dutch-flag fallback, LSD radix (int32 + float64),
+  // flash sort, and natural-run detection with 4-way / 2-way galloping merge.
+  // … full bodies elided here for brevity; see lib/benchmark.ts …
 
-  sort(0, arraySize - 1, depthLimit);
-  return arr;
+  return function(arr: number[]): number[] {
+    const length = arr.length;
+    let minValue = arr[0], maxValue = arr[0];
+    let allIntegers = Number.isInteger(arr[0]);
+    let isAscending = true, isDescending = true;
+    for (let i = 1; i < length; i++) {
+      const v = arr[i];
+      if (v < minValue) minValue = v; else if (v > maxValue) maxValue = v;
+      if (allIntegers && !Number.isInteger(v)) allIntegers = false;
+      if (isAscending  && v < arr[i - 1]) isAscending = false;
+      if (isDescending && v > arr[i - 1]) isDescending = false;
+    }
+    const allInt32 = allIntegers && minValue >= INT32_MIN_L && maxValue <= INT32_MAX_L;
+    // 1. Already sorted? Return as-is. Reversed? One mirror pass.
+    if (isAscending) return arr;
+    if (isDescending) { for (let l = 0, r = length - 1; l < r; l++, r--) { const t = arr[l]; arr[l] = arr[r]; arr[r] = t; } return arr; }
+    // 2. Dense integer range → counting sort. Full 32-bit ints → LSD radix.
+    if (allIntegers) {
+      const span = maxValue - minValue + 1;
+      if (span <= COUNTING_SORT_K * length) {
+        const buckets = new Uint32Array(span);
+        for (let i = 0; i < length; i++) buckets[arr[i] - minValue]++;
+        let w = 0;
+        for (let v = 0; v < span; v++) { const c = buckets[v], val = v + minValue; for (let j = 0; j < c; j++) arr[w++] = val; }
+        return arr;
+      }
+      if (allInt32 && length >= 64) { lsdRadixInt32(arr, length); return arr; }
+    }
+    // 3. Tiny input → insertion sort.
+    if (length <= INSERTION_SORT_THRESHOLD) { insertionSort(arr, 0, length - 1); return arr; }
+    // 4. Few natural runs → galloping merge (TimSort-style).
+    const runs = detectRunsLimited(arr, length, MAX_RUNS_FOR_MERGE);
+    if (runs !== null && runs.length > 2) { mergeAllRuns(arr, length, runs); return arr; }
+    // 5. Nearly sorted (sampled) → insertion / momentum insertion.
+    const sampleSize = Math.min(length, 40), sampleStep = Math.max(1, (length / sampleSize) | 0);
+    let inv = 0, comps = 0;
+    for (let i = 0; i + sampleStep < length; i += sampleStep) { if (arr[i] > arr[i + sampleStep]) inv++; comps++; }
+    if (comps > 0 && inv / comps <= NEARLY_SORTED_INV_RATIO) {
+      if (length > MOMENTUM_THRESHOLD) insertionSortMomentum(arr, 0, length - 1);
+      else                             insertionSort(arr, 0, length - 1);
+      return arr;
+    }
+    // 6. Uniformly distributed floats → flash sort.
+    if (length >= FLASH_SORT_THRESHOLD && maxValue > minValue && isFlashSafe(arr, length, minValue, maxValue)) { flashSort(arr, length, minValue, maxValue); return arr; }
+    // 7. Large float arrays → float64 LSD radix.
+    if (length >= FLOAT_RADIX_THRESHOLD) { lsdRadixFloat64(arr, length); return arr; }
+    // 8. General case → dual-pivot introsort (heapsort fallback at depth limit).
+    quicksort(arr, 0, length - 1, 2 * (31 - Math.clz32(length)));
+    return arr;
+  };
+})();
+
+const logosSortStrings: (arr: string[]) => string[] = (() => {
+  const INSERTION_THRESHOLD_STR = 16;
+  function insertionSortStr(a: string[], lo: number, hi: number): void {
+    for (let i = lo + 1; i <= hi; i++) { const k = a[i]; let j = i - 1; while (j >= lo && a[j] > k) { a[j + 1] = a[j]; j--; } a[j + 1] = k; }
+  }
+  // Three-way (multikey) quicksort partitioning on charCodeAt(d); recurses on
+  // the equal region at depth d+1. O(n·k) on shared-prefix string sets.
+  function multikeyQs(a: string[], lo: number, hi: number, d: number): void {
+    while (hi - lo >= INSERTION_THRESHOLD_STR) {
+      const mid = (lo + hi) >> 1;
+      const c1 = d < a[lo].length ? a[lo].charCodeAt(d) : -1;
+      const c2 = d < a[mid].length ? a[mid].charCodeAt(d) : -1;
+      const c3 = d < a[hi].length ? a[hi].charCodeAt(d) : -1;
+      const pv = c1 < c2 ? (c2 < c3 ? c2 : (c1 < c3 ? c3 : c1)) : (c1 < c3 ? c1 : (c2 < c3 ? c3 : c2));
+      let lt = lo, gt = hi, i = lo;
+      while (i <= gt) {
+        const s = a[i]; const c = d < s.length ? s.charCodeAt(d) : -1;
+        if      (c < pv) { const t = a[lt]; a[lt] = a[i]; a[i] = t; lt++; i++; }
+        else if (c > pv) { const t = a[gt]; a[gt] = a[i]; a[i] = t; gt--; }
+        else             { i++; }
+      }
+      multikeyQs(a, lo, lt - 1, d);
+      if (pv >= 0) multikeyQs(a, lt, gt, d + 1);
+      lo = gt + 1;
+    }
+    insertionSortStr(a, lo, hi);
+  }
+  return function(arr: string[]): string[] {
+    const n = arr.length;
+    let isAsc = true, isDesc = true;
+    for (let i = 1; i < n; i++) { if (isAsc && arr[i] < arr[i - 1]) isAsc = false; if (isDesc && arr[i] > arr[i - 1]) isDesc = false; if (!isAsc && !isDesc) break; }
+    if (isAsc) return arr;
+    if (isDesc) { for (let l = 0, r = n - 1; l < r; l++, r--) { const t = arr[l]; arr[l] = arr[r]; arr[r] = t; } return arr; }
+    if (n <= INSERTION_THRESHOLD_STR) { insertionSortStr(arr, 0, n - 1); return arr; }
+    multikeyQs(arr, 0, n - 1, 0);
+    return arr;
+  };
+})();
+
+// Dispatch on element type; mutates and returns \`arr\`.
+function logosSort(input: number[]): number[] {
+  if (input.length <= 1) return input;
+  return (typeof (input as unknown[])[0] === "string"
+    ? logosSortStrings(input as unknown as string[])
+    : logosSortNumbers(input)) as number[];
 }`,
 
   timsort: `// Tim Sort (V8) — JavaScript's native Array.prototype.sort()

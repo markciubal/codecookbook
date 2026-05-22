@@ -2,9 +2,9 @@
 /// <reference lib="webworker" />
 
 import {
-  SORT_FNS, generateBenchmarkInput, makeQuickSort, makeShellSort, makeLogosSort,
-  makeAdversarialInput, DEFAULT_LOGOS_PARAMS,
-  type BenchmarkScenario, type QuickPivot, type ShellGaps, type LogosParams, type CustomDistribution,
+  SORT_FNS, generateBenchmarkInput, makeQuickSort, makeShellSort,
+  makeAdversarialInput,
+  type BenchmarkScenario, type QuickPivot, type ShellGaps, type CustomDistribution,
 } from "./benchmark";
 
 export interface WorkerRequest {
@@ -16,7 +16,6 @@ export interface WorkerRequest {
   warmup: number;
   quickPivot?: QuickPivot;
   shellGaps?: ShellGaps;
-  logosParams?: LogosParams;
   adversarialInput?: number[];
   /** Serialised custom sort function string, e.g. "(arr) => { arr.sort((a,b)=>a-b); }" */
   customFnStr?: string;
@@ -37,7 +36,7 @@ export interface WorkerResponse {
 }
 
 (self as DedicatedWorkerGlobalScope).onmessage = (e: MessageEvent<WorkerRequest>) => {
-  const { runId, algoId, n, inputs, warmup, quickPivot, shellGaps, logosParams, adversarialInput, customFnStr, timeoutMs } = e.data;
+  const { runId, algoId, n, inputs, warmup, quickPivot, shellGaps, adversarialInput, customFnStr, timeoutMs } = e.data;
 
   let fn: ((arr: number[]) => number[] | void) | null = null;
 
@@ -55,8 +54,6 @@ export interface WorkerResponse {
     fn = makeQuickSort(quickPivot);
   } else if (algoId === "shell" && shellGaps) {
     fn = makeShellSort(shellGaps);
-  } else if (logosParams) {
-    fn = makeLogosSort(logosParams);
   } else {
     fn = SORT_FNS[algoId] ?? null;
   }

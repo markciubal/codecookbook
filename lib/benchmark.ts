@@ -223,367 +223,427 @@ export function generateStringInput(n: number, scenario: BenchmarkScenario): str
 
 // ── Pure sort implementations ─────────────────────────────────────────────────
 
-function logosSort(input: number[], p: LogosParams = DEFAULT_LOGOS_PARAMS): number[] {
-  /*
-   * Logos Sort — dual-pivot introsort hybrid.
-   *
-   * "In the beginning was the Word (Logos), and the Word was with God,
-   *  and the Word was God." — John 1:1
-   *
-   * Logos is the Greek for the ordering principle beneath apparent chaos —
-   * the pattern that was always there, waiting to be revealed rather than imposed.
-   * Jesus taught that the kingdom of God is like a seed already in the field
-   * (Matthew 13:31-32): the work is not to create order from nothing but to
-   * recognize and tend the order that already exists.
-   *
-   * This algorithm holds to that. Before it partitions anything, it asks
-   * whether the data is already sorted, already reversible, already countable.
-   * It only disturbs what genuinely needs disturbing.
-   *
-   * Technical: a dual-pivot introsort hybrid with adaptive shortcuts.
-   * O(n log n) worst-case guaranteed. O(n) on structured input.
-   */
+// ============================================================
+// Logos Sort — LogosAdaptive (v3.7.1)
+// ------------------------------------------------------------
+// Single dispatcher over two compilation-isolated paths (numbers, strings).
+// Mutates `arr` and returns it. Each path lives in its own IIFE so V8 compiles
+// it as a separate unit — bundling them in one closure drops optimization on
+// the string path (5-8x regression on long-string workloads).
+//
+// Numeric path: asc/desc fast-paths · counting sort · int32 LSD radix ·
+//   insertion (+ momentum variant) · natural-run detection with 4-way / 2-way
+//   galloping merge · flash sort · float64 LSD radix · dual-pivot introsort
+//   with Dutch-flag fallback · heapsort depth-limit fallback.
+// String path: asc/desc fast-paths · insertion · multikey quicksort.
+// ============================================================
+const logosSortNumbers: (arr: number[]) => number[] = (() => {
+  const INSERTION_SORT_THRESHOLD = 24;
+  const COUNTING_SORT_K          = 4;
+  const NEARLY_SORTED_INV_RATIO  = 0.05;
+  const MOMENTUM_THRESHOLD       = 50_000;
+  const MAX_RUNS_FOR_MERGE       = 32;
+  const FLOAT_RADIX_THRESHOLD    = 4096;
+  const FLASH_SORT_THRESHOLD     = 4096;
+  const FLASH_SAFETY_RATIO       = 0.05;
+  const MIN_GALLOP               = 7;
+  const INT32_MIN_L = -2147483648, INT32_MAX_L = 2147483647;
 
-  /*
-   * Golden ratio pivot positions.
-   *
-   * Irrational pivot positions.
-   *
-   * φ is the number least approximable by simple fractions — Hurwitz (1891)
-   * proved its continued fraction [0;1,1,1,…] converges slower than any other
-   * irrational. No repeating input sequence can reliably land on the same pivot
-   * index when the cut is placed here. An adversary must solve a problem as hard
-   * as approximating φ — which is maximally hard by Hurwitz's theorem.
-   *
-   * Technical: φ⁻¹ = (√5−1)/2 ≈ 0.61803399 and φ⁻² = (3−√5)/2 ≈ 0.38196601.
-   * PHI is literal here for clarity; PHI2 is computed so both constants share
-   * the same √5 source and their sum stays exactly 1.0 in IEEE 754 double.
-   */
-  const PHI  = p.phi;
-  const PHI2 = p.phi2;
-
-  /*
-   * Insertion sort threshold.
-   *
-   * Threshold invariant.
-   *
-   * Below a certain size, the overhead of recursion and pivot selection costs
-   * more than insertion sort's O(n²) work. The invariant: every subarray of
-   * size ≤ BASE goes through insertion sort, which is correct and faster here.
-   * Sending full quicksort machinery into 20 elements wastes more than it saves.
-   *
-   * Technical (Knuth, TAOCP Vol. 3 §5.2.1; Bentley & McIlroy 1993):
-   * Quicksort's per-call overhead (function frames, pivot selection, partition pass)
-   * has fixed cost γ. Below threshold n₀ where αn₀² < βn₀ log n₀ + γ, insertion
-   * sort is faster. For typical α, β, γ on modern hardware, n₀ ∈ [10, 64]. We use 48.
-   */
-  const BASE = p.base;
-  const arr = [...input];
-  const arraySize = arr.length;
-
-  /*
-   * Cryptographically seeded PRNG (xoshiro128+).
-   *
-   * Unpredictable seed.
-   *
-   * A deterministic pivot rule has a predictable pattern. Anyone who studies it
-   * long enough can craft an input that always produces the worst split.
-   * We draw a seed from the OS's entropy pool — one call to crypto.getRandomValues.
-   * No adversary who does not know the seed can predict where pivots land.
-   *
-   * Technical: xoshiro128+ (Blackman & Vigna, 2018). 128-bit state, period 2¹²⁸−1,
-   * passes all BigCrush statistical tests. One syscall seeds the state; all
-   * subsequent calls are 6 XOR/shift operations — no division, no allocation.
-   * The all-zero state is invalid for xoshiro; we correct it if the OS returns it.
-   */
-  const seedBuffer = new Uint32Array(4);
-  crypto.getRandomValues(seedBuffer);
-  if (!seedBuffer[0] && !seedBuffer[1] && !seedBuffer[2] && !seedBuffer[3]) seedBuffer[0] = 1;
-  let state0 = seedBuffer[0], state1 = seedBuffer[1], state2 = seedBuffer[2], state3 = seedBuffer[3];
-  function xrand(): number {
-    const rawOutput = (state0 + state3) >>> 0;
-    const mixedBits = state1 << 9;
-    state2 ^= state0; state3 ^= state1; state1 ^= state2; state0 ^= state3;
-    state2 ^= mixedBits;
-    state3 = (state3 << 11) | (state3 >>> 21);
-    return (rawOutput >>> 1) / 0x80000000; // uniform in (0, 1]
-  }
-  if (arraySize < 2) return arr;
-
-  /*
-   * Introsort depth limit.
-   *
-   * Depth limit.
-   *
-   * A sort that recurses without limit can be brought to its knees by one
-   * carefully crafted input. The depth limit is structural protection: when
-   * we have descended 2⌊log₂ n⌋ + 4 levels without convergence, we stop
-   * trusting our own strategy and hand the remaining work to the platform.
-   * The limit is the proof, not an optimistic assumption.
-   *
-   * Technical (Musser, "Introspective Sorting and Selection Algorithms", 1997):
-   * A balanced binary partition tree has depth ⌊log₂ n⌋. Doubling allows for
-   * consistently lopsided splits before the fallback fires. The +4 absorbs
-   * small-n rounding. Beyond this depth the platform's sort (V8: TimSort,
-   * itself O(n log n)) takes over — guaranteeing O(n log n) unconditionally.
-   */
-  const depthLimit = p.depthMult * Math.floor(Math.log2(arraySize)) + p.depthAdd;
-
-  /*
-   * Median of three — sorting network.
-   *
-   * Sorting network.
-   *
-   * Three comparator gates totally order {x, y, z}. After the gates run,
-   * y is the median by definition — not by inspection, but because the
-   * invariant x ≤ y ≤ z is enforced unconditionally.
-   * No value is lost. No value is favored. The work is three comparisons.
-   *
-   * Technical (Knuth, TAOCP Vol. 3 §5.3.4 — sorting networks):
-   * Three comparator gates totally order {x, y, z}. After swap(x,y), swap(y,z),
-   * swap(x,y) we have x ≤ y ≤ z. y is the median by definition of total order.
-   * The network has no data-dependent branches — constant time, no misprediction.
-   */
-  function median3(x: number, y: number, z: number): number {
-    if (x > y) { const temp = x; x = y; y = temp; }
-    if (y > z) { const temp = y; y = z; z = temp; }
-    if (x > y) { const temp = x; x = y; y = temp; }
-    return y;
-  }
-
-  /*
-   * Ninther — local median refinement.
-   *
-   * Local median refinement.
-   *
-   * A pivot chosen at a single index is a guess. A pivot chosen as the median
-   * of its three immediate neighbors is informed by context.
-   * Three comparisons, no element moved, no extra memory.
-   *
-   * Technical (Bentley & McIlroy, "Engineering a Sort Function", 1993 §5):
-   * Median-of-3 reduces the probability of a worst-case split from O(1/n) to
-   * O(1/n²). Clamping to [lo, hi] keeps the sample valid at subarray edges.
-   */
-  function ninther(lower: number, upper: number, centerIndex: number): number {
-    return median3(arr[Math.max(lower, centerIndex - 1)], arr[centerIndex], arr[Math.min(upper, centerIndex + 1)]);
-  }
-
-  /*
-   * Dual-pivot partition (Dutch National Flag, extended).
-   *
-   * Loop invariant — three regions, one pass.
-   *
-   * Two pivots divide the array into three clear regions: less than, between,
-   * greater than. Every element is placed in exactly one region.
-   * The pass moves left to right once. Nothing is visited twice.
-   *
-   * Technical (Dijkstra, "A Discipline of Programming", 1976 §14 — Dutch National Flag):
-   * Loop invariant: a[lo..lt−1] < p1, a[lt..i−1] ∈ [p1,p2], a[gt+1..hi] > p2,
-   * a[i..gt] unexamined. Invariant holds at entry (lt=lo, gt=hi, i=lo) and is
-   * restored at each step. Terminates when i > gt: three regions are exhaustive
-   * and disjoint. No element is lost or duplicated. □
-   *
-   * Yaroslavskiy (Java 7 Arrays.sort, 2009) showed dual-pivot does ~1/6 fewer
-   * comparisons than single-pivot on average; three live pointers improve cache
-   * locality over two.
-   */
-  function dualPartition(lower: number, upper: number, leftPivot: number, rightPivot: number): [number, number] {
-    if (leftPivot > rightPivot) { const t = leftPivot; leftPivot = rightPivot; rightPivot = t; }
-    let leftBoundary = lower, rightBoundary = upper, scanner = lower;
-    while (scanner <= rightBoundary) {
-      if      (arr[scanner] < leftPivot) { [arr[leftBoundary], arr[scanner]] = [arr[scanner], arr[leftBoundary]]; leftBoundary++; scanner++; }
-      else if (arr[scanner] > rightPivot) { [arr[scanner], arr[rightBoundary]] = [arr[rightBoundary], arr[scanner]]; rightBoundary--; }
-      else                 { scanner++; }
+  function insertionSort(a: number[], lo: number, hi: number): void {
+    for (let i = lo + 1; i <= hi; i++) {
+      const k = a[i]; let j = i - 1;
+      while (j >= lo && a[j] > k) { a[j + 1] = a[j]; j--; }
+      a[j + 1] = k;
     }
-    return [leftBoundary, rightBoundary];
   }
-
-  /*
-   * Main sort loop — tail-call elimination on the largest region.
-   *
-   * Tail-call elimination.
-   *
-   * After each partition there are three regions. Recursing on all three
-   * accumulates O(n) stack frames in the worst case. Instead, recurse on
-   * the two smaller regions and loop on the largest.
-   * The stack stays bounded at O(log n) regardless of input.
-   *
-   * Technical (Sedgewick, "Implementing Quicksort Programs", 1978):
-   * Naive quicksort recurses on both halves, accumulating O(n) stack frames in the
-   * worst case. The fix: recurse on the two smaller regions, loop on the largest.
-   * Proof: let S(n) = max stack depth. After partition into s₀ ≤ s₁ ≤ s₂ with
-   * s₀+s₁+s₂ = n, we push frames for s₀ and s₁ (each ≤ n/2), loop on s₂.
-   * S(n) = S(n/2) + 1 by induction → S(n) = O(log n). □
-   */
-  function sort(lower: number, upper: number, depth: number): void {
-    while (lower < upper) {
-      const subArraySize = upper - lower + 1;
-
-      /*
-       * Depth exhausted — introsort fallback.
-       *
-       * Platform sort fallback.
-       *
-       * When the depth limit is reached, we stop and let the platform's sort
-       * finish the subarray. This is what makes the O(n log n) guarantee
-       * unconditional — the fallback is the proof, not an optimistic assumption.
-       *
-       * Technical (Musser 1997): Array.prototype.sort in V8 is TimSort — O(n log n)
-       * guaranteed. Splicing it in-place makes Logos Sort O(n log n) unconditionally.
-       * The depth limit is the proof, not an optimistic assumption.
-       */
-      if (depth <= 0) {
-        const fallbackSorted = arr.slice(lower, upper + 1).sort((x, y) => x < y ? -1 : x > y ? 1 : 0);
-        for (let scanIndex = lower; scanIndex <= upper; scanIndex++) arr[scanIndex] = fallbackSorted[scanIndex - lower];
-        return;
-      }
-
-      /*
-       * Insertion sort for small subarrays.
-       *
-       * Insertion sort for small subarrays.
-       *
-       * Below BASE elements, the array fits in L1 cache. Each value walks left
-       * until it finds its place — sequential, direct, no wasted movement.
-       * The quadratic term is harmless at this size: BASE² = 2304 operations,
-       * absorbed as a constant into the larger O(n log n) work.
-       *
-       * Technical (Knuth TAOCP Vol. 3): loop invariant — a[lo..i−1] is sorted before
-       * step i. Each step extends the sorted prefix by one. Holds at i=lo+1 trivially;
-       * maintained at each step by the inner shift. At i=hi+1 the subarray is sorted. □
-       */
-      if (subArraySize <= BASE) {
-        for (let insertPass = lower + 1; insertPass <= upper; insertPass++) {
-          const key = arr[insertPass]; let shiftIndex = insertPass - 1;
-          while (shiftIndex >= lower && arr[shiftIndex] > key) { arr[shiftIndex + 1] = arr[shiftIndex]; shiftIndex--; }
-          arr[shiftIndex + 1] = key;
+  function insertionSortMomentum(a: number[], lo: number, hi: number): void {
+    let momentum = 1;
+    for (let i = lo + 1; i <= hi; i++) {
+      const k = a[i];
+      if (a[i - 1] <= k) { momentum = momentum > 1 ? (momentum >>> 1) : 1; continue; }
+      let j = i - 1, step = momentum;
+      while (step > 1 && (j - step < lo || a[j - step] <= k)) step >>>= 1;
+      while (j - step >= lo && a[j - step] > k) { j -= step; step <<= 1; }
+      let left = Math.max(lo, j - step); const right = j;
+      let lft = left, rgt = right;
+      while (lft < rgt) { const mid = (lft + rgt) >>> 1; if (a[mid] > k) rgt = mid; else lft = mid + 1; }
+      left = lft;
+      const dist = i - left;
+      for (let p = i; p > left; p--) a[p] = a[p - 1];
+      a[left] = k; momentum = dist;
+    }
+  }
+  function siftDown(a: number[], base: number, root: number, end: number): void {
+    for (;;) {
+      let big = root;
+      const l = 2*root+1, r = l+1;
+      if (l < end && a[base+l] > a[base+big]) big = l;
+      if (r < end && a[base+r] > a[base+big]) big = r;
+      if (big === root) return;
+      const t = a[base+root]; a[base+root] = a[base+big]; a[base+big] = t;
+      root = big;
+    }
+  }
+  function heapSortLocal(a: number[], lo: number, hi: number): void {
+    const len = hi - lo + 1;
+    for (let i = (len>>1)-1; i >= 0; i--) siftDown(a, lo, i, len);
+    for (let i = len - 1; i > 0; i--) {
+      const t = a[lo]; a[lo] = a[lo+i]; a[lo+i] = t;
+      siftDown(a, lo, 0, i);
+    }
+  }
+  function sort5(a: number[], i1: number, i2: number, i3: number, i4: number, i5: number): void {
+    if (a[i2] < a[i1]) { const t = a[i2]; a[i2] = a[i1]; a[i1] = t; }
+    if (a[i3] < a[i2]) { const t = a[i3]; a[i3] = a[i2]; a[i2] = t;
+      if (a[i2] < a[i1]) { const u = a[i2]; a[i2] = a[i1]; a[i1] = u; } }
+    if (a[i4] < a[i3]) { const t = a[i4]; a[i4] = a[i3]; a[i3] = t;
+      if (a[i3] < a[i2]) { const u = a[i3]; a[i3] = a[i2]; a[i2] = u;
+        if (a[i2] < a[i1]) { const v = a[i2]; a[i2] = a[i1]; a[i1] = v; } } }
+    if (a[i5] < a[i4]) { const t = a[i5]; a[i5] = a[i4]; a[i4] = t;
+      if (a[i4] < a[i3]) { const u = a[i4]; a[i4] = a[i3]; a[i3] = u;
+        if (a[i3] < a[i2]) { const v = a[i3]; a[i3] = a[i2]; a[i2] = v;
+          if (a[i2] < a[i1]) { const w = a[i2]; a[i2] = a[i1]; a[i1] = w; } } } }
+  }
+  function quicksort(a: number[], lo: number, hi: number, d: number): void {
+    while (hi - lo >= INSERTION_SORT_THRESHOLD) {
+      if (d === 0) { heapSortLocal(a, lo, hi); return; }
+      const len = hi - lo + 1;
+      const seventh = (len >> 3) + (len >> 6) + 1;
+      const e3 = (lo + hi) >> 1;
+      const e2 = e3 - seventh, e4 = e3 + seventh;
+      const e1 = e2 - seventh, e5 = e4 + seventh;
+      sort5(a, e1, e2, e3, e4, e5);
+      if (a[e1] !== a[e2] && a[e2] !== a[e3] && a[e3] !== a[e4] && a[e4] !== a[e5]) {
+        const p1 = a[e2], p2 = a[e4];
+        a[e2] = a[lo]; a[e4] = a[hi];
+        let less = lo + 1, great = hi - 1, k = less;
+        while (k <= great) {
+          const ak = a[k];
+          if (ak < p1) { a[k] = a[less]; a[less++] = ak; }
+          else if (ak > p2) {
+            while (k < great && a[great] > p2) great--;
+            const ag = a[great];
+            a[k] = ag; a[great--] = ak;
+            if (ag < p1) { a[k] = a[less]; a[less++] = ag; }
+          }
+          k++;
         }
-        return;
+        a[lo] = a[less - 1]; a[less - 1] = p1;
+        a[hi] = a[great + 1]; a[great + 1] = p2;
+        d--;
+        quicksort(a, lo, less - 2, d);
+        quicksort(a, great + 2, hi, d);
+        if (p1 === p2) return;
+        let mLo = less, mHi = great;
+        while (mLo <= mHi && a[mLo] === p1) mLo++;
+        while (mLo <= mHi && a[mHi] === p2) mHi--;
+        lo = mLo; hi = mHi;
+      } else {
+        const pv = a[e3];
+        let lt = lo, gt = hi, k = lo;
+        while (k <= gt) {
+          const v = a[k];
+          if (v < pv)      { const t = a[lt]; a[lt] = v; a[k] = t; lt++; k++; }
+          else if (v > pv) { const t = a[gt]; a[gt] = v; a[k] = t; gt--;       }
+          else             { k++; }
+        }
+        d--;
+        if (lt - lo < hi - gt) { quicksort(a, lo, lt - 1, d); lo = gt + 1; }
+        else                   { quicksort(a, gt + 1, hi, d); hi = lt - 1; }
       }
-
-      /*
-       * Counting sort for dense integer ranges.
-       *
-       * Counting sort shortcut.
-       *
-       * When values are dense — the range is small relative to the element count —
-       * we do not compare at all. We tally each value and pour them back in order.
-       * This escapes the Ω(n log n) comparison lower bound entirely.
-       *
-       * Technical: Ω(n log n) is a lower bound only in the comparison model (Shannon
-       * information argument: n! orderings require log₂(n!) ≈ n log n bits to distinguish).
-       * Counting sort escapes this model — it runs in O(n + span). When span < 4n,
-       * total cost O(n) beats any comparison sort by a logarithmic factor.
-       *
-       * Correctness: counts[v] tallies every occurrence of v+mn. The reconstruction
-       * loop emits each value exactly counts[v] times in ascending order. No element
-       * is gained or lost. □
-       */
-      let minValue = arr[lower], maxValue = arr[lower];
-      for (let scanIndex = lower + 1; scanIndex <= upper; scanIndex++) { if (arr[scanIndex] < minValue) minValue = arr[scanIndex]; if (arr[scanIndex] > maxValue) maxValue = arr[scanIndex]; }
-      const valueRange = maxValue - minValue;
-      if (Number.isInteger(minValue) && valueRange < subArraySize * p.countingMult) {
-        const counts = new Array(valueRange + 1).fill(0);
-        for (let scanIndex = lower; scanIndex <= upper; scanIndex++) counts[arr[scanIndex] - minValue]++;
-        let writePos = lower;
-        for (let digitValue = 0; digitValue <= valueRange; digitValue++) { while (counts[digitValue]-- > 0) arr[writePos++] = digitValue + minValue; }
-        return;
+    }
+    insertionSort(a, lo, hi);
+  }
+  function lsdRadixInt32(a: number[], n: number): void {
+    const BIAS = 0x80000000;
+    const src = new Uint32Array(n), dst = new Uint32Array(n);
+    for (let i = 0; i < n; i++) src[i] = (a[i] + BIAS) >>> 0;
+    const c0 = new Uint32Array(257), c1 = new Uint32Array(257), c2 = new Uint32Array(257), c3 = new Uint32Array(257);
+    for (let i = 0; i < n; i++) {
+      const v = src[i];
+      c0[(v & 0xFF) + 1]++; c1[((v >>> 8) & 0xFF) + 1]++;
+      c2[((v >>> 16) & 0xFF) + 1]++; c3[((v >>> 24) & 0xFF) + 1]++;
+    }
+    for (let b = 1; b < 257; b++) { c0[b]+=c0[b-1]; c1[b]+=c1[b-1]; c2[b]+=c2[b-1]; c3[b]+=c3[b-1]; }
+    let from = src, to = dst, tmp = src;
+    for (let i = 0; i < n; i++) { const v = from[i]; to[c0[v & 0xFF]++] = v; }
+    tmp = from; from = to; to = tmp;
+    for (let i = 0; i < n; i++) { const v = from[i]; to[c1[(v >>> 8) & 0xFF]++] = v; }
+    tmp = from; from = to; to = tmp;
+    for (let i = 0; i < n; i++) { const v = from[i]; to[c2[(v >>> 16) & 0xFF]++] = v; }
+    tmp = from; from = to; to = tmp;
+    for (let i = 0; i < n; i++) { const v = from[i]; to[c3[(v >>> 24) & 0xFF]++] = v; }
+    for (let i = 0; i < n; i++) a[i] = to[i] - BIAS;
+  }
+  function isFlashSafe(a: number[], n: number, min: number, max: number): boolean {
+    const SAMPLE_SIZE = 64;
+    const stride = (n / SAMPLE_SIZE) | 0;
+    const samples: number[] = new Array(SAMPLE_SIZE);
+    for (let i = 0; i < SAMPLE_SIZE; i++) samples[i] = a[i * stride];
+    samples.sort((x, y) => x - y);
+    return (samples[47] - samples[16]) / (max - min) >= FLASH_SAFETY_RATIO;
+  }
+  function flashSort(a: number[], n: number, min: number, max: number): void {
+    const m = n, scale = (m - 1) / (max - min);
+    const counts = new Uint32Array(m + 1);
+    for (let i = 0; i < n; i++) { const idx = ((a[i] - min) * scale) | 0; counts[idx + 1]++; }
+    for (let i = 1; i <= m; i++) counts[i] += counts[i - 1];
+    const scratch = new Float64Array(n);
+    for (let i = 0; i < n; i++) { const v = a[i]; const idx = ((v - min) * scale) | 0; scratch[counts[idx]++] = v; }
+    for (let i = 0; i < n; i++) a[i] = scratch[i];
+    for (let i = 1; i < n; i++) { const k = a[i]; let j = i - 1; while (j >= 0 && a[j] > k) { a[j + 1] = a[j]; j--; } a[j + 1] = k; }
+  }
+  function lsdRadixFloat64(a: number[], n: number): void {
+    const bufA = new Uint32Array(2 * n), bufB = new Uint32Array(2 * n);
+    const f64A = new Float64Array(bufA.buffer);
+    for (let i = 0; i < n; i++) f64A[i] = a[i];
+    for (let i = 0; i < n; i++) {
+      const j = 2 * i + 1, hi = bufA[j];
+      if (hi & 0x80000000) { bufA[2 * i] = ~bufA[2 * i] >>> 0; bufA[j] = ~hi >>> 0; }
+      else                 { bufA[j] = hi ^ 0x80000000; }
+    }
+    const h0 = new Uint32Array(257), h1 = new Uint32Array(257), h2 = new Uint32Array(257), h3 = new Uint32Array(257);
+    const h4 = new Uint32Array(257), h5 = new Uint32Array(257), h6 = new Uint32Array(257), h7 = new Uint32Array(257);
+    for (let i = 0; i < n; i++) {
+      const lo = bufA[2 * i], hi = bufA[2 * i + 1];
+      h0[( lo         & 0xFF) + 1]++; h1[((lo >>>  8) & 0xFF) + 1]++;
+      h2[((lo >>> 16) & 0xFF) + 1]++; h3[((lo >>> 24) & 0xFF) + 1]++;
+      h4[( hi         & 0xFF) + 1]++; h5[((hi >>>  8) & 0xFF) + 1]++;
+      h6[((hi >>> 16) & 0xFF) + 1]++; h7[((hi >>> 24) & 0xFF) + 1]++;
+    }
+    for (let b = 1; b < 257; b++) {
+      h0[b]+=h0[b-1]; h1[b]+=h1[b-1]; h2[b]+=h2[b-1]; h3[b]+=h3[b-1];
+      h4[b]+=h4[b-1]; h5[b]+=h5[b-1]; h6[b]+=h6[b-1]; h7[b]+=h7[b-1];
+    }
+    let from = bufA, to = bufB, tmp = bufA;
+    for (let i = 0; i < n; i++) { const lo = from[2*i], hi = from[2*i+1]; const pos = h0[lo & 0xFF]++; to[2*pos] = lo; to[2*pos+1] = hi; }
+    tmp = from; from = to; to = tmp;
+    for (let i = 0; i < n; i++) { const lo = from[2*i], hi = from[2*i+1]; const pos = h1[(lo >>> 8) & 0xFF]++; to[2*pos] = lo; to[2*pos+1] = hi; }
+    tmp = from; from = to; to = tmp;
+    for (let i = 0; i < n; i++) { const lo = from[2*i], hi = from[2*i+1]; const pos = h2[(lo >>> 16) & 0xFF]++; to[2*pos] = lo; to[2*pos+1] = hi; }
+    tmp = from; from = to; to = tmp;
+    for (let i = 0; i < n; i++) { const lo = from[2*i], hi = from[2*i+1]; const pos = h3[(lo >>> 24) & 0xFF]++; to[2*pos] = lo; to[2*pos+1] = hi; }
+    tmp = from; from = to; to = tmp;
+    for (let i = 0; i < n; i++) { const lo = from[2*i], hi = from[2*i+1]; const pos = h4[hi & 0xFF]++; to[2*pos] = lo; to[2*pos+1] = hi; }
+    tmp = from; from = to; to = tmp;
+    for (let i = 0; i < n; i++) { const lo = from[2*i], hi = from[2*i+1]; const pos = h5[(hi >>> 8) & 0xFF]++; to[2*pos] = lo; to[2*pos+1] = hi; }
+    tmp = from; from = to; to = tmp;
+    for (let i = 0; i < n; i++) { const lo = from[2*i], hi = from[2*i+1]; const pos = h6[(hi >>> 16) & 0xFF]++; to[2*pos] = lo; to[2*pos+1] = hi; }
+    tmp = from; from = to; to = tmp;
+    for (let i = 0; i < n; i++) { const lo = from[2*i], hi = from[2*i+1]; const pos = h7[(hi >>> 24) & 0xFF]++; to[2*pos] = lo; to[2*pos+1] = hi; }
+    tmp = from; from = to; to = tmp;
+    for (let i = 0; i < n; i++) {
+      const j = 2 * i + 1, hi = from[j];
+      if (hi & 0x80000000) { from[j] = hi ^ 0x80000000; }
+      else                 { from[2 * i] = ~from[2 * i] >>> 0; from[j] = ~hi >>> 0; }
+    }
+    const finalF64 = new Float64Array(from.buffer);
+    for (let i = 0; i < n; i++) a[i] = finalF64[i];
+  }
+  function detectRunsLimited(a: number[], n: number, maxRuns: number): number[] | null {
+    const result: number[] = []; let i = 0;
+    while (i < n) {
+      let j = i + 1;
+      if (j < n) {
+        if (a[j] >= a[i]) { while (j < n && a[j] >= a[j - 1]) j++; }
+        else { while (j < n && a[j] < a[j - 1]) j++;
+          for (let l = i, r = j - 1; l < r; l++, r--) { const t = a[l]; a[l] = a[r]; a[r] = t; } }
       }
-
-      /*
-       * Gallop check — detect already-sorted or reversed subarrays.
-       *
-       * Sorted/reversed early exit.
-       *
-       * Before disturbing anything, check whether the data already has its order.
-       * Sorted: one scan confirms it in n−1 comparisons. Return without moving anything.
-       * Reversed: one mirror pass restores it. No partition, no pivot.
-       * The 3-element prefix guard costs only 2 comparisons on random data — negligible.
-       *
-       * Technical (Peters, TimSort 2002 — natural run detection):
-       * The 3-element prefix guard costs only 2 comparisons on unsorted data,
-       * so random arrays pay almost nothing extra. Sorted data is more common
-       * in practice than theory assumes (partial order accumulates naturally
-       * in real systems), so the check earns back its cost many times over.
-       */
-      if (arr[lower] <= arr[lower + 1] && arr[lower + 1] <= arr[lower + 2]) {
-        let sorted = true;
-        for (let scanIndex = lower; scanIndex < upper; scanIndex++) { if (arr[scanIndex] > arr[scanIndex + 1]) { sorted = false; break; } }
-        if (sorted) return;
-        let reversed = true;
-        for (let scanIndex = lower; scanIndex < upper; scanIndex++) { if (arr[scanIndex] < arr[scanIndex + 1]) { reversed = false; break; } }
-        if (reversed) { for (let leftPointer = lower, rightPointer = upper; leftPointer < rightPointer; leftPointer++, rightPointer--) { [arr[leftPointer], arr[rightPointer]] = [arr[rightPointer], arr[leftPointer]]; } return; }
+      result.push(i, j - 1);
+      if ((result.length >> 1) > maxRuns) return null;
+      i = j;
+    }
+    return result;
+  }
+  function mergeAllRuns(a: number[], n: number, runs: number[]): void {
+    const QUADWAY_THRESHOLD = 16;
+    const buf: number[] = new Array(n);
+    let cur = runs;
+    while (cur.length > 2) {
+      const next: number[] = [];
+      if ((cur.length >> 1) >= QUADWAY_THRESHOLD) {
+        for (let k = 0; k < cur.length; k += 8) {
+          const numRuns = Math.min(4, (cur.length - k) >> 1);
+          if (numRuns === 1) { next.push(cur[k], cur[k + 1]); continue; }
+          if (numRuns === 2) { mergeGallop(a, buf, cur[k], cur[k+1], cur[k+2], cur[k+3]); next.push(cur[k], cur[k+3]); continue; }
+          if (numRuns === 3) {
+            mergeGallop(a, buf, cur[k], cur[k+1], cur[k+2], cur[k+3]);
+            mergeGallop(a, buf, cur[k], cur[k+3], cur[k+4], cur[k+5]);
+            next.push(cur[k], cur[k+5]); continue;
+          }
+          merge4WayHybrid(a, buf, cur[k], cur[k+1], cur[k+2], cur[k+3], cur[k+4], cur[k+5], cur[k+6], cur[k+7]);
+          next.push(cur[k], cur[k+7]);
+        }
+      } else {
+        for (let k = 0; k < cur.length; k += 4) {
+          const a1 = cur[k], b1 = cur[k + 1];
+          if (k + 2 >= cur.length) { next.push(a1, b1); continue; }
+          mergeGallop(a, buf, a1, b1, cur[k + 2], cur[k + 3]);
+          next.push(a1, cur[k + 3]);
+        }
       }
-
-      /*
-       * PRNG draw — fresh randomness per recursion level.
-       *
-       * Fresh randomness per recursion level.
-       *
-       * Drawing a fresh value at each level means each level's pivot is independent.
-       * An adversary who crafts input to defeat one level cannot predict the next.
-       * xrand() costs 6 XOR/shift operations — cheaper than a comparison.
-       *
-       * Technical: xrand() consumes one xoshiro128+ step — 6 XOR/shift operations,
-       * no division — producing a uniform float in (0, 1]. The jitter scale is sampled
-       * uniformly in [randomScaleMin, randomScaleMax] each call (default both = φ⁻¹ ≈ 0.618034),
-       * then multiplied by PHI to give the final pivot offset; indices clamped to [lo, hi].
-       */
-      const jitterScale = p.randomScaleMin + xrand() * (p.randomScaleMax - p.randomScaleMin);
-      const randomFactor = (xrand() * 2 - 1) * PHI * jitterScale;
-      const indexRange = upper - lower;
-
-      /*
-       * Golden-ratio pivot placement, refined by ninther.
-       *
-       * idx = lo + clamp(⌊range × φ⁻ᵏ × chaos⌋, 0, range).
-       * randomFactor ∈ (−PHI, PHI] keeps pivots spread across the full subarray
-       * while φ's irrationality prevents any periodic input from targeting the same index.
-       * ninther then replaces the raw value with the local median of 3 neighbors,
-       * improving expected partition balance (Bentley & McIlroy 1993 §5).
-       */
-      const leftPivotIndex  = lower + Math.max(0, Math.min(indexRange, Math.floor(indexRange * PHI2 * randomFactor)));
-      const rightPivotIndex = lower + Math.max(0, Math.min(indexRange, Math.floor(indexRange * PHI  * randomFactor)));
-      const pivot1 = ninther(lower, upper, leftPivotIndex);
-      const pivot2 = ninther(lower, upper, rightPivotIndex);
-
-      const [leftEnd, rightEnd] = dualPartition(lower, upper, pivot1, pivot2);
-
-      /*
-       * Smallest-first recursion — bounded stack depth.
-       *
-       * Smallest-first recursion.
-       *
-       * Recurse on the two smaller regions, loop on the largest.
-       * Both recursive calls operate on at most n/2 elements.
-       * By induction: S(n) = S(n/2) + 1 = O(log n). □
-       * The largest region is carried by the while loop at zero stack cost.
-       *
-       * Technical (Sedgewick 1978):
-       * After partition into s₀ ≤ s₁ ≤ s₂ with s₀+s₁+s₂ = n, we push frames
-       * for s₀ and s₁, loop on s₂. Since s₁ ≤ n/2 (not the largest), both
-       * recursive calls operate on at most n/2 elements. By induction:
-       * S(n) = S(n/2) + 1 = O(log n). □
-       */
-      const regions: [number, number, number][] = [
-        [leftEnd - lower,          lower,       leftEnd - 1],
-        [rightEnd - leftEnd + 1,   leftEnd,     rightEnd   ],
-        [upper - rightEnd,         rightEnd + 1, upper     ],
-      ];
-      regions.sort((x, y) => x[0] - y[0]);
-      if (regions[0][1] < regions[0][2]) sort(regions[0][1], regions[0][2], depth - 1);
-      if (regions[1][1] < regions[1][2]) sort(regions[1][1], regions[1][2], depth - 1);
-      lower = regions[2][1]; upper = regions[2][2]; depth--;
+      cur = next;
     }
   }
+  function merge4WayHybrid(a: number[], buf: number[], a1: number, b1: number, a2: number, b2: number, a3: number, b3: number, a4: number, b4: number): void {
+    const INF = Number.POSITIVE_INFINITY;
+    let p0=a1,p1=a2,p2=a3,p3=a4; const e0=b1,e1=b2,e2=b3,e3=b4;
+    let v0=a[p0],v1=a[p1],v2=a[p2],v3=a[p3]; let w=a1;
+    let w0=0,w1=0,w2=0,w3=0;
+    while (p0<=e0||p1<=e1||p2<=e2||p3<=e3) {
+      const lv=v0<=v1?v0:v1, lw=v0<=v1?0:1, rv=v2<=v3?v2:v3, rw=v2<=v3?2:3;
+      const win=lv<=rv?lw:rw, wv=lv<=rv?lv:rv;
+      buf[w++]=wv;
+      if (win===0) { p0++; v0=p0<=e0?a[p0]:INF; w0++; w1=0; w2=0; w3=0;
+        if (w0>=MIN_GALLOP) { const t=v1<v2?(v1<v3?v1:v3):(v2<v3?v2:v3);
+          if (t===INF) { while (p0<=e0) buf[w++]=a[p0++]; v0=INF; }
+          else { let s=1,j=p0; while (j+s<=e0 && a[j+s-1]<=t) {j+=s;s<<=1;}
+            let L=j,R=Math.min(e0+1,j+s); while (L<R){const m=(L+R)>>>1;if(a[m]<=t)L=m+1;else R=m;}
+            while (p0<L) buf[w++]=a[p0++]; v0=p0<=e0?a[p0]:INF; } w0=0; } }
+      else if (win===1) { p1++; v1=p1<=e1?a[p1]:INF; w1++; w0=0; w2=0; w3=0;
+        if (w1>=MIN_GALLOP) { const t=v0<v2?(v0<v3?v0:v3):(v2<v3?v2:v3);
+          if (t===INF) { while (p1<=e1) buf[w++]=a[p1++]; v1=INF; }
+          else { let s=1,j=p1; while (j+s<=e1 && a[j+s-1]<t) {j+=s;s<<=1;}
+            let L=j,R=Math.min(e1+1,j+s); while (L<R){const m=(L+R)>>>1;if(a[m]<t)L=m+1;else R=m;}
+            while (p1<L) buf[w++]=a[p1++]; v1=p1<=e1?a[p1]:INF; } w1=0; } }
+      else if (win===2) { p2++; v2=p2<=e2?a[p2]:INF; w2++; w0=0; w1=0; w3=0;
+        if (w2>=MIN_GALLOP) { const t=v0<v1?(v0<v3?v0:v3):(v1<v3?v1:v3);
+          if (t===INF) { while (p2<=e2) buf[w++]=a[p2++]; v2=INF; }
+          else { let s=1,j=p2; while (j+s<=e2 && a[j+s-1]<t) {j+=s;s<<=1;}
+            let L=j,R=Math.min(e2+1,j+s); while (L<R){const m=(L+R)>>>1;if(a[m]<t)L=m+1;else R=m;}
+            while (p2<L) buf[w++]=a[p2++]; v2=p2<=e2?a[p2]:INF; } w2=0; } }
+      else { p3++; v3=p3<=e3?a[p3]:INF; w3++; w0=0; w1=0; w2=0;
+        if (w3>=MIN_GALLOP) { const t=v0<v1?(v0<v2?v0:v2):(v1<v2?v1:v2);
+          if (t===INF) { while (p3<=e3) buf[w++]=a[p3++]; v3=INF; }
+          else { let s=1,j=p3; while (j+s<=e3 && a[j+s-1]<t) {j+=s;s<<=1;}
+            let L=j,R=Math.min(e3+1,j+s); while (L<R){const m=(L+R)>>>1;if(a[m]<t)L=m+1;else R=m;}
+            while (p3<L) buf[w++]=a[p3++]; v3=p3<=e3?a[p3]:INF; } w3=0; } }
+    }
+    for (let r=a1;r<=b4;r++) a[r]=buf[r];
+  }
+  function mergeGallop(a: number[], buf: number[], a1: number, b1: number, a2: number, b2: number): void {
+    let p=a1,q=a2,w=a1,pW=0,qW=0;
+    while (p<=b1 && q<=b2) {
+      if (a[p]<=a[q]) {buf[w++]=a[p++];pW++;qW=0;} else {buf[w++]=a[q++];qW++;pW=0;}
+      if (pW>=MIN_GALLOP) { const t=a[q]; let s=1,j=p; while (j+s<=b1&&a[j+s-1]<=t){j+=s;s<<=1;}
+        let L=j,R=Math.min(b1+1,j+s); while (L<R){const m=(L+R)>>>1;if(a[m]<=t)L=m+1;else R=m;}
+        while (p<L) buf[w++]=a[p++]; pW=0; }
+      else if (qW>=MIN_GALLOP) { const t=a[p]; let s=1,j=q; while (j+s<=b2&&a[j+s-1]<t){j+=s;s<<=1;}
+        let L=j,R=Math.min(b2+1,j+s); while (L<R){const m=(L+R)>>>1;if(a[m]<t)L=m+1;else R=m;}
+        while (q<L) buf[w++]=a[q++]; qW=0; }
+    }
+    while (p<=b1) buf[w++]=a[p++]; while (q<=b2) buf[w++]=a[q++];
+    for (let r=a1;r<=b2;r++) a[r]=buf[r];
+  }
 
-  sort(0, arraySize - 1, depthLimit);
-  return arr;
-}
+  return function(arr: number[]): number[] {
+    const length = arr.length;
+    let minValue = arr[0], maxValue = arr[0];
+    let allIntegers = Number.isInteger(arr[0]);
+    let isAscending = true, isDescending = true;
+    for (let i = 1; i < length; i++) {
+      const v = arr[i];
+      if (v < minValue) minValue = v; else if (v > maxValue) maxValue = v;
+      if (allIntegers && !Number.isInteger(v)) allIntegers = false;
+      if (isAscending  && v < arr[i - 1]) isAscending = false;
+      if (isDescending && v > arr[i - 1]) isDescending = false;
+    }
+    const allInt32 = allIntegers && minValue >= INT32_MIN_L && maxValue <= INT32_MAX_L;
+    if (isAscending) return arr;
+    if (isDescending) {
+      for (let l = 0, r = length - 1; l < r; l++, r--) { const t = arr[l]; arr[l] = arr[r]; arr[r] = t; }
+      return arr;
+    }
+    if (allIntegers) {
+      const span = maxValue - minValue + 1;
+      if (span <= COUNTING_SORT_K * length) {
+        const buckets = new Uint32Array(span);
+        for (let i = 0; i < length; i++) buckets[arr[i] - minValue]++;
+        let w = 0;
+        for (let v = 0; v < span; v++) { const c = buckets[v], val = v + minValue; for (let j = 0; j < c; j++) arr[w++] = val; }
+        return arr;
+      }
+      if (allInt32 && length >= 64) { lsdRadixInt32(arr, length); return arr; }
+    }
+    if (length <= INSERTION_SORT_THRESHOLD) { insertionSort(arr, 0, length - 1); return arr; }
+    const runs = detectRunsLimited(arr, length, MAX_RUNS_FOR_MERGE);
+    if (runs !== null && runs.length > 2) { mergeAllRuns(arr, length, runs); return arr; }
+    const sampleSize = Math.min(length, 40);
+    const sampleStep = Math.max(1, (length / sampleSize) | 0);
+    let inv = 0, comps = 0;
+    for (let i = 0; i + sampleStep < length; i += sampleStep) { if (arr[i] > arr[i + sampleStep]) inv++; comps++; }
+    if (comps > 0 && inv / comps <= NEARLY_SORTED_INV_RATIO) {
+      if (length > MOMENTUM_THRESHOLD) insertionSortMomentum(arr, 0, length - 1);
+      else                             insertionSort(arr, 0, length - 1);
+      return arr;
+    }
+    if (length >= FLASH_SORT_THRESHOLD && maxValue > minValue && isFlashSafe(arr, length, minValue, maxValue)) {
+      flashSort(arr, length, minValue, maxValue);
+      return arr;
+    }
+    if (length >= FLOAT_RADIX_THRESHOLD) { lsdRadixFloat64(arr, length); return arr; }
+    quicksort(arr, 0, length - 1, 2 * (31 - Math.clz32(length)));
+    return arr;
+  };
+})();
 
-/** Returns a Logos Sort function bound to the given params. */
-export function makeLogosSort(params: LogosParams): (arr: number[]) => number[] {
-  return (input: number[]) => logosSort(input, params);
+const logosSortStrings: (arr: string[]) => string[] = (() => {
+  const INSERTION_THRESHOLD_STR = 16;
+
+  function insertionSortStr(a: string[], lo: number, hi: number): void {
+    for (let i = lo + 1; i <= hi; i++) {
+      const k = a[i]; let j = i - 1;
+      while (j >= lo && a[j] > k) { a[j + 1] = a[j]; j--; }
+      a[j + 1] = k;
+    }
+  }
+  function multikeyQs(a: string[], lo: number, hi: number, d: number): void {
+    while (hi - lo >= INSERTION_THRESHOLD_STR) {
+      const mid = (lo + hi) >> 1;
+      const c1 = d < a[lo].length  ? a[lo].charCodeAt(d)  : -1;
+      const c2 = d < a[mid].length ? a[mid].charCodeAt(d) : -1;
+      const c3 = d < a[hi].length  ? a[hi].charCodeAt(d)  : -1;
+      const pv = c1 < c2 ? (c2 < c3 ? c2 : (c1 < c3 ? c3 : c1)) : (c1 < c3 ? c1 : (c2 < c3 ? c3 : c2));
+      let lt = lo, gt = hi, i = lo;
+      while (i <= gt) {
+        const s = a[i];
+        const c = d < s.length ? s.charCodeAt(d) : -1;
+        if      (c < pv) { const t = a[lt]; a[lt] = a[i]; a[i] = t; lt++; i++; }
+        else if (c > pv) { const t = a[gt]; a[gt] = a[i]; a[i] = t; gt--;       }
+        else             { i++; }
+      }
+      multikeyQs(a, lo, lt - 1, d);
+      if (pv >= 0) multikeyQs(a, lt, gt, d + 1);
+      lo = gt + 1;
+    }
+    insertionSortStr(a, lo, hi);
+  }
+
+  return function(arr: string[]): string[] {
+    const n = arr.length;
+    let isAsc = true, isDesc = true;
+    for (let i = 1; i < n; i++) {
+      if (isAsc  && arr[i] < arr[i - 1]) isAsc  = false;
+      if (isDesc && arr[i] > arr[i - 1]) isDesc = false;
+      if (!isAsc && !isDesc) break;
+    }
+    if (isAsc) return arr;
+    if (isDesc) {
+      for (let l = 0, r = n - 1; l < r; l++, r--) { const t = arr[l]; arr[l] = arr[r]; arr[r] = t; }
+      return arr;
+    }
+    if (n <= INSERTION_THRESHOLD_STR) { insertionSortStr(arr, 0, n - 1); return arr; }
+    multikeyQs(arr, 0, n - 1, 0);
+    return arr;
+  };
+})();
+
+/** Logos Sort (v3.7.1) — dispatches on element type; mutates and returns `arr`. */
+function logosSort(input: number[]): number[] {
+  if (input.length <= 1) return input;
+  return (typeof (input as unknown[])[0] === "string"
+    ? logosSortStrings(input as unknown as string[])
+    : logosSortNumbers(input)) as number[];
 }
 
 function mergeSort(input: number[]): number[] {

@@ -2,7 +2,7 @@
 
 import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { Play, Square, RotateCcw, Trophy, LineChart, ChevronRight, Lock, Unlock, Volume2, Settings, Code, X, Copy, Check } from "lucide-react";
-import { generateBenchmarkInput, generateFloatInput, generateStringInput, SORT_FNS, ALGO_INCOMPATIBLE, makeQuickSort, makeShellSort, makeLogosSort, sortSteps, makeAdversarialInput, measureAllocBytes, DEFAULT_LOGOS_PARAMS, type DataType, type LogosParams, type BenchmarkScenario, type CustomDistribution, type QuickPivot, type ShellGaps, type SortStep } from "@/lib/benchmark";
+import { generateBenchmarkInput, generateFloatInput, generateStringInput, SORT_FNS, ALGO_INCOMPATIBLE, makeQuickSort, makeShellSort, sortSteps, makeAdversarialInput, measureAllocBytes, type DataType, type BenchmarkScenario, type CustomDistribution, type QuickPivot, type ShellGaps, type SortStep } from "@/lib/benchmark";
 import { BENCHMARK_SOURCE } from "@/lib/benchmark-source";
 import { getLogosSortSteps } from "@/lib/algorithms";
 import { useLevel } from "@/hooks/useLevel";
@@ -12,8 +12,7 @@ import { useLevel } from "@/hooks/useLevel";
 const SLOW_IDS = new Set(["insertion", "selection", "bubble", "cocktail", "comb", "gnome", "pancake", "cycle", "oddeven"]);
 const SLOW_THRESHOLD = 5_000;
 // All O(n log n) algorithms are allowed above 5 M elements
-const _UNLIMITED_BASE = new Set(["logos", "timsort", "timsort-js", "introsort", "adaptive", "pdqsort", "merge", "quick", "heap"]);
-const UNLIMITED_IDS = { has: (id: string) => _UNLIMITED_BASE.has(id) || /^logos-custom-\d+$/.test(id) };
+const UNLIMITED_IDS = new Set(["logos", "timsort", "timsort-js", "introsort", "adaptive", "pdqsort", "merge", "quick", "heap"]);
 
 /*
  * Re-instantiate a sort function from its own source so it gets a *fresh* set of
@@ -252,9 +251,6 @@ function freshSortFn(original: (arr: number[]) => number[]): (arr: number[]) => 
   }
 }
 
-// Palette for numbered Logos custom variants
-const LC_COLORS = ["#555555", "#8B6000", "#2E4A7A", "#3D6B3D", "#6B3D6B", "#8B3333"];
-
 // Palette offered when adding/picking a color for a user-saved custom sort.
 // Chosen to be visually distinct from the built-in algorithm colors so multiple
 // custom sorts plotted on the same chart remain individually identifiable.
@@ -276,19 +272,6 @@ function defaultCustomColor(idx: number): string {
   return CUSTOM_PALETTE[idx % CUSTOM_PALETTE.length];
 }
 
-// Makes a record return dynamic values for logos-custom-N keys
-function withLogosVariants<T>(base: Record<string, T>, fallback: (n: number) => T): Record<string, T> {
-  return new Proxy(base as Record<string, T>, {
-    get(target, key) {
-      const k = key as string;
-      const stored = target[k];
-      if (stored !== undefined) return stored;
-      const m = k.match(/^logos-custom-(\d+)$/);
-      if (m) return fallback(parseInt(m[1]));
-      return undefined;
-    },
-  }) as Record<string, T>;
-}
 const LARGE_THRESHOLD = 5_000_000;
 
 // Code snippets available for loading into the custom sort editor
@@ -987,8 +970,8 @@ const ALGO_GROUPS = [
   },
 ] as const;
 
-const ALGO_NAMES: Record<string, string> = withLogosVariants({
-  logos: "Logos Sort", "logos-custom-1": "Logos Sort - 1",
+const ALGO_NAMES: Record<string, string> = {
+  logos: "Logos Sort",
   adaptive: "Adaptive Sort",
   pdqsort:  "PDQ Sort",
   introsort: "Introsort",
@@ -1000,12 +983,11 @@ const ALGO_NAMES: Record<string, string> = withLogosVariants({
   pancake: "Pancake Sort", cycle: "Cycle Sort", oddeven: "Odd-Even Sort",
   "timsort-js": "TimSort (JS)",
   custom: "Custom Sort",
-}, n => `Logos Sort - ${n}`);
+};
 
 
-const ALGO_COLORS: Record<string, string> = withLogosVariants({
+const ALGO_COLORS: Record<string, string> = {
   logos:            "#808080",
-  "logos-custom-1": "#555555",
   adaptive:       "#26a69a",
   pdqsort:        "#7e57c2",
   introsort:      "#e67e22",
@@ -1028,11 +1010,10 @@ const ALGO_COLORS: Record<string, string> = withLogosVariants({
   cycle:     "#9575cd",
   oddeven:   "#4fc3f7",
   custom:    "#e040fb",
-}, n => LC_COLORS[(n - 1) % LC_COLORS.length]);
+};
 
-const ALGO_SPACE: Record<string, string> = withLogosVariants({
+const ALGO_SPACE: Record<string, string> = {
   logos:            "O(log n) / O(n)",
-  "logos-custom-1": "O(log n) / O(n)",
   adaptive:       "O(log n) / O(span)",
   pdqsort:        "O(log n)",
   introsort:      "O(log n)",
@@ -1054,11 +1035,10 @@ const ALGO_SPACE: Record<string, string> = withLogosVariants({
   pancake:   "O(n)",
   cycle:     "O(1)",
   oddeven:   "O(1)",
-}, () => "O(log n)");
+};
 
-const ALGO_TIME: Record<string, string> = withLogosVariants({
+const ALGO_TIME: Record<string, string> = {
   logos:            "O(n log n)",
-  "logos-custom-1": "O(n log n)",
   adaptive:       "O(n log n)",
   pdqsort:        "O(n log n)",
   introsort:      "O(n log n)",
@@ -1080,12 +1060,11 @@ const ALGO_TIME: Record<string, string> = withLogosVariants({
   pancake:   "O(n²)",
   cycle:     "O(n²)",
   oddeven:   "O(n²)",
-}, () => "O(n log n)");
+};
 
 // true = stable, false = unstable, null = not applicable
-const ALGO_STABLE: Record<string, boolean> = withLogosVariants({
+const ALGO_STABLE: Record<string, boolean> = {
   logos:            false,
-  "logos-custom-1": false,
   adaptive:       false,
   pdqsort:        false,
   introsort:      false,
@@ -1107,12 +1086,11 @@ const ALGO_STABLE: Record<string, boolean> = withLogosVariants({
   pancake:   false,
   cycle:     false,
   oddeven:   true,
-}, () => false);
+};
 
 // true = can sort a stream, false = needs full input
-const ALGO_ONLINE: Record<string, boolean> = withLogosVariants({
+const ALGO_ONLINE: Record<string, boolean> = {
   logos:            false,
-  "logos-custom-1": false,
   adaptive:       false,
   pdqsort:        false,
   introsort:      false,
@@ -1134,7 +1112,7 @@ const ALGO_ONLINE: Record<string, boolean> = withLogosVariants({
   pancake:   false,
   cycle:     false,
   oddeven:   false,
-}, () => false);
+};
 
 // Rank for sorting by complexity class (lower = better)
 const BIG_O_RANK: Record<string, number> = {
@@ -1527,10 +1505,6 @@ function hexAlpha(hex: string, alpha: number): string {
 
 function estimateMemory(alg: string, n: number): { avg: number; peak: number } {
   const ELEMENT_SIZE = 8; // 8 bytes per number (Float64)
-  // Handle all logos-custom-N variants like logos
-  if (/^logos-custom-\d+$/.test(alg)) {
-    return { avg: Math.log2(Math.max(n, 2)) * 64, peak: Math.log2(Math.max(n, 2)) * 128 };
-  }
   switch (alg) {
     case "merge":
     case "timsort":
@@ -5973,10 +5947,6 @@ export default function BenchmarkVisualizer() {
   const [pulseEnabled, setPulseEnabled] = useState<boolean>(() => {
     try { return localStorage.getItem("cc-pulse") !== "off"; } catch { return true; }
   });
-  const [customLogosVariants, setCustomLogosVariants] = useState<LogosParams[]>([]);
-  const [logosEditVariant, setLogosEditVariant] = useState<number | null>(null); // null=closed, 0-based index
-  const [logosAddConfirm, setLogosAddConfirm] = useState(false); // show "create another?" prompt
-  const [paramDrafts, setParamDrafts] = useState<Record<string, string>>({}); // keyed by `${variantIdx}.${paramKey}`
   const togglePulse = useCallback(() => {
     setPulseEnabled(prev => {
       const next = !prev;
@@ -6625,12 +6595,6 @@ export default function BenchmarkVisualizer() {
   const canRun = (activeAlgos.length > 0 || enabledSavedSorts.length > 0) && selectedSizes.size > 0 && scenarios.size > 0 && status !== "running";
   const canRunCustomOnly = enabledSavedSorts.length > 0 && selectedSizes.size > 0 && scenarios.size > 0 && status !== "running";
 
-  const getLogosCustomParams = (id: string): LogosParams | null => {
-    const m = id.match(/^logos-custom-(\d+)$/);
-    if (!m) return null;
-    return customLogosVariants[parseInt(m[1]) - 1] ?? DEFAULT_LOGOS_PARAMS;
-  };
-
   const run = useCallback(async (algoOverride?: string[]) => {
     const maxSz = selectedSizes.size > 0 ? Math.max(...selectedSizes) : 0;
     // Mirror slowDisabled exactly so the run list matches the checked-off checkboxes.
@@ -6650,17 +6614,6 @@ export default function BenchmarkVisualizer() {
         !(!UNLIMITED_IDS.has(id) && maxSz > LARGE_THRESHOLD)
       )
     );
-    // Auto-inject logos-custom-N for each variant that differs from defaults
-    if (algos.includes("logos")) {
-      let insertIdx = algos.indexOf("logos") + 1;
-      customLogosVariants.forEach((params, i) => {
-        const id = `logos-custom-${i + 1}`;
-        if (!algos.includes(id)) {
-          algos.splice(insertIdx, 0, id);
-          insertIdx++;
-        }
-      });
-    }
     const scenarioList = [...scenarios] as BenchmarkScenario[];
     if (!algos.length || !selectedSizes.size || !scenarioList.length) return;
 
@@ -6712,14 +6665,11 @@ export default function BenchmarkVisualizer() {
                  savedCustomPre                        ? buildCustomFn(savedCustomPre.code) :
                  id === "quick"                        ? makeQuickSort(quickPivot) :
                  id === "shell"                        ? makeShellSort(shellGaps) :
-                 getLogosCustomParams(id) !== null     ? makeLogosSort(getLogosCustomParams(id)!) :
-                 id === "logos"                        ? makeLogosSort(DEFAULT_LOGOS_PARAMS) :
                  SORT_FNS[id];
       if (!fn) continue;
       const stepsArr: SortStep[] = [];
-      if (id === "logos" || /^logos-custom-\d+$/.test(id)) {
-        const params = getLogosCustomParams(id) ?? DEFAULT_LOGOS_PARAMS;
-        for (const s of getLogosSortSteps([...prerunArr], params)) {
+      if (id === "logos") {
+        for (const s of getLogosSortSteps([...prerunArr])) {
           // Convert types.ts SortStep {array, states} → benchmark.ts SortStep {arr, comparing, swapping, sorted, pivot}
           const comparing: number[] = [], swapping: number[] = [], sorted: number[] = [];
           let pivot: number | undefined;
@@ -6796,8 +6746,6 @@ export default function BenchmarkVisualizer() {
                    savedCustom                          ? buildCustomFn(savedCustom.code, () => { /* per-saved errors swallowed; reflected via failed proof */ }) :
                    id === "quick"                       ? makeQuickSort(quickPivot) as never :
                    id === "shell"                       ? makeShellSort(shellGaps) as never :
-                   getLogosCustomParams(id) !== null    ? makeLogosSort(getLogosCustomParams(id)!) as never :
-                   id === "logos"                       ? makeLogosSort(DEFAULT_LOGOS_PARAMS) as never :
                    dataType === "string" && id === "timsort" ? ((arr: unknown[]) => [...arr].sort()) :
                    SORT_FNS[id] ? freshSortFn(SORT_FNS[id]) as never :
                    null;
@@ -6823,7 +6771,6 @@ export default function BenchmarkVisualizer() {
             capturedAlgos.add(id);
           }
           const workerInputs = roundInputs.slice(0, algoRounds);
-          const logosP = getLogosCustomParams(id) ?? (id === "logos" ? DEFAULT_LOGOS_PARAMS : undefined);
           const result = await new Promise<{ timeMs: number; meanMs: number; stdDev: number; roundTimes?: number[]; timedOut: boolean; stopped?: boolean; error?: string }>((resolve) => {
             const w = new Worker(new URL("../lib/benchmarkWorker", import.meta.url));
             currentWorkerRef.current = w;
@@ -6855,7 +6802,6 @@ export default function BenchmarkVisualizer() {
               warmup,
               quickPivot: id === "quick" ? quickPivot : undefined,
               shellGaps: id === "shell" ? shellGaps : undefined,
-              logosParams: logosP,
               adversarialInput: adversarialEnabled ? makeAdversarialInput(id, sz, quickPivot) : undefined,
               // For both the editor's "custom" slot and any saved sort
               // (id === "custom-XYZ"), ship the function source string so the
@@ -7066,7 +7012,7 @@ export default function BenchmarkVisualizer() {
 
   }, [
     selected, selectedSizes, scenarios, rounds, warmup,
-    customPreSorted, customDuplicates, quickPivot, shellGaps, customLogosVariants,
+    customPreSorted, customDuplicates, quickPivot, shellGaps,
     adversarialEnabled, useWorkerIsolation,
     customSortEnabled, customSortCode,
     // The run closure also reads these — without them, switching dataType or
