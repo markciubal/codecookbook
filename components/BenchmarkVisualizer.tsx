@@ -1,11 +1,22 @@
 "use client";
 
 import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
-import { Play, Square, RotateCcw, Trophy, LineChart, ChevronRight, Lock, Unlock, Volume2, Settings, Code, X, Copy, Check } from "lucide-react";
-import { generateBenchmarkInput, generateFloatInput, generateStringInput, SORT_FNS, ALGO_INCOMPATIBLE, makeQuickSort, makeShellSort, sortSteps, makeAdversarialInput, measureAllocBytes, type DataType, type BenchmarkScenario, type CustomDistribution, type QuickPivot, type ShellGaps, type SortStep } from "@/lib/benchmark";
+import { Play, Square, RotateCcw, Trophy, LineChart, ChevronRight, Lock, Unlock, Volume2, Settings, Code, X, Copy, Check, Activity } from "lucide-react";
+import { generateBenchmarkInput, generateFloatInput, generateStringInput, SORT_FNS, ALGO_INCOMPATIBLE, makeQuickSort, makeShellSort, sortSteps, makeAdversarialInput, measureAllocBytes, type DataType, type BenchmarkScenario, type CustomDistribution, type ValueDistribution, type QuickPivot, type ShellGaps, type SortStep } from "@/lib/benchmark";
 import { BENCHMARK_SOURCE } from "@/lib/benchmark-source";
 import { getLogosSortSteps } from "@/lib/algorithms";
 import { useLevel } from "@/hooks/useLevel";
+import RunningDashboard from "@/components/RunningDashboard";
+import { AdvGroup, AdvSection, AdvToggle } from "@/components/BenchmarkAdvanced";
+import WinnersLog, { type WinnerLog } from "@/components/WinnersLog";
+import SessionCurves, { type SessionLog } from "@/components/SessionCurves";
+import SessionSummary from "@/components/SessionSummary";
+import SessionBigO from "@/components/SessionBigO";
+import SessionMatrix from "@/components/SessionMatrix";
+import SortNetworkGraph from "@/components/SortNetworkGraph";
+import { cyLineStyle, DT_LABEL } from "@/lib/dataTypeStyle";
+import { getWasmSorts, WASM_SUPPORTED, type WasmSortBundle } from "@/lib/wasmSorts";
+import { getWebgpuSorts, WEBGPU_SUPPORTED, type WebGpuSortBundle } from "@/lib/webgpuSorts";
 
 // ── Static config ─────────────────────────────────────────────────────────────
 
@@ -28,6 +39,101 @@ function genId(): string {
 
 const SLOW_IDS = new Set(["insertion", "selection", "bubble", "cocktail", "comb", "gnome", "pancake", "cycle", "oddeven"]);
 const SLOW_THRESHOLD = 5_000;
+
+// Comparison sorts whose comparators use relational operators (<, >, <=) and so
+// work across integers, floats, AND strings — eligible for the polymorphic
+// sweep. (Excludes timsort's numeric a-b comparator and the integer-only
+// counting/radix/bucket sorts.) Logos 3.7.1 dispatches on element type itself.
+// Note: bitonic is NOT in POLY_SAFE — its CPU implementation pads with
+// `+Infinity` sentinels which only sort cleanly for numeric data, not for
+// the string leg of the polymorphic sweep. The string incompatibility is
+// declared in ALGO_INCOMPATIBLE for the same reason.
+const POLY_SAFE = new Set(["logos", "merge", "quick", "heap", "insertion", "shell", "selection", "bubble", "cocktail", "comb", "gnome"]);
+
+// Verdict on whether an algorithm sorted in place, derived from its measured
+// auxiliary bytes ÷ n. Two signals, two thresholds:
+//
+//   • `allocBytes` — instrumented Array / typed-array / Set / Map / map /
+//     filter / splice / etc. allocations. Authoritative when present: a
+//     non-zero reading proves an allocation happened, a zero reading proves
+//     no PATCHED allocators fired (spread / engine-internal scratch can
+//     still slip past). Threshold: ≥ 1 byte/element ⇒ O(n).
+//   • `heapDeltaBytes` — REAL `performance.memory.usedJSHeapSize` delta only
+//     (no theoretical fallback). Catches the instrumentation blind spots
+//     (spread copies, V8-internal scratch), but it's noisy — GC scheduling
+//     produces a few bytes/element of "growth" even on truly in-place sorts.
+//     Threshold: ≥ 4 bytes/element ⇒ O(n) (with "?" because it's the noisy
+//     source).
+//
+// The two sources are checked in order — instrumented first (no "?"), then
+// heap delta (with "?"). When both signals point clean, the verdict is
+// "in-place ✓" if we had instrumentation, "in-place ✓?" if only heap delta.
+function inPlaceVerdict(
+  allocBytes: number | null | undefined,
+  heapDeltaBytes: number | null | undefined,
+  n: number,
+): { label: string; color: string; bg: string; title: string } | null {
+  if (n <= 0) return null;
+  const a = allocBytes ?? null;
+  const h = heapDeltaBytes ?? null;
+  if (a == null && h == null) return null;
+  const aPer = a != null ? a / n : 0;
+  const hPer = h != null ? h / n : 0;
+
+  // Instrumented allocators caught a real O(n) allocation.
+  if (a != null && aPer >= 1) {
+    return {
+      label: "O(n) aux ✗",
+      color: "#ef5350", bg: "rgba(239,83,80,0.15)",
+      title: `${aPer.toFixed(2)} aux bytes/element · instrumented allocators caught O(n) growth`,
+    };
+  }
+  // Heap delta picked up growth the instrumentation missed (spread, internal
+  // scratch). 4 byte/el floor sits above GC noise and just below the smallest
+  // realistic O(n) allocator (a packed Int32Array buffer is 4 byte/el).
+  if (h != null && hPer >= 4) {
+    return {
+      label: "O(n) aux ✗?",
+      color: "#ef5350", bg: "rgba(239,83,80,0.15)",
+      title: `${hPer.toFixed(2)} aux bytes/element · instrumentation missed it; heap delta caught O(n) growth (noisy source)`,
+    };
+  }
+  // Both signals are clean — instrumented verdict is high-confidence.
+  if (a != null) {
+    return {
+      label: "in-place ✓",
+      color: "#22c55e", bg: "rgba(34,197,94,0.15)",
+      title: `${aPer.toFixed(3)} aux bytes/element instrumented · O(1)/O(log n) auxiliary memory`,
+    };
+  }
+  // Only heap delta available — confident enough to call in-place, but mark
+  // it "?" because the signal is the noisy one.
+  return {
+    label: "in-place ✓?",
+    color: "#22c55e", bg: "rgba(34,197,94,0.15)",
+    title: `${hPer.toFixed(3)} aux bytes/element from heap delta · likely in-place but no instrumented data`,
+  };
+}
+
+// Wrap a sort fn so a single measured call sorts an integer array (the one
+// passed in) plus a fresh float and string array of the same size — the
+// "polymorphic" measurement that counts three data types as one sort. Source
+// arrays are generated once at wrap time (outside the timed call); each call
+// sorts fresh copies so repeated rounds don't sort already-sorted data.
+function makePolymorphicFn(
+  base: (arr: unknown[]) => unknown[],
+  sz: number,
+  scenario: BenchmarkScenario,
+): (arr: unknown[]) => unknown[] {
+  const floatSrc = generateFloatInput(sz, scenario) as unknown[];
+  const strSrc = generateStringInput(sz, scenario) as unknown[];
+  return (arr: unknown[]) => {
+    base(arr);
+    base(floatSrc.slice());
+    base(strSrc.slice());
+    return arr;
+  };
+}
 // All O(n log n) algorithms are allowed above 5 M elements
 const UNLIMITED_IDS = new Set(["logos", "timsort", "timsort-js", "introsort", "adaptive", "pdqsort", "merge", "quick", "heap"]);
 
@@ -93,11 +199,11 @@ type SampleProof = {
 // This preserves the visual story "the same values, just rearranged" while
 // still pinning correctness on the algorithm's real output, not on the
 // proof's own re-sort.
-function captureSampleProof(
+async function captureSampleProof(
   input: readonly (number | string)[],
-  fn: (a: unknown[]) => unknown[],
+  fn: (a: unknown[]) => unknown[] | Promise<unknown[]>,
   meta: { n: number; dataType: DataType; scenario?: BenchmarkScenario },
-): SampleProof {
+): Promise<SampleProof> {
   const SAMPLE = 20;
   const stride = Math.max(1, Math.floor(input.length / SAMPLE));
   const before: (number | string)[] = Array.from({ length: SAMPLE }, (_, i) => input[i * stride]);
@@ -105,10 +211,15 @@ function captureSampleProof(
   // If a custom sort throws here we still want to record a proof so the user
   // can see the failure annotated. Mark sortedFull as the unsorted input so
   // the verifier catches the breakage downstream.
+  // The fn may be async (WebGPU sorts return a Promise so the readback can
+  // complete before we inspect the result). We await whatever it gives us.
   let sortedFull: (number | string)[];
   let threw = false;
   try {
-    const sortedResult = fn(proofCopy as unknown[]);
+    const raw = fn(proofCopy as unknown[]);
+    const sortedResult = raw && typeof (raw as { then?: unknown }).then === "function"
+      ? await (raw as Promise<unknown[]>)
+      : raw as unknown[];
     sortedFull = (sortedResult ?? proofCopy) as (number | string)[];
   } catch {
     sortedFull = proofCopy;
@@ -968,6 +1079,7 @@ const ALGO_GROUPS = [
       { id: "counting", name: "Counting Sort", badge: "O(n+k)" },
       { id: "radix",    name: "Radix Sort",    badge: "O(nk)" },
       { id: "bucket",   name: "Bucket Sort",   badge: "O(n+k)" },
+      { id: "bitonic",  name: "Bitonic Sort",  badge: "O(n log² n) · GPU" },
     ],
   },
   {
@@ -999,6 +1111,7 @@ const ALGO_NAMES: Record<string, string> = {
   cocktail: "Cocktail Sort", comb: "Comb Sort", gnome: "Gnome Sort",
   pancake: "Pancake Sort", cycle: "Cycle Sort", oddeven: "Odd-Even Sort",
   "timsort-js": "TimSort (JS)",
+  bitonic: "Bitonic Sort",
   custom: "Custom Sort",
 };
 
@@ -1026,6 +1139,8 @@ const ALGO_COLORS: Record<string, string> = {
   pancake:   "#ffb300",
   cycle:     "#9575cd",
   oddeven:   "#4fc3f7",
+  // Teal to match the GPU badge — bitonic is the first GPU-targeted algo.
+  bitonic:   "#0e9b96",
   custom:    "#e040fb",
 };
 
@@ -1052,6 +1167,8 @@ const ALGO_SPACE: Record<string, string> = {
   pancake:   "O(n)",
   cycle:     "O(1)",
   oddeven:   "O(1)",
+  // Internally pads to next power-of-2 with sentinels — O(n) scratch.
+  bitonic:   "O(n)",
 };
 
 const ALGO_TIME: Record<string, string> = {
@@ -1077,6 +1194,9 @@ const ALGO_TIME: Record<string, string> = {
   pancake:   "O(n²)",
   cycle:     "O(n²)",
   oddeven:   "O(n²)",
+  // log² n compare-swap network — same class as Shell, slower than O(n log n)
+  // on CPU but trivially parallelizable on GPU (every (k,j) layer is independent).
+  bitonic:   "O(n log² n)",
 };
 
 // true = stable, false = unstable, null = not applicable
@@ -1103,6 +1223,7 @@ const ALGO_STABLE: Record<string, boolean> = {
   pancake:   false,
   cycle:     false,
   oddeven:   true,
+  bitonic:   false,
 };
 
 // true = can sort a stream, false = needs full input
@@ -1129,6 +1250,7 @@ const ALGO_ONLINE: Record<string, boolean> = {
   pancake:   false,
   cycle:     false,
   oddeven:   false,
+  bitonic:   false,
 };
 
 // Rank for sorting by complexity class (lower = better)
@@ -1316,6 +1438,7 @@ const ALGO_INFO: Record<string, AlgoInfo> = {
   pancake:   { best: "O(n)",       avg: "O(n²)",      worst: "O(n²)",      space: "O(n)",     inPlace: false, useCase: "Systems where the only primitive is a prefix reversal — robotics, parallel networks", intuition: "Flips prefixes to bring the largest unsorted element to the top, then flips it to its final position — repeat for each element. Each flip allocates a temporary reversed slice." },
   cycle:     { best: "O(n²)",      avg: "O(n²)",      worst: "O(n²)",      space: "O(1)",     inPlace: true,  useCase: "When minimizing writes is critical — each element is moved to its final position at most once", intuition: "Decomposes the permutation into disjoint cycles; rotates each cycle so every element lands exactly in its correct slot in one write" },
   oddeven:   { best: "O(n)",       avg: "O(n²)",      worst: "O(n²)",      space: "O(1)",     inPlace: true,  useCase: "Parallel architectures where odd and even index pairs can be compared simultaneously on separate processors", intuition: "Alternates between odd-indexed and even-indexed adjacent swaps — equivalent to bubble sort but designed to parallelise across processors" },
+  bitonic:   { best: "O(n log² n)", avg: "O(n log² n)", worst: "O(n log² n)", space: "O(n)",   inPlace: false, useCase: "GPU/SIMD parallel hardware: every (k, j) compare-swap layer runs lockstep with no data-dependent branches — slower than O(n log n) on CPU, but trivially parallelizable. Try toggling the WebGPU engine to see the same algorithm run on the GPU.", intuition: "Builds a sorting network: for each subsequence pair of size k, for each compare distance j inside that pair, every index i compares with i⊕j and swaps if out of order, with the direction flipped every k indices so adjacent bitonic runs sort opposite ways. Concatenating opposite-direction sorted runs gives a bitonic sequence the next layer can collapse. Requires power-of-2 length — internally pads with +Infinity sentinels and trims, which is where the O(n) auxiliary comes from." },
 };
 
 // ── AlgoTooltip wrapper ───────────────────────────────────────────────────────
@@ -1491,6 +1614,7 @@ const SCENARIO_PRESETS = [
   { label: "O(n²) gallery", desc: "Quadratic sorts on small n", algos: ["insertion","selection","bubble","shell"], scenarios: ["random"] as BenchmarkScenario[], sizes: [100,500,1000,2000,5000], pivot: undefined, gaps: undefined },
   { label: "Space hogs", desc: "Memory usage across all complexities", algos: ["merge","timsort","logos","heap","quick","counting"], scenarios: ["random"] as BenchmarkScenario[], sizes: [1000,10000,100000,1000000], pivot: undefined, gaps: undefined },
   { label: "Duplicates stress", desc: "High-duplicate data — TimSort & counting shine", algos: ["logos","timsort","merge","quick","counting","radix"], scenarios: ["duplicates"] as BenchmarkScenario[], sizes: [10000,100000,1000000], pivot: undefined, gaps: undefined },
+  { label: "Polymorphic sweep", desc: "Each sort = one integer + float + string array, summed as one measurement (type-safe sorts only)", algos: ["logos","merge","quick","heap","insertion","shell"], scenarios: ["random"] as BenchmarkScenario[], sizes: [1000,10000,100000,500000], pivot: undefined, gaps: undefined, poly: true },
 ] as const;
 
 
@@ -2243,6 +2367,46 @@ function Chart3D({
     return () => canvas.removeEventListener("wheel", handler);
   }, []);
 
+  // ── Hotkeys: R resets the view; X/Y/Z snap to axis-aligned looks ─────────
+  // Only fires when the canvas is hovered, so the keys don't fight inputs
+  // elsewhere on the page. Axis-aligned views preserve zoom (the user may have
+  // zoomed in deliberately); R does a full reset.
+  // Conventions: pressing the axis letter looks ALONG that axis, so the named
+  // axis points INTO the screen. X view → see (n, space). Y → (time, space).
+  // Z → (time, n). This matches CAD-viewer convention.
+  const isHoveredRef = useRef(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!isHoveredRef.current) return;
+      // Don't steal keys while the user is typing in an input/textarea/select
+      // or in a contentEditable region elsewhere on the page.
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t?.isContentEditable) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return; // leave OS/browser shortcuts alone
+      const k = e.key.toLowerCase();
+      if (k === "r") {
+        e.preventDefault();
+        setRotX(28); setRotY(-40); setZoom(1);
+        setTool("measure"); setShowSurface(false); setHoverInfo(null);
+      } else if (k === "x") {
+        e.preventDefault();
+        // Look along +X: time axis points into the screen, see n (up) vs space.
+        setRotX(0); setRotY(90);
+      } else if (k === "y") {
+        e.preventDefault();
+        // Look along +Y from above: top-down view of time (x) vs space (z).
+        setRotX(90); setRotY(0);
+      } else if (k === "z") {
+        e.preventDefault();
+        // Look along +Z: head-on time (x) vs n (y), no depth.
+        setRotX(0); setRotY(0);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // Pinch-to-zoom + single-finger orbit via touch events.
   // touchAction: "none" in CSS tells the browser not to scroll/zoom natively,
   // so e.preventDefault() is not required here, but we call it for safety.
@@ -2345,16 +2509,530 @@ function Chart3D({
           touchAction: "none", userSelect: "none",
           cursor: tool === "orbit" ? (dragRef.current ? "grabbing" : "grab") : tool === "measure" ? (hoverInfo ? "pointer" : "crosshair") : "default" }}
         onMouseDown={onMouseDown} onMouseMove={onMouseMove}
-        onMouseUp={onMouseUp} onMouseLeave={() => { dragRef.current = null; setHoverInfo(null); }}
+        onMouseUp={onMouseUp}
+        onMouseEnter={() => { isHoveredRef.current = true; }}
+        onMouseLeave={() => { isHoveredRef.current = false; dragRef.current = null; setHoverInfo(null); }}
         onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
         onDragStart={e => e.preventDefault()}
       />
-      {/* Curtain hint */}
-      {showSurface && (
-        <p style={{ fontSize: 8, color: "var(--color-muted)", fontFamily: "monospace", marginTop: 4 }}>
-          curtains drop to the n-axis floor · rings on the floor = ∫f dn (larger = more cumulative work) · use ⊕ Measure to inspect any point
-        </p>
-      )}
+      {/* Hotkey + curtain hints. Hover the chart and press R / X / Y / Z. */}
+      <p style={{ fontSize: 8, color: "var(--color-muted)", fontFamily: "monospace", marginTop: 4 }}>
+        <span title="Hover the chart, then press a hotkey">
+          hover + <kbd style={kbdStyle}>R</kbd> reset · <kbd style={kbdStyle}>X</kbd>/<kbd style={kbdStyle}>Y</kbd>/<kbd style={kbdStyle}>Z</kbd> axis-aligned view
+        </span>
+        {showSurface && (
+          <> · curtains drop to the n-axis floor · rings on the floor = ∫f dn (larger = more cumulative work) · use ⊕ Measure to inspect any point</>
+        )}
+      </p>
+    </div>
+  );
+}
+
+// Shared style for the [R]/[X]/[Y]/[Z] hotkey hint chips. Defined at module
+// scope so both Chart3D and Chart3DHistory render identical-looking keys.
+const kbdStyle: React.CSSProperties = {
+  display: "inline-block", padding: "0 4px", fontFamily: "monospace", fontSize: 8,
+  border: "1px solid var(--color-border)", borderRadius: 3,
+  background: "var(--color-surface-1)", color: "var(--color-text)",
+  margin: "0 1px", lineHeight: "12px",
+};
+
+// ── Chart3DHistory ───────────────────────────────────────────────────────────
+// Long-term-view sibling of Chart3D. Renders the last N stored ghost runs
+// (per algorithm) as faded polylines in the same n/time/space axes Chart3D uses,
+// so the user can SEE drift: a band that drifts right = slower over time, a
+// band that widens = noisier over time, a band that stays tight = stable.
+//
+// Differences from Chart3D:
+//   - Source is ghostRuns + the current run, not just the current run.
+//   - Per-run opacity ramp: newest = full alpha, oldest = ~5%.
+//   - Modes: "all" (every selected algo, every visible run) for the wow-shot
+//     and "single" (one algo, every visible run) for actually reading drift.
+//   - A "Show last N" slider gates how many of the stored runs render — the
+//     storage cap is GHOST_MAX (100); rendering 100 polylines × 20 algos gets
+//     visually saturated fast, so the user usually wants 10-30 visible.
+//   - No surface curtains, no cumulative-work rings: those carry no signal
+//     across runs and just add noise. Per-point dots are kept small.
+//   - No depth-sort of ghost segments — at 100 runs × 20 algos that's the hot
+//     loop. Newer-on-top is enforced by draw order (oldest first, newest last).
+// ─────────────────────────────────────────────────────────────────────────────
+function Chart3DHistory({
+  current, ghostRuns, algos,
+}: {
+  /** The current (in-progress or just-completed) run, in the same shape as Chart3D's `data`.
+   *  Always rendered as the brightest, freshest layer if present. */
+  current: Record<string, { n: number; timeMs: number; spaceBytes?: number; timedOut?: boolean }[]>;
+  /** Persisted ring buffer per algo, oldest-first (idx 0) → newest-last. */
+  ghostRuns: Record<string, { ts: number; points: { n: number; timeMs: number; meanMs?: number; spaceBytes?: number }[] }[]>;
+  algos: string[];
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Orbit/zoom state — match Chart3D defaults so the first impression matches.
+  const [rotX, setRotX] = useState(28);
+  const [rotY, setRotY] = useState(-40);
+  const [zoom, setZoom] = useState(1.0);
+  const [tool, setTool] = useState<"orbit" | "measure">("orbit");
+  // "all" overlays every selected algo; "single" focuses one algo so the
+  // run-over-run drift band is actually legible.
+  const [mode, setMode] = useState<"all" | "single">("all");
+  const [focusAlgo, setFocusAlgo] = useState<string | null>(null);
+  // Visible-run cap is user-controlled; storage cap (GHOST_MAX) is 100.
+  // Persisted so the user's preferred density survives reload.
+  const [visibleRuns, setVisibleRuns] = useState<number>(20);
+  const visibleHydratedRef = useRef(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = localStorage.getItem("codecookbook.history3DVisibleRuns");
+      if (raw != null) {
+        const n = parseInt(raw, 10);
+        if (Number.isFinite(n) && n >= 1 && n <= 100) setVisibleRuns(n);
+      }
+    } catch {}
+    visibleHydratedRef.current = true;
+  }, []);
+  useEffect(() => {
+    if (typeof window === "undefined" || !visibleHydratedRef.current) return;
+    try { localStorage.setItem("codecookbook.history3DVisibleRuns", String(visibleRuns)); } catch {}
+  }, [visibleRuns]);
+
+  type HistPoint = { id: string; runIdx: number; ageRank: number; n: number; t: number; s: number; x: number; y: number; z: number };
+  const [hoverInfo, setHoverInfo] = useState<(HistPoint & { sx: number; sy: number }) | null>(null);
+  const dragRef = useRef<{ startX: number; startY: number; startRx: number; startRy: number } | null>(null);
+  const hitRef = useRef<(HistPoint & { sx: number; sy: number })[]>([]);
+
+  // Auto-pick a focus algo when entering single-mode if none chosen yet.
+  useEffect(() => {
+    if (mode === "single" && !focusAlgo && algos.length > 0) setFocusAlgo(algos[0]);
+  }, [mode, focusAlgo, algos]);
+
+  // Algos actually drawn this frame: scoped by mode.
+  const drawnAlgos = useMemo(() => {
+    if (mode === "single") return focusAlgo && algos.includes(focusAlgo) ? [focusAlgo] : [];
+    return algos;
+  }, [mode, focusAlgo, algos]);
+
+  // ── Build the run stacks per algo ────────────────────────────────────────
+  // Each algo's stack = [oldest ghost, ..., newest ghost, current?]. We take
+  // the LAST `visibleRuns` entries so newest stays visible if visibleRuns < total.
+  // ageRank 0 = oldest (most faded), ageRank=total-1 = newest (full alpha).
+  const { stacks, ranges } = useMemo(() => {
+    type Run = { points: { n: number; t: number; s: number }[]; isCurrent: boolean };
+    const stacks: Record<string, Run[]> = {};
+    const allN: number[] = []; const allT: number[] = []; const allS: number[] = [];
+
+    for (const id of drawnAlgos) {
+      const ghosts = ghostRuns[id] ?? [];
+      const stack: Run[] = [];
+      for (const g of ghosts) {
+        const pts = g.points
+          .filter(p => p.timeMs > 0 && (p.spaceBytes ?? 0) > 0)
+          .map(p => ({ n: p.n, t: p.timeMs, s: p.spaceBytes! }));
+        if (pts.length > 0) stack.push({ points: pts, isCurrent: false });
+      }
+      // Append the current run as the newest layer (it isn't in ghostRuns until
+      // it completes; this keeps the freshest measurements visible mid-run).
+      const cur = current[id] ?? [];
+      const curPts = cur
+        .filter(p => !p.timedOut && p.timeMs > 0 && (p.spaceBytes ?? 0) > 0)
+        .map(p => ({ n: p.n, t: p.timeMs, s: p.spaceBytes! }));
+      if (curPts.length > 0) stack.push({ points: curPts, isCurrent: true });
+
+      // Cap to the visible window — newest kept.
+      const trimmed = stack.length > visibleRuns ? stack.slice(stack.length - visibleRuns) : stack;
+      if (trimmed.length > 0) {
+        stacks[id] = trimmed;
+        for (const r of trimmed) for (const p of r.points) { allN.push(p.n); allT.push(p.t); allS.push(p.s); }
+      }
+    }
+
+    if (allN.length === 0) return { stacks, ranges: null };
+    const logNs = allN.map(Math.log10), logTs = allT.map(Math.log10), logSs = allS.map(Math.log10);
+    const ranges = {
+      n: [Math.min(...logNs), Math.max(...logNs)] as [number, number],
+      t: [Math.min(...logTs), Math.max(...logTs)] as [number, number],
+      s: [Math.min(...logSs), Math.max(...logSs)] as [number, number],
+    };
+    return { stacks, ranges };
+  }, [drawnAlgos, ghostRuns, current, visibleRuns]);
+
+  // Project 3D normalized-coord → 2D pixel — identical math to Chart3D.
+  const project = useCallback((x: number, y: number, z: number, W: number, H: number): [number, number] => {
+    const ryR = rotY * Math.PI / 180, rxR = rotX * Math.PI / 180;
+    const px = x - 0.5, py = y - 0.5, pz = z - 0.5;
+    const rx1 = px * Math.cos(ryR) + pz * Math.sin(ryR);
+    const rz1 = -px * Math.sin(ryR) + pz * Math.cos(ryR);
+    const ry2 = py * Math.cos(rxR) - rz1 * Math.sin(rxR);
+    const sc = Math.min(W, H) * 0.44 * zoom;
+    return [W / 2 + rx1 * sc, H / 2 - ry2 * sc];
+  }, [rotX, rotY, zoom]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !ranges) return;
+    const ctx = canvas.getContext("2d")!;
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    const pr = (x: number, y: number, z: number) => project(x, y, z, W, H);
+    const nr = (v: number, [lo, hi]: [number, number]) => hi > lo ? (v - lo) / (hi - lo) : 0.5;
+    const newHits: typeof hitRef.current = [];
+
+    // ── Box wireframe + axes (same convention as Chart3D) ───────────────────
+    const AXIS_X = "#ef5350", AXIS_Y = "#66bb6a", AXIS_Z = "#64b5f6";
+    const boxEdges: [number,number,number,number,number,number][] = [
+      [1,0,0,1,1,0],[1,0,0,1,0,1],[0,1,0,1,1,0],
+      [0,1,0,0,1,1],[1,1,0,1,1,1],[0,0,1,1,0,1],
+      [0,0,1,0,1,1],[1,0,1,1,1,1],[0,1,1,1,1,1],
+    ];
+    ctx.strokeStyle = "rgba(128,128,128,0.15)"; ctx.lineWidth = 0.5;
+    for (const [x0,y0,z0,x1,y1,z1] of boxEdges) {
+      const [ax,ay] = pr(x0,y0,z0); const [bx,by] = pr(x1,y1,z1);
+      ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.stroke();
+    }
+    const originAxes: [string, number,number,number, number,number,number][] = [
+      [AXIS_X, 0,0,0, 1,0,0],
+      [AXIS_Y, 0,0,0, 0,1,0],
+      [AXIS_Z, 0,0,0, 0,0,1],
+    ];
+    for (const [color, x0,y0,z0, x1,y1,z1] of originAxes) {
+      const [ax,ay] = pr(x0,y0,z0); const [bx,by] = pr(x1,y1,z1);
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.globalAlpha = 0.7;
+      ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.stroke();
+      const angle = Math.atan2(by - ay, bx - ax);
+      const AL = 7, AW = 3;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(bx, by);
+      ctx.lineTo(bx - AL * Math.cos(angle - AW / AL), by - AL * Math.sin(angle - AW / AL));
+      ctx.lineTo(bx - AL * Math.cos(angle + AW / AL), by - AL * Math.sin(angle + AW / AL));
+      ctx.closePath(); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.font = "bold 12px monospace";
+    ctx.globalAlpha = 0.9;
+    { const [lx,ly] = pr(1,0,0); ctx.fillStyle = AXIS_X; ctx.fillText("time →", lx + 5, ly + 4); }
+    { const [lx,ly] = pr(0,1,0); ctx.fillStyle = AXIS_Y; ctx.fillText("n ↑", lx + 4, ly - 5); }
+    { const [lx,ly] = pr(0,0,1); ctx.fillStyle = AXIS_Z; ctx.fillText("space", lx + 4, ly + 4); }
+    ctx.globalAlpha = 1; ctx.lineWidth = 0.5;
+
+    // Base grid (faint)
+    ctx.strokeStyle = "rgba(128,128,128,0.08)"; ctx.lineWidth = 0.5;
+    for (let i = 0; i <= 4; i++) {
+      const t = i / 4;
+      let [ax,ay] = pr(t,0,0); let [bx,by] = pr(t,0,1);
+      ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.stroke();
+      [ax,ay] = pr(0,0,t); [bx,by] = pr(1,0,t);
+      ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.stroke();
+    }
+
+    // Axis tick labels — same scale rendering as Chart3D so users can switch
+    // between the two views without re-reading the axes.
+    ctx.font = "9px monospace";
+    const TICKS = 4;
+    for (let i = 0; i <= TICKS; i++) {
+      const t = i / TICKS;
+      const [tx2,ty2] = pr(t,0,0);
+      ctx.fillStyle = "#ff0000"; ctx.globalAlpha = 0.7;
+      ctx.fillText(fmtTime(Math.pow(10, ranges.t[0] + t*(ranges.t[1]-ranges.t[0]))), tx2-16, ty2+12);
+      const [nx,ny] = pr(0,t,0);
+      ctx.fillStyle = "#00cc44";
+      ctx.fillText(fmtN(Math.pow(10, ranges.n[0] + t*(ranges.n[1]-ranges.n[0]))), nx-34, ny+4);
+      const [sx2,sy2] = pr(0,0,t);
+      ctx.fillStyle = "#4488ff";
+      ctx.fillText(fmtBytes(Math.pow(10, ranges.s[0] + t*(ranges.s[1]-ranges.s[0]))), sx2+5, sy2+3);
+    }
+    ctx.globalAlpha = 1;
+
+    // ── Draw history runs ───────────────────────────────────────────────────
+    // For each algo: render each run as a polyline + tiny dots, with opacity
+    // ramping by recency. The CURRENT run gets a thicker line + larger dots
+    // so the user can always pick out "where we are now" inside the band.
+    for (const id of drawnAlgos) {
+      const stack = stacks[id]; if (!stack || stack.length === 0) continue;
+      const color = ALGO_COLORS[id] ?? "#888";
+      const total = stack.length;
+      for (let ri = 0; ri < total; ri++) {
+        const run = stack[ri];
+        // ageRank: 0 = oldest in the visible window, total-1 = newest.
+        const ageFactor = (ri + 1) / total; // 1/n .. 1
+        // Floor at 5% so even the oldest visible run leaves a faint trail;
+        // newest peaks at 90% non-current, 100% if it IS the current run.
+        const baseAlpha = 0.05 + 0.85 * ageFactor;
+        const alpha = run.isCurrent ? 1.0 : baseAlpha;
+        const lineWidth = run.isCurrent ? 2.2 : (0.6 + 0.9 * ageFactor);
+        const dotR = run.isCurrent ? 2.5 : (0.8 + 1.2 * ageFactor);
+
+        // Project + sort points by n so the polyline reads left→right along Y axis.
+        const sorted = [...run.points].sort((a, b) => a.n - b.n).map(p => ({
+          ...p,
+          x: nr(Math.log10(p.t), ranges.t),
+          y: nr(Math.log10(p.n), ranges.n),
+          z: nr(Math.log10(p.s), ranges.s),
+        }));
+
+        // Polyline
+        ctx.globalAlpha = alpha;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = lineWidth;
+        ctx.beginPath();
+        sorted.forEach((p, i) => { const [px,py] = pr(p.x,p.y,p.z); i===0?ctx.moveTo(px,py):ctx.lineTo(px,py); });
+        ctx.stroke();
+
+        // Dots (also feeds the measure-tool hit list)
+        ctx.fillStyle = color;
+        for (const p of sorted) {
+          const [px,py] = pr(p.x,p.y,p.z);
+          ctx.beginPath(); ctx.arc(px, py, dotR, 0, Math.PI*2); ctx.fill();
+          // Only register hits for measure mode at alpha that's actually readable;
+          // ghosts at 5% opacity are visual context, not interactive targets.
+          if (alpha >= 0.4) newHits.push({ id, runIdx: ri, ageRank: ri, n: p.n, t: p.t, s: p.s, x: p.x, y: p.y, z: p.z, sx: px, sy: py });
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // ── Measure tooltip ─────────────────────────────────────────────────────
+    if (hoverInfo && tool === "measure") {
+      const { sx, sy, id, n, t, s, runIdx, ageRank } = hoverInfo;
+      const total = stacks[id]?.length ?? 0;
+      const ageLabel = runIdx === total - 1 ? "current" : `${total - 1 - ageRank} run${total - 1 - ageRank === 1 ? "" : "s"} ago`;
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(sx, sy, 7, 0, Math.PI*2); ctx.stroke();
+      const lines = [
+        ALGO_NAMES[id] ?? id,
+        `n = ${fmtN(n)}`,
+        `t = ${fmtTime(t)}`,
+        `s = ${fmtBytes(s)}`,
+        ageLabel,
+      ];
+      const LINE_H = 16, PAD = 10;
+      const bW = 160, bH = lines.length * LINE_H + PAD * 1.5;
+      const bx = Math.min(sx + 14, W - bW - 4), by = Math.max(sy - bH - 10, 4);
+      ctx.fillStyle = "rgba(10,10,10,0.94)";
+      ctx.strokeStyle = "rgba(255,255,255,0.18)"; ctx.lineWidth = 0.7;
+      ctx.beginPath(); ctx.roundRect?.(bx, by, bW, bH, 5) ?? ctx.rect(bx, by, bW, bH);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = ALGO_COLORS[id] ?? "#fff"; ctx.font = "bold 12px monospace";
+      ctx.fillText(lines[0], bx + PAD, by + PAD + 8);
+      ctx.fillStyle = "#ddd"; ctx.font = "11px monospace";
+      lines.slice(1).forEach((line, i) => ctx.fillText(line, bx + PAD, by + PAD + 8 + (i + 1) * LINE_H));
+    }
+
+    hitRef.current = newHits;
+  }, [stacks, ranges, drawnAlgos, rotX, rotY, zoom, project, tool, hoverInfo]);
+
+  // ── Pointer interactions ────────────────────────────────────────────────
+  const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (tool === "orbit") {
+      e.preventDefault();
+      dragRef.current = { startX: e.clientX, startY: e.clientY, startRx: rotX, startRy: rotY };
+    }
+  };
+  const onMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (dragRef.current && tool === "orbit") {
+      setRotY(dragRef.current.startRy + (e.clientX - dragRef.current.startX) * 0.5);
+      setRotX(Math.max(-85, Math.min(85, dragRef.current.startRx - (e.clientY - dragRef.current.startY) * 0.5)));
+      return;
+    }
+    if (tool === "measure") {
+      const canvas = canvasRef.current!;
+      const rect = canvas.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const my = (e.clientY - rect.top) * (canvas.height / rect.height);
+      let best = null as typeof hitRef.current[0] | null, bestD = Infinity;
+      for (const h of hitRef.current) {
+        const d = Math.hypot(h.sx - mx, h.sy - my);
+        if (d < bestD) { bestD = d; best = h; }
+      }
+      setHoverInfo(bestD < 22 ? best : null);
+    }
+  };
+  const onMouseUp = () => { dragRef.current = null; };
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const handler = (e: WheelEvent) => {
+      e.preventDefault();
+      setZoom(z => Math.max(0.3, Math.min(4, z * (1 - e.deltaY * 0.0008))));
+    };
+    canvas.addEventListener("wheel", handler, { passive: false });
+    return () => canvas.removeEventListener("wheel", handler);
+  }, []);
+
+  // Hotkeys — same convention as Chart3D. R = full reset; X/Y/Z snap to
+  // axis-aligned views (preserving zoom so the user keeps their current
+  // magnification). Only fires while the canvas is hovered.
+  const isHoveredRef = useRef(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!isHoveredRef.current) return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t?.isContentEditable) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const k = e.key.toLowerCase();
+      if (k === "r") {
+        e.preventDefault();
+        setRotX(28); setRotY(-40); setZoom(1);
+        setTool("orbit"); setHoverInfo(null);
+      } else if (k === "x") {
+        e.preventDefault(); setRotX(0); setRotY(90);
+      } else if (k === "y") {
+        e.preventDefault(); setRotX(90); setRotY(0);
+      } else if (k === "z") {
+        e.preventDefault(); setRotX(0); setRotY(0);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Pinch + single-finger orbit (same as Chart3D).
+  const pinchDistRef = useRef<number | null>(null);
+  const onTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    const ts = Array.from(e.touches);
+    if (ts.length === 2) {
+      pinchDistRef.current = Math.hypot(ts[1].clientX - ts[0].clientX, ts[1].clientY - ts[0].clientY);
+      dragRef.current = null;
+    } else if (ts.length === 1) {
+      dragRef.current = { startX: ts[0].clientX, startY: ts[0].clientY, startRx: rotX, startRy: rotY };
+      pinchDistRef.current = null;
+    }
+  };
+  const onTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    const ts = Array.from(e.touches);
+    if (ts.length === 2 && pinchDistRef.current !== null) {
+      const dist = Math.hypot(ts[1].clientX - ts[0].clientX, ts[1].clientY - ts[0].clientY);
+      setZoom(z => Math.max(0.3, Math.min(4, z * (dist / pinchDistRef.current!))));
+      pinchDistRef.current = dist;
+    } else if (ts.length === 1 && dragRef.current) {
+      const t = ts[0];
+      setRotY(dragRef.current.startRy + (t.clientX - dragRef.current.startX) * 0.5);
+      setRotX(Math.max(-85, Math.min(85, dragRef.current.startRx - (t.clientY - dragRef.current.startY) * 0.5)));
+    }
+  };
+  const onTouchEnd = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length < 2) pinchDistRef.current = null;
+    if (e.touches.length === 0) dragRef.current = null;
+  };
+
+  // Total stored count (across selected algos) for the "X of Y stored" hint.
+  const totalStored = useMemo(() => {
+    if (mode === "single") return focusAlgo ? (ghostRuns[focusAlgo]?.length ?? 0) : 0;
+    return drawnAlgos.reduce((s, id) => Math.max(s, ghostRuns[id]?.length ?? 0), 0);
+  }, [mode, focusAlgo, drawnAlgos, ghostRuns]);
+
+  if (!ranges) return (
+    <div style={{ height: 320, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--color-muted)", fontSize: 11, textAlign: "center", padding: 16 }}>
+      Run a benchmark to populate the history.<br/>
+      Each completed run adds one polyline; up to 100 are kept per algorithm.
+    </div>
+  );
+
+  return (
+    <div>
+      {/* Top control row */}
+      <div style={{ display: "flex", gap: 5, marginBottom: 8, alignItems: "center", flexWrap: "wrap" }}>
+        {/* Mode toggle */}
+        <div style={{ display: "flex", borderRadius: 4, overflow: "hidden", border: "1px solid var(--color-border)" }}>
+          {(["all", "single"] as const).map(m => (
+            <button key={m} onClick={() => setMode(m)} style={{
+              padding: "2px 8px", fontSize: 9, cursor: "pointer", border: "none",
+              background: mode === m ? "var(--color-accent)" : "var(--color-surface-1)",
+              color: mode === m ? "#fff" : "var(--color-muted)",
+              fontWeight: mode === m ? 600 : 400,
+            }}>{m === "all" ? "All algos" : "Single algo"}</button>
+          ))}
+        </div>
+
+        {/* Algo picker — only relevant in single-mode */}
+        {mode === "single" && (
+          <select
+            value={focusAlgo ?? ""}
+            onChange={e => setFocusAlgo(e.target.value || null)}
+            style={{
+              padding: "2px 6px", fontSize: 9, borderRadius: 4, cursor: "pointer",
+              background: "var(--color-surface-1)", border: "1px solid var(--color-border)", color: "var(--color-text)",
+            }}
+          >
+            {algos.map(id => (
+              <option key={id} value={id} style={{ color: ALGO_COLORS[id] ?? "#888" }}>
+                {ALGO_NAMES[id] ?? id}
+              </option>
+            ))}
+          </select>
+        )}
+
+        {/* Tool toggle */}
+        {([
+          { id: "orbit"  , label: "⟳ Orbit",   title: "Drag to orbit · scroll/pinch to zoom" },
+          { id: "measure", label: "⊕ Measure", title: "Hover over a point to inspect its n / time / space + run age" },
+        ] as const).map(tb => (
+          <button key={tb.id} onClick={() => setTool(tb.id)} title={tb.title} style={{
+            padding: "2px 8px", fontSize: 9, borderRadius: 4, cursor: "pointer",
+            background: tool === tb.id ? "var(--color-accent)" : "var(--color-surface-1)",
+            border: `1px solid ${tool === tb.id ? "var(--color-accent)" : "var(--color-border)"}`,
+            color: tool === tb.id ? "#fff" : "var(--color-muted)",
+          }}>{tb.label}</button>
+        ))}
+
+        <button onClick={() => { setRotX(28); setRotY(-40); setZoom(1); }} style={{
+          padding: "2px 8px", fontSize: 9, borderRadius: 4, cursor: "pointer",
+          background: "var(--color-surface-1)", border: "1px solid var(--color-border)", color: "var(--color-muted)",
+        }}>⟲ Reset view</button>
+        <button onClick={() => {
+          const c = canvasRef.current; if (!c) return;
+          const a = document.createElement("a");
+          a.href = c.toDataURL("image/png");
+          a.download = "benchmark-3d-history.png";
+          a.click();
+        }} style={{
+          padding: "2px 8px", fontSize: 9, borderRadius: 4, cursor: "pointer",
+          background: "var(--color-surface-1)", border: "1px solid var(--color-border)", color: "var(--color-muted)",
+        }}>↓ PNG</button>
+      </div>
+
+      {/* Show-last-N slider — this is the "visible cap" knob the user asked for.
+          Storage cap stays at GHOST_MAX=100; this just gates how many render. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <span style={{ fontSize: 9, color: "var(--color-muted)", fontFamily: "monospace", minWidth: 86 }}>
+          Show last <strong style={{ color: "var(--color-text)" }}>{visibleRuns}</strong>
+        </span>
+        <input
+          type="range" min={1} max={100} step={1}
+          value={visibleRuns}
+          onChange={e => setVisibleRuns(parseInt(e.target.value, 10))}
+          style={{ flex: 1, cursor: "pointer" }}
+          title="How many of the most recent stored runs to draw. Storage cap is 100."
+        />
+        <span style={{ fontSize: 9, color: "var(--color-muted)", fontFamily: "monospace", minWidth: 64, textAlign: "right" }}>
+          of {totalStored} stored
+        </span>
+      </div>
+
+      <canvas
+        ref={canvasRef} width={800} height={420}
+        style={{ width: "100%", height: "auto", aspectRatio: "800 / 420", display: "block",
+          touchAction: "none", userSelect: "none",
+          cursor: tool === "orbit" ? (dragRef.current ? "grabbing" : "grab") : (hoverInfo ? "pointer" : "crosshair") }}
+        onMouseDown={onMouseDown} onMouseMove={onMouseMove}
+        onMouseUp={onMouseUp}
+        onMouseEnter={() => { isHoveredRef.current = true; }}
+        onMouseLeave={() => { isHoveredRef.current = false; dragRef.current = null; setHoverInfo(null); }}
+        onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
+        onDragStart={e => e.preventDefault()}
+      />
+
+      <p style={{ fontSize: 8, color: "var(--color-muted)", fontFamily: "monospace", marginTop: 4 }}>
+        each polyline = one completed run · newest at full brightness, oldest at ~5% · current run drawn thicker · drift right over time = slower · band widening over time = noisier
+        <br/>
+        <span title="Hover the chart, then press a hotkey">
+          hover + <kbd style={kbdStyle}>R</kbd> reset · <kbd style={kbdStyle}>X</kbd>/<kbd style={kbdStyle}>Y</kbd>/<kbd style={kbdStyle}>Z</kbd> axis-aligned view
+        </span>
+      </p>
     </div>
   );
 }
@@ -2407,8 +3085,10 @@ function LiveMemoryChart({
   const iW = VW - pL - pR;
   const iH = VH - pT - pB;
 
-  // Top-level view mode: combined timeline (default) or per-algorithm drill-in.
-  const [view, setView] = useState<"timeline" | "perAlgo">("timeline");
+  // Top-level view mode: combined timeline (default), per-algorithm drill-in,
+  // or a stacked overlay where every algorithm's series is time-aligned to
+  // start at 0s — useful for comparing memory-growth profiles head-to-head.
+  const [view, setView] = useState<"timeline" | "perAlgo" | "stacked">("timeline");
   // Currently inspected algorithm in per-algo mode. Auto-selects the first
   // available algo when switching tabs if nothing is selected yet.
   const [focusAlgo, setFocusAlgo] = useState<string | null>(null);
@@ -2499,9 +3179,9 @@ function LiveMemoryChart({
           Live memory usage
           {!isRunning && <span style={{ marginLeft: 6, opacity: 0.6, fontStyle: "italic", textTransform: "none", letterSpacing: 0 }}>(from last run)</span>}
         </p>
-        {/* View tabs — Timeline (combined) vs Per-algorithm (drill-in) */}
+        {/* View tabs — Timeline · Per-algorithm · Stacked (time-aligned overlay) */}
         <div style={{ display: "inline-flex", borderRadius: 5, border: "1px solid var(--color-border)", overflow: "hidden" }}>
-          {(["timeline", "perAlgo"] as const).map((v, i) => (
+          {(["timeline", "perAlgo", "stacked"] as const).map((v, i) => (
             <button
               key={v}
               onClick={() => {
@@ -2519,7 +3199,7 @@ function LiveMemoryChart({
                 fontWeight: view === v ? 600 : 400,
               }}
             >
-              {v === "timeline" ? "Timeline" : "Per-algorithm"}
+              {v === "timeline" ? "Timeline" : v === "perAlgo" ? "Per-algorithm" : "Stacked @ 0s"}
             </button>
           ))}
         </div>
@@ -2702,6 +3382,109 @@ function LiveMemoryChart({
         </div>
       )}
 
+      {/* ───── Stacked view — every algorithm's series time-aligned to 0s ──── */}
+      {view === "stacked" && (() => {
+        // Group all samples by algoId, sorted by ts. Each algo's run-window is
+        // re-baselined so its first sample sits at t=0s; the y-value is the
+        // delta from that algo's own starting heap, so memory-growth shapes
+        // overlay cleanly regardless of how high the global heap had drifted.
+        const byAlgo = new Map<string, MemSample[]>();
+        for (const s of samples) {
+          if (!s.algoId) continue;
+          const arr = byAlgo.get(s.algoId);
+          if (arr) arr.push(s); else byAlgo.set(s.algoId, [s]);
+        }
+        const series = [...byAlgo.entries()]
+          .map(([id, arr]) => {
+            const sorted = [...arr].sort((a, b) => a.ts - b.ts);
+            const t0a = sorted[0].ts;
+            const used0 = sorted[0].used;
+            const pts = sorted.map(s => ({ t: s.ts - t0a, d: s.used - used0 }));
+            return { id, color: ALGO_COLORS[id] ?? "#888", pts };
+          })
+          .filter(s => s.pts.length > 1);
+
+        if (series.length === 0) {
+          return (
+            <p style={{ fontSize: 11, color: "var(--color-muted)", marginTop: 12, fontFamily: "monospace", fontStyle: "italic" }}>
+              Not enough samples yet — algorithms need at least two memory samples each.
+            </p>
+          );
+        }
+
+        const xMax = Math.max(...series.flatMap(s => s.pts.map(p => p.t))) || 1;
+        const dMin = Math.min(0, ...series.flatMap(s => s.pts.map(p => p.d)));
+        const dMax = Math.max(0, ...series.flatMap(s => s.pts.map(p => p.d)));
+        const dRange = Math.max(1, dMax - dMin);
+        const sxS = (t: number) => pL + (t / xMax) * iW;
+        const syS = (d: number) => pT + iH - ((d - dMin) / dRange) * iH;
+
+        // Axes: 5 ticks each.
+        const yTicksS = [0, 0.25, 0.5, 0.75, 1].map(f => {
+          const v = dMin + f * dRange;
+          return { v, y: syS(v) };
+        });
+        const xTicksS = Array.from({ length: 5 }, (_, i) => {
+          const t = (xMax * i) / 4;
+          return { t, x: sxS(t), label: `${(t / 1000).toFixed(2)}s` };
+        });
+
+        return (
+          <div className="mt-2">
+            <p className="text-xs mb-2" style={{ color: "var(--color-muted)", fontFamily: "monospace" }}>
+              Each algorithm&apos;s window re-zeroed to t=0s; y = heap growth from that algorithm&apos;s starting point.
+            </p>
+            <svg viewBox={`0 0 ${VW} ${VH}`} preserveAspectRatio="none" style={{ width: "100%", height: "auto", display: "block" }}>
+              <rect x={pL} y={pT} width={iW} height={iH} fill="var(--color-surface-1)" />
+              {yTicksS.map((tk, i) => (
+                <g key={`yS${i}`}>
+                  <line x1={pL} y1={tk.y} x2={pL + iW} y2={tk.y} stroke="var(--color-border)" strokeWidth={0.5} opacity={0.5} />
+                  <text x={pL - 6} y={tk.y + 3} textAnchor="end" fontSize={8.5} fontFamily="monospace" fill="var(--color-muted)">
+                    {tk.v > 0 ? "+" : ""}{fmtBytes(tk.v)}
+                  </text>
+                </g>
+              ))}
+              {xTicksS.map((tk, i) => (
+                <g key={`xS${i}`}>
+                  <line x1={tk.x} y1={pT + iH} x2={tk.x} y2={pT + iH + 3} stroke="var(--color-border)" strokeWidth={0.5} />
+                  <text x={tk.x} y={pT + iH + 14} textAnchor="middle" fontSize={8.5} fontFamily="monospace" fill="var(--color-muted)">{tk.label}</text>
+                </g>
+              ))}
+              {/* Zero-Δ reference line */}
+              {dMin < 0 && dMax > 0 && (
+                <line x1={pL} y1={syS(0)} x2={pL + iW} y2={syS(0)} stroke="var(--color-muted)" strokeWidth={0.75} strokeDasharray="3 3" opacity={0.5} />
+              )}
+              {/* One colored polyline per algorithm */}
+              {series.map(s => {
+                const d = `M${s.pts.map(p => `${sxS(p.t).toFixed(1)},${syS(p.d).toFixed(1)}`).join(" L")}`;
+                return (
+                  <g key={s.id}>
+                    <path d={d} fill="none" stroke={s.color} strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" />
+                    <circle cx={sxS(s.pts[s.pts.length - 1].t)} cy={syS(s.pts[s.pts.length - 1].d)} r={2.2} fill={s.color} />
+                  </g>
+                );
+              })}
+            </svg>
+            {/* Legend with each algo's peak delta */}
+            <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2" style={{ fontFamily: "monospace", fontSize: 10 }}>
+              {series.map(s => {
+                const peakD = Math.max(...s.pts.map(p => p.d));
+                const dur = s.pts[s.pts.length - 1].t;
+                return (
+                  <span key={s.id} className="inline-flex items-center gap-1" title={`${ALGO_NAMES[s.id] ?? s.id}: ran ${(dur/1000).toFixed(2)}s, peak Δ ${fmtBytes(peakD)}`}>
+                    <span style={{ width: 8, height: 8, borderRadius: 2, background: s.color, display: "inline-block" }} />
+                    <span style={{ color: "var(--color-text)" }}>{ALGO_NAMES[s.id] ?? s.id}</span>
+                    <span style={{ color: "var(--color-muted)" }}>
+                      {(dur/1000).toFixed(2)}s · peak {peakD >= 0 ? "+" : ""}{fmtBytes(peakD)}
+                    </span>
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ───── Per-algorithm view (drill-in) ──────────────────────────────── */}
       {view === "perAlgo" && (() => {
         if (!focusAlgo || algoStats.length === 0) {
@@ -2762,6 +3545,12 @@ function LiveMemoryChart({
         };
         const headlineActual = lookupActual(maxN);
         const theoreticalAux = maxN > 0 ? theoreticalSpaceBytes(focusAlgo, maxN) : 0;
+        // In-place verdict from aux ÷ n. Instrumented allocBytes is the
+        // authoritative signal; heapDeltaBytes (only set when a REAL heap
+        // delta was observed, never theoretical fallback) backstops the
+        // instrumentation's blind spots (spread, engine-internal scratch).
+        const verdictPt = algoCurvePts.find(p => p.n === maxN);
+        const verdict = inPlaceVerdict(verdictPt?.allocBytes, verdictPt?.heapDeltaBytes, maxN);
 
         // Isolated chart for just this algo
         const localT0 = aStart.ts;
@@ -2790,6 +3579,14 @@ function LiveMemoryChart({
               <p style={{ fontSize: 13, fontWeight: 700, color: "var(--color-text)" }}>
                 {ALGO_NAMES[focusAlgo] ?? focusAlgo}
               </p>
+              {verdict && (
+                <span
+                  title={verdict.title}
+                  style={{ fontSize: 9, fontFamily: "monospace", fontWeight: 700, padding: "1px 7px", borderRadius: 10, background: verdict.bg, color: verdict.color, cursor: "help" }}
+                >
+                  {verdict.label}
+                </span>
+              )}
               <span style={{ fontSize: 9, fontFamily: "monospace", color: "var(--color-muted)", marginLeft: "auto" }}>
                 {algoSamples.length.toLocaleString()} samples · {duration.toFixed(2)}s on-CPU
               </span>
@@ -3856,17 +4653,26 @@ function MathPanel({
 type Status = "idle" | "running" | "done";
 
 // algoId → array of (n, time, space) measurements across different input sizes
-type CurvePoint = {
+export type CurvePoint = {
   n: number;
   timeMs: number;         // best post-warmup round (used for ranking)
   meanMs?: number;        // mean of post-warmup rounds
   stdDev?: number;        // std dev of post-warmup rounds (for error bands)
   roundTimes?: number[];  // all post-warmup round times (for variance timeline)
-  spaceBytes?: number;    // performance.memory heap delta (often 0 for fast sorts)
+  // `spaceBytes` may carry EITHER an actual heap-delta measurement OR a
+  // theoretical estimate from theoreticalSpaceBytes() when the heap-delta
+  // pass produced no signal. Existing chart code consumes it as a single
+  // "space" value for ranking and display, which is fine.
+  spaceBytes?: number;
+  // `heapDeltaBytes` is the REAL performance.memory delta only — undefined
+  // when the heap-delta pass produced no measurable growth (or perf.memory
+  // wasn't available). Kept distinct so the in-place verdict doesn't accuse
+  // an algorithm of allocating based on a theoretical estimate.
+  heapDeltaBytes?: number;
   allocBytes?: number;    // instrumented alloc count via measureAllocBytes
   timedOut?: boolean;
 };
-type CurveData = Record<string, CurvePoint[]>;
+export type CurveData = Record<string, CurvePoint[]>;
 
 interface SummaryResult {
   id: string;
@@ -4115,7 +4921,7 @@ function LiveRankPanel({
   );
 }
 
-function CurveChart({
+export function CurveChart({
   data,
   sizes,
   algos,
@@ -4871,7 +5677,7 @@ const overlayBtnBase: React.CSSProperties = btn("secondary", {
               // idx=0 is the oldest, idx=total-1 is the newest.
               // Linear fade from 90% (newest) down toward 5% (oldest), spread
               // evenly across the stored runs so the relative ordering is
-              // visually obvious even at the full GHOST_MAX of 20 entries.
+              // visually obvious even at the full GHOST_MAX of 100 entries.
               const ageFactor = (idx + 1) / total; // 1/n .. 1
               const opacity = (0.05 + 0.85 * ageFactor) * (isHl ? 1 : 0.25);
               // Build the polyline using the ghost run's (n, value) points.
@@ -5641,7 +6447,7 @@ function playBeep(timeMs: number) {
 }
 
 function AlgoMiniCard({
-  id, steps, benchData, isActive, rank, spaceRank, showBoth, loop, maxSpaceBytes, maxTotalSteps, onStop, pulseEnabled, onTogglePulse, failed,
+  id, steps, benchData, isActive, rank, spaceRank, showBoth, loop, maxSpaceBytes, maxTotalSteps, onStop, pulseEnabled, onTogglePulse, failed, wasmExecuted, webgpuExecuted,
 }: {
   id: string;
   steps: SortStep[] | null;
@@ -5658,6 +6464,10 @@ function AlgoMiniCard({
   onTogglePulse?: () => void;
   /** Sort produced out-of-order output — annotate the card as unreliable. */
   failed?: boolean;
+  /** This algorithm ran via the Wasm engine — stamp a "Wasm" badge on the card. */
+  wasmExecuted?: boolean;
+  /** This algorithm ran via a WebGPU compute pipeline — stamp a "GPU" badge on the card. */
+  webgpuExecuted?: boolean;
 }) {
   const [stepIdx, setStepIdx] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -5738,6 +6548,28 @@ function AlgoMiniCard({
             color: "#ef5350", flexShrink: 0,
           }}>
             ✗ BROKEN
+          </span>
+        )}
+        {wasmExecuted && (
+          <span title="This algorithm ran via the AssemblyScript-compiled Wasm module (int32 port). Marshalling cost is included in the timing." style={{
+            fontSize: 7, fontWeight: 700, fontFamily: "monospace",
+            padding: "1px 5px", borderRadius: 3, whiteSpace: "nowrap",
+            background: "rgba(124,106,247,0.18)",
+            border: "1px solid rgba(124,106,247,0.55)",
+            color: "var(--color-accent)", flexShrink: 0,
+          }}>
+            Wasm
+          </span>
+        )}
+        {webgpuExecuted && (
+          <span title="This algorithm ran via a WebGPU compute pipeline (int32). Buffer copy-in / copy-out cost is included in the timing." style={{
+            fontSize: 7, fontWeight: 700, fontFamily: "monospace",
+            padding: "1px 5px", borderRadius: 3, whiteSpace: "nowrap",
+            background: "rgba(34,197,194,0.18)",
+            border: "1px solid rgba(34,197,194,0.55)",
+            color: "#0e9b96", flexShrink: 0,
+          }}>
+            GPU
           </span>
         )}
         {rank !== null && rank <= 3 && (
@@ -5957,6 +6789,536 @@ function cacheLevel(id: string, n: number): { label: string; color: string } {
   return { label: "RAM", color: "#ef5350" };
 }
 
+// ── Churn Mode UI ─────────────────────────────────────────────────────────
+// The pulsing-sphere indicator + the live telemetry panel that fills in below
+// it while churn is active. Pure presentational: the parent owns all state.
+
+/** The toggle button itself: pulsating + blinking sphere in a transparent red
+ *  box. Inactive state is a dim outline that still reads as "Churn Mode" so
+ *  the affordance is obvious without ambient animation distracting the user. */
+function ChurnIndicator({
+  active, complete, onToggle, disabled, probeCount, probesPerSec,
+}: {
+  active: boolean;
+  /** True once every selected algo has saturated. The sphere quiets, the
+   *  red box softens, and the badge flips to "sweep complete" — but the
+   *  toggle stays enabled so the user can stop / re-arm at will. */
+  complete: boolean;
+  onToggle: () => void;
+  disabled: boolean;
+  probeCount: number;
+  probesPerSec: number;
+}) {
+  return (
+    <button
+      onClick={onToggle}
+      disabled={disabled}
+      title={disabled
+        ? "Select at least one algorithm to start Churn Mode"
+        : complete
+          ? "Sweep complete — every selected algo has saturated. Click to stop, or add more algos to your selection to resume."
+          : active
+            ? "Stop the adaptive stress test"
+            : "Start adaptive stress test: probes selected algos at randomized sizes, adapting per-algo on timeouts"}
+      // While complete, drop the red-glow box class — the panel reads as
+      // "done", not "alarming". Active+incomplete keeps the original look.
+      className={active && !complete ? "cc-churn-box" : ""}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 8,
+        padding: "4px 10px", borderRadius: 6, fontSize: 10,
+        fontFamily: "var(--font-mono)", cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.45 : 1,
+        ...(active && complete ? {
+          // Sweep-complete look: muted teal/green border, no pulse.
+          border: "1.5px solid rgba(77, 182, 172, 0.55)",
+          background: "rgba(77, 182, 172, 0.08)",
+        } : active ? {} : {
+          // Inactive: simple outline that hints at red.
+          border: "1.5px solid rgba(220, 38, 38, 0.30)",
+          background: "rgba(220, 38, 38, 0.025)",
+        }),
+        color: "var(--color-text)",
+        userSelect: "none",
+        transition: "background 200ms, border-color 200ms",
+      }}
+    >
+      <span
+        className="cc-churn-sphere"
+        style={
+          !active ? {
+            // Inactive: dim ember.
+            animation: "none",
+            background: "radial-gradient(circle at 30% 30%, #b85050 0%, #7a2020 60%, #401010 100%)",
+            opacity: 0.55,
+          } : complete ? {
+            // Sweep complete: stop the pulse, switch the sphere to teal so
+            // it reads as "settled" rather than "still working".
+            animation: "none",
+            background: "radial-gradient(circle at 30% 30%, #80cbc4 0%, #4db6ac 60%, #00695c 100%)",
+            opacity: 0.9,
+          } : undefined
+        }
+        aria-hidden
+      />
+      <span style={{ fontWeight: 600, letterSpacing: 0.3 }}>
+        Churn Mode
+      </span>
+      {active && complete && (
+        <span style={{ color: "#4db6ac", fontSize: 9, marginLeft: 2, fontWeight: 700 }}>
+          ✓ sweep complete
+          <span style={{ color: "var(--color-muted)", fontWeight: 400, marginLeft: 6 }}>
+            {probeCount}<span style={{ opacity: 0.55 }}> probes</span>
+          </span>
+        </span>
+      )}
+      {active && !complete && (
+        <span style={{ color: "var(--color-muted)", fontSize: 9, marginLeft: 2 }}>
+          {probeCount}<span style={{ opacity: 0.55 }}> probes</span>
+          {" · "}
+          {probesPerSec.toFixed(1)}<span style={{ opacity: 0.55 }}>/s</span>
+        </span>
+      )}
+    </button>
+  );
+}
+
+/** A small SVG line chart for sparkline-style displays inside the churn
+ *  dashboard. Values get normalized to fill the height; an optional log scale
+ *  is useful for ceiling history (which spans CHURN_N_MIN..CHURN_N_MAX over
+ *  several decades). The last point gets a small filled dot so the "current"
+ *  value is easy to find without reading the right edge. */
+function ChurnSpark({ values, w, h, color, log = false, baseline }: {
+  values: number[];
+  w: number; h: number; color: string;
+  log?: boolean;
+  /** Optional horizontal reference line at this raw value (e.g. CHURN_BUDGET_MS). */
+  baseline?: number;
+}) {
+  if (values.length < 2) {
+    return (
+      <svg width={w} height={h} aria-hidden style={{ display: "block" }}>
+        <line x1={0} y1={h - 1} x2={w} y2={h - 1} stroke="var(--color-border)" strokeWidth={0.5} />
+      </svg>
+    );
+  }
+  const t = (v: number) => log ? Math.log10(Math.max(1, v)) : v;
+  const ts = values.map(t);
+  const min = Math.min(...ts), max = Math.max(...ts);
+  const range = max - min || 1;
+  const sx = (i: number) => (values.length === 1 ? 0 : (i / (values.length - 1)) * (w - 2)) + 1;
+  const sy = (v: number) => h - 1 - ((t(v) - min) / range) * (h - 2);
+  const points = values.map((v, i) => `${sx(i).toFixed(1)},${sy(v).toFixed(1)}`).join(" ");
+  const baselineY = baseline != null ? sy(baseline) : null;
+  // Filled area under the line for visual weight at sparkline sizes.
+  const areaPoints = `${sx(0)},${h - 0.5} ${points} ${sx(values.length - 1)},${h - 0.5}`;
+  return (
+    <svg width={w} height={h} aria-hidden style={{ display: "block" }}>
+      <polygon points={areaPoints} fill={color} opacity={0.12} />
+      {baselineY != null && baselineY >= 0 && baselineY <= h && (
+        <line x1={0} y1={baselineY} x2={w} y2={baselineY} stroke="#dc2626" strokeWidth={0.5} strokeDasharray="2 2" opacity={0.5} />
+      )}
+      <polyline points={points} fill="none" stroke={color} strokeWidth={1.2} strokeLinejoin="round" />
+      <circle cx={sx(values.length - 1)} cy={sy(values[values.length - 1])} r={1.6} fill={color} />
+    </svg>
+  );
+}
+
+/** 20-bin log-spaced histogram of probe sizes — shows COVERAGE. Each cell's
+ *  fill intensity is proportional to probe count in that bin, so dense bins
+ *  saturate while unexplored ones stay near-empty. A reader can see at a
+ *  glance "we've been hammering 1k..100k but never went above that". */
+function ChurnNCoverageBar({ history, w, h, color, min, max }: {
+  history: { n: number; timedOut: boolean }[];
+  w: number; h: number; color: string;
+  min: number; max: number;
+}) {
+  const BINS = 20;
+  const logMin = Math.log10(min), logMax = Math.log10(max);
+  const span = logMax - logMin || 1;
+  const counts = new Array<number>(BINS).fill(0);
+  const tCounts = new Array<number>(BINS).fill(0);
+  for (const r of history) {
+    const lr = Math.log10(Math.max(min, Math.min(max, r.n)));
+    const bin = Math.min(BINS - 1, Math.max(0, Math.floor(((lr - logMin) / span) * BINS)));
+    counts[bin]++;
+    if (r.timedOut) tCounts[bin]++;
+  }
+  const maxCount = Math.max(1, ...counts);
+  const cellW = w / BINS;
+  return (
+    <svg width={w} height={h} aria-hidden style={{ display: "block" }}>
+      {/* Cell backgrounds give the gradient feel even for empty cells. */}
+      {counts.map((c, i) => {
+        const intensity = c / maxCount;
+        return (
+          <rect
+            key={i}
+            x={i * cellW}
+            y={0}
+            width={cellW - 0.5}
+            height={h}
+            fill={color}
+            opacity={0.06 + intensity * 0.85}
+          />
+        );
+      })}
+      {/* Timeout overlay — a small red stripe along the top of any bin where
+          probes have ever timed out. Makes failure regions pop without
+          obscuring the count. */}
+      {tCounts.map((tc, i) => tc > 0 ? (
+        <rect
+          key={`t${i}`}
+          x={i * cellW}
+          y={0}
+          width={cellW - 0.5}
+          height={2}
+          fill="#dc2626"
+          opacity={Math.min(1, 0.4 + (tc / Math.max(1, counts[i])) * 0.6)}
+        />
+      ) : null)}
+    </svg>
+  );
+}
+
+/** Last K probes as a scatter — x is recency (right = newest), y is log(timeMs),
+ *  red dot if the probe exceeded the budget. The budget line is drawn dashed
+ *  so the user can see how close probes have been to the cliff. */
+function ChurnRecentProbes({ history, w, h, color, budget }: {
+  history: { timeMs: number; timedOut: boolean }[];
+  w: number; h: number; color: string;
+  budget: number;
+}) {
+  if (history.length === 0) return <svg width={w} height={h} aria-hidden style={{ display: "block" }} />;
+  // Use the latter half of the buffer so the scatter shows "what's happening NOW".
+  const tail = history.slice(Math.max(0, history.length - 30));
+  const times = tail.map(r => Math.max(0.001, r.timeMs));
+  // Y-scale: log, capped at budget × 1.25 so timeouts are visibly above the line.
+  const yMax = Math.log10(Math.max(budget * 1.25, ...times));
+  const yMin = Math.log10(Math.max(0.001, Math.min(...times)));
+  const yRange = (yMax - yMin) || 1;
+  const sy = (v: number) => h - 1 - ((Math.log10(Math.max(0.001, v)) - yMin) / yRange) * (h - 2);
+  const sx = (i: number) => (tail.length === 1 ? w / 2 : (i / (tail.length - 1)) * (w - 4)) + 2;
+  const budgetY = sy(budget);
+  return (
+    <svg width={w} height={h} aria-hidden style={{ display: "block" }}>
+      {budgetY >= 0 && budgetY <= h && (
+        <line x1={0} y1={budgetY} x2={w} y2={budgetY} stroke="#dc2626" strokeWidth={0.5} strokeDasharray="2 3" opacity={0.55} />
+      )}
+      {tail.map((r, i) => (
+        <circle
+          key={i}
+          cx={sx(i)}
+          cy={r.timedOut ? Math.min(budgetY, sy(r.timeMs)) - 1 : sy(r.timeMs)}
+          r={r.timedOut ? 2 : 1.4}
+          fill={r.timedOut ? "#dc2626" : color}
+          opacity={0.35 + 0.65 * ((i + 1) / tail.length)}
+        />
+      ))}
+    </svg>
+  );
+}
+
+/** Live readout of per-algo adaptive state while churn is running.
+ *
+ *  Each algo row is a vertical stack of four micro-visualizations so the
+ *  ongoing stress test reads like a tape-deck level meter for that algorithm:
+ *
+ *    color swatch · name · ceiling · samples ⚠timeouts · last
+ *    ┌─ ceiling history (log y) ─────────── 80 probes ────────┐
+ *    └─ recent probes (log y, dashed = budget) ── last 30 ────┘
+ *    ┌─ n-coverage 20-bin heatmap ── 64 … 5M ─────────────────┐
+ *
+ *  Each strip tells the user a different thing:
+ *    - Ceiling history shows the AIMD reacting (drops on timeouts, climbs
+ *      on fast finishes).
+ *    - Recent probes scatter shows whether the algorithm's timing is stable
+ *      or wildly varying at the sizes the AIMD is probing.
+ *    - Coverage bar shows where in n-space probes have actually landed —
+ *      gaps mean the algorithm hasn't explored those sizes.
+ */
+function ChurnTelemetry({
+  state, history, totals, algoNames, algoColors, runtimeMs, budgetMs, nMin, nMax, samplesPerLevel, complete,
+}: {
+  state: Record<string, {
+    currentLevel: number;
+    samplesAtLevel: number;
+    saturated: boolean;
+    maxCompletedLevel: number;
+    samples: number;
+    timeouts: number;
+    lastTimeMs: number | null;
+    lastN: number | null;
+  }>;
+  /** Rolling per-algo probe history, oldest first. */
+  history: Record<string, { ts: number; n: number; timeMs: number; timedOut: boolean; ceiling: number }[]>;
+  totals: { probes: number; timeouts: number };
+  algoNames: Record<string, string>;
+  algoColors: Record<string, string>;
+  runtimeMs: number;
+  /** Per-probe budget — drawn as a dashed line on the recent-probes scatter. */
+  budgetMs: number;
+  /** Bounds of the n-coverage axis (log-spaced bins). */
+  nMin: number; nMax: number;
+  /** How many samples are taken at each level before doubling. Used for the
+   *  "3 / 5" progress chip in the stats line. */
+  samplesPerLevel: number;
+  /** Sweep-complete flag — drives the green completion banner at the top
+   *  of the telemetry block and the "completed at" timing in the header. */
+  complete: boolean;
+}) {
+  const entries = Object.entries(state).sort((a, b) => b[1].samples - a[1].samples);
+  const fmtRuntime = (ms: number) => {
+    const s = Math.floor(ms / 1000);
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+    return h > 0 ? `${h}h ${m}m ${ss}s` : m > 0 ? `${m}m ${ss}s` : `${ss}s`;
+  };
+  const SPARK_W = 200, CEIL_H = 22, PROBE_H = 22, COVER_H = 8;
+
+  // Final tally — derived once when the sweep finishes so the banner can
+  // surface "what each algo got to before timing out" without scrolling.
+  const tally = complete && entries.length > 0
+    ? entries
+        .map(([id, s]) => ({ id, maxN: s.maxCompletedLevel || s.currentLevel, samples: s.samples }))
+        .sort((a, b) => b.maxN - a.maxN)
+    : null;
+
+  return (
+    <div style={{ fontFamily: "var(--font-mono)", fontSize: 9 }}>
+      {/* Sweep-complete banner — only when the pool is fully saturated. Lists
+          each algo with its max-completed n in descending order so the user
+          immediately sees the "ranking by ceiling". */}
+      {complete && tally && (
+        <div
+          style={{
+            background: "rgba(77, 182, 172, 0.08)",
+            border: "1px solid rgba(77, 182, 172, 0.55)",
+            borderRadius: 4,
+            padding: "5px 8px",
+            marginBottom: 8,
+            color: "var(--color-text)",
+          }}
+        >
+          <div style={{ fontSize: 9, fontWeight: 700, color: "#4db6ac", letterSpacing: "0.05em", marginBottom: 4 }}>
+            ✓ SWEEP COMPLETE
+            <span style={{ color: "var(--color-muted)", fontWeight: 400, marginLeft: 6 }}>
+              all {tally.length} algo{tally.length !== 1 ? "s" : ""} saturated · {totals.probes} probes · {fmtRuntime(runtimeMs)}
+            </span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "2px 10px" }}>
+            {tally.map(t => (
+              <span key={t.id} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <span style={{ width: 6, height: 6, borderRadius: "50%", background: algoColors[t.id] ?? "#888" }} />
+                <span style={{ color: algoColors[t.id] ?? "#fff", fontWeight: 600 }}>
+                  {(algoNames[t.id] ?? t.id).replace(" Sort", "")}
+                </span>
+                <span style={{ color: "var(--color-muted)" }}>max n={fmtN(t.maxN)}</span>
+              </span>
+            ))}
+          </div>
+          <div style={{ fontSize: 8, color: "var(--color-muted)", marginTop: 4, opacity: 0.85 }}>
+            Add an algorithm to your selection to resume sweeping the new one.
+          </div>
+        </div>
+      )}
+
+      {/* Header row — totals + runtime always visible. */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", color: "var(--color-muted)", marginBottom: 8, paddingBottom: 4, borderBottom: "1px dashed var(--color-border)" }}>
+        <span>
+          {complete ? "completed in " : "running for "}<strong style={{ color: "var(--color-text)" }}>{fmtRuntime(runtimeMs)}</strong>
+          {totals.probes > 0 && runtimeMs > 500 && (
+            <span style={{ opacity: 0.6 }}> · {((totals.probes / Math.max(1, runtimeMs / 1000))).toFixed(1)}/s</span>
+          )}
+        </span>
+        <span>
+          <strong style={{ color: "var(--color-text)" }}>{totals.probes}</strong> probes ·{" "}
+          <strong style={{ color: totals.timeouts > 0 ? "#dc2626" : "var(--color-text)" }}>{totals.timeouts}</strong> timed out
+          {totals.probes > 0 && totals.timeouts > 0 && (
+            <span style={{ color: "#dc2626", opacity: 0.7 }}> ({Math.round((totals.timeouts / totals.probes) * 100)}%)</span>
+          )}
+        </span>
+      </div>
+
+      {entries.length === 0 ? (
+        <div style={{ color: "var(--color-muted)", padding: "12px 4px", textAlign: "center" }}>
+          waiting for first probe…
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {entries.map(([id, s]) => {
+            const color = algoColors[id] ?? "#888";
+            const lastMs = s.lastTimeMs;
+            const lastN = s.lastN;
+            const hist = history[id] ?? [];
+            const ceilingSeries = hist.map(r => r.ceiling);
+            const timeoutRate = s.samples > 0 ? s.timeouts / s.samples : 0;
+            return (
+              <div key={id} style={{ paddingBottom: 6, borderBottom: "1px dashed var(--color-border)" }}>
+                {/* Stats line — header reads:
+                    ● Name      [saturated · max N] OR [n=64 · 3/5 samples]   N probes  ⚠T   ↳ last */}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, fontSize: 9, flexWrap: "wrap" }}>
+                  <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, display: "inline-block", flexShrink: 0 }} />
+                  <span style={{ color, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 130 }}>
+                    {algoNames[id] ?? id}
+                  </span>
+                  {s.saturated ? (
+                    <span style={{ color: "#dc2626", fontWeight: 600 }} title={`Hit ${budgetMs}ms timeout; drift-sampling previously explored levels (max completed: n=${s.maxCompletedLevel || s.currentLevel})`}>
+                      ⊘ saturated · max n={fmtN(s.maxCompletedLevel || s.currentLevel)}
+                    </span>
+                  ) : (
+                    <span style={{ color: "var(--color-text)", fontFamily: "monospace" }} title={`Currently probing at n=${s.currentLevel.toLocaleString()}; advances after ${samplesPerLevel} samples`}>
+                      probing <strong>n={fmtN(s.currentLevel)}</strong>
+                      <span style={{ color: "var(--color-muted)", marginLeft: 4 }}>
+                        {s.samplesAtLevel}/{samplesPerLevel}
+                      </span>
+                    </span>
+                  )}
+                  <span style={{ color: "var(--color-muted)", marginLeft: "auto" }}>· {s.samples} probes</span>
+                  {s.timeouts > 0 && (
+                    <span style={{ color: "#dc2626" }} title={`${(timeoutRate * 100).toFixed(0)}% timeout rate`}>
+                      ⚠{s.timeouts}
+                    </span>
+                  )}
+                  {lastN != null && lastMs != null && (
+                    <span style={{ color: "var(--color-muted)" }} title="most recent probe">
+                      ↳ n={fmtN(lastN)} · {fmtTime(lastMs)}
+                    </span>
+                  )}
+                </div>
+
+                {/* Visualization grid: two rows of sparklines + a coverage bar. */}
+                <div style={{ display: "grid", gridTemplateColumns: "60px 1fr", gap: 4, alignItems: "center" }}>
+                  <span style={{ fontSize: 7, color: "var(--color-muted)", textAlign: "right" }} title="The probe-n level the sweep has reached, sampled after each probe. Stair-steps up by 2× whenever 5 clean samples complete; flatlines once the algo saturates.">level</span>
+                  <ChurnSpark values={ceilingSeries} w={SPARK_W} h={CEIL_H} color={color} log />
+
+                  <span style={{ fontSize: 7, color: "var(--color-muted)", textAlign: "right" }} title="Last 30 probe times. Dashed red = budget; red dots = timeouts.">probes</span>
+                  <ChurnRecentProbes history={hist} w={SPARK_W} h={PROBE_H} color={color} budget={budgetMs} />
+
+                  <span style={{ fontSize: 7, color: "var(--color-muted)", textAlign: "right" }} title="20 log-spaced n bins; darker = more probes. Red stripe = timeouts in that bin.">n coverage</span>
+                  <ChurnNCoverageBar history={hist} w={SPARK_W} h={COVER_H} color={color} min={nMin} max={nMax} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Axis legend for the coverage bar — needs at least one row of data to
+          have a meaningful range, so we only render once probes have come in. */}
+      {entries.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "60px 1fr", gap: 4, alignItems: "center", marginTop: 6, fontSize: 7, color: "var(--color-muted)" }}>
+          <span style={{ textAlign: "right" }} />
+          <div style={{ display: "flex", justifyContent: "space-between" }}>
+            <span>{fmtN(nMin)}</span>
+            <span style={{ opacity: 0.5 }}>{fmtN(Math.round(Math.sqrt(nMin * nMax)))}</span>
+            <span>{fmtN(nMax)}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Session data export / import ──────────────────────────────────────────
+// Pulled out of the component so the serializers are testable in isolation
+// and reusable if we ever want a CLI exporter. Schema includes a `format`
+// version tag so we can evolve it without silently corrupting older snapshots
+// during import — the import path explicitly checks this string.
+
+const SESSION_DATA_FORMAT = "codecookbook-session-v1";
+
+interface ExportedSessionData {
+  format: typeof SESSION_DATA_FORMAT;
+  exportedAt: string;
+  sessionLog: SessionLog;
+  winnerLog: WinnerLog;
+  ghostRuns: Record<string, Array<{ ts: number; points: Array<{ n: number; timeMs: number; meanMs?: number; spaceBytes?: number }> }>>;
+}
+
+/** JSON export — full fidelity: every store the session aggregates read from.
+ *  Re-importable round-trip with no data loss. */
+function buildSessionDataJson(
+  sessionLog: SessionLog,
+  winnerLog: WinnerLog,
+  ghostRuns: Record<string, Array<{ ts: number; points: Array<{ n: number; timeMs: number; meanMs?: number; spaceBytes?: number }> }>>,
+): string {
+  const payload: ExportedSessionData = {
+    format: SESSION_DATA_FORMAT,
+    exportedAt: new Date().toISOString(),
+    sessionLog,
+    winnerLog,
+    ghostRuns,
+  };
+  return JSON.stringify(payload, null, 2);
+}
+
+/** CSV export — flattens sessionLog into one row per (dataType, algo, n).
+ *  This is the analytical view: pandas / spreadsheets can load it directly.
+ *  Winner log and ghost runs aren't included (different shape; the JSON
+ *  export is the right tool when you need them). */
+function buildSessionDataCsv(sessionLog: SessionLog): string {
+  const rows: string[] = ["dataType,algo,n,meanTimeMs,meanSpaceBytes,runs"];
+  // Stable ordering so two exports of the same data produce identical files —
+  // makes diffing exports across time meaningful.
+  for (const dt of Object.keys(sessionLog).sort()) {
+    const byAlgo = sessionLog[dt] ?? {};
+    for (const algo of Object.keys(byAlgo).sort()) {
+      const byN = byAlgo[algo] ?? {};
+      const numericNs = Object.keys(byN).map(Number).filter(n => Number.isFinite(n)).sort((a, b) => a - b);
+      for (const n of numericNs) {
+        const pt = byN[String(n)];
+        if (!pt) continue;
+        rows.push(`${dt},${algo},${n},${pt.meanTimeMs},${pt.meanSpaceBytes},${pt.runs}`);
+      }
+    }
+  }
+  return rows.join("\n") + "\n";
+}
+
+/** Trigger a browser download for the given text content. Same Blob/anchor
+ *  pattern the SortNetworkGraph exports use — adding the anchor to DOM is
+ *  required by Firefox for the click to actually trigger the download. */
+function downloadSessionBlob(content: string, filename: string, mimeType: string): void {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+/** Validate + parse an imported file. Returns the parsed payload or an
+ *  error string suitable for surfacing in the toolbar. The schema check is
+ *  conservative — we'd rather refuse a partially-valid file than silently
+ *  re-hydrate state with junk fields that crash the renderers downstream. */
+function parseSessionDataJson(text: string): { ok: true; data: ExportedSessionData } | { ok: false; error: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    return { ok: false, error: `Not valid JSON (${e instanceof Error ? e.message : "parse error"})` };
+  }
+  if (typeof parsed !== "object" || parsed == null) {
+    return { ok: false, error: "Expected a JSON object at the top level" };
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (obj.format !== SESSION_DATA_FORMAT) {
+    return { ok: false, error: `Unknown format "${String(obj.format)}" — expected "${SESSION_DATA_FORMAT}"` };
+  }
+  if (typeof obj.sessionLog !== "object" || obj.sessionLog == null) {
+    return { ok: false, error: "Missing sessionLog field" };
+  }
+  if (typeof obj.winnerLog !== "object" || obj.winnerLog == null) {
+    return { ok: false, error: "Missing winnerLog field" };
+  }
+  if (typeof obj.ghostRuns !== "object" || obj.ghostRuns == null) {
+    return { ok: false, error: "Missing ghostRuns field" };
+  }
+  return { ok: true, data: obj as unknown as ExportedSessionData };
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function BenchmarkVisualizer() {
@@ -5984,7 +7346,7 @@ export default function BenchmarkVisualizer() {
   // wall-clock budget is marked `timedOut` and the algo is excluded from larger n.
   // Disabling removes the cap entirely — useful for long-running benchmarks.
   const [timeoutEnabled, setTimeoutEnabled] = useState(true);
-  const [timeoutSec, setTimeoutSec] = useState(10);
+  const [timeoutSec, setTimeoutSec] = useState(3);
   const [selected, setSelected] = useState<Set<string>>(
     new Set(["logos", "adaptive", "timsort"])
   );
@@ -6001,11 +7363,15 @@ export default function BenchmarkVisualizer() {
   // samples persist after the run so the user can review the timeline.
   const [memSamples, setMemSamples] = useState<MemSample[]>([]);
   // ── Ghost mode ─────────────────────────────────────────────────────────────
-  // Persisted ring buffer (last 20 runs per algorithm) of (n, timeMs, spaceBytes)
+  // Persisted ring buffer (last 100 runs per algorithm) of (n, timeMs, spaceBytes)
   // tuples. When ghostMode is enabled, the curve chart draws these past runs as
   // progressively-faded polylines underneath the current curves so the user
   // can see how the algorithm's measured performance has drifted across runs.
-  const GHOST_MAX = 20;
+  // The 3D history view (Chart3DHistory, bottom of left pane) also reads this
+  // buffer — with a UI slider controlling how many of the stored runs render.
+  // At ~30 bytes/point × ~8 sizes × ~20 algos × 100 runs ≈ 480 KB worst case,
+  // well under the localStorage budget.
+  const GHOST_MAX = 100;
   type GhostPoint = { n: number; timeMs: number; meanMs?: number; spaceBytes?: number };
   type GhostRun = { ts: number; points: GhostPoint[] };
   const [ghostRuns, setGhostRuns] = useState<Record<string, GhostRun[]>>({});
@@ -6013,6 +7379,98 @@ export default function BenchmarkVisualizer() {
   // Hydrated-after-mount guard so the initial empty state doesn't clobber the
   // stored history before the load effect runs.
   const ghostHydratedRef = useRef(false);
+
+  // ── Churn Mode ─────────────────────────────────────────────────────────────
+  // An always-on adaptive stress test. While active, a background setTimeout
+  // loop sporadically probes a random algo with a random n drawn from that
+  // algo's adaptive range. The range shrinks when a probe times out
+  // (multiplicative decrease) and grows when probes finish well under budget
+  // (additive increase) — classic AIMD, but per-algorithm so slow algos
+  // converge to a smaller window while fast ones explore further out.
+  //
+  // Probe results stream into the same curveDataExt buffer the regular
+  // benchmark fills, and a periodic flush bundles probe batches into ghostRuns
+  // entries — so the 2D curve overlay, 3D history surface, and rankings all
+  // light up automatically without separate plumbing.
+  // Adaptive sweep state. Each algorithm starts at CHURN_N_MIN, takes
+  // CHURN_SAMPLES_PER_LEVEL probes at that n, then doubles to the next level.
+  // When any probe exceeds CHURN_BUDGET_MS the algorithm is marked saturated —
+  // no further advancement, but its already-explored levels stay in the pool
+  // for drift sampling.
+  type ChurnAlgoState = {
+    /** The n the algo is currently being probed at. Doubles on advance. */
+    currentLevel: number;
+    /** How many probes have completed at currentLevel (0..CHURN_SAMPLES_PER_LEVEL). */
+    samplesAtLevel: number;
+    /** Set true when a probe exceeds CHURN_BUDGET_MS. No more advancement;
+     *  drift sampling continues at previously-explored levels. */
+    saturated: boolean;
+    /** Largest level that completed without timeout — the algo's empirical
+     *  ceiling under the current engine/data conditions. */
+    maxCompletedLevel: number;
+    /** Distinct levels we've collected at least one sample for. Used to pick
+     *  a drift-sampling n for saturated algos. */
+    exploredLevels: number[];
+    /** Total probes for this algo this churn session. */
+    samples: number;
+    /** Total timeouts for this algo this churn session. */
+    timeouts: number;
+    /** Wall-time ms of the most recent probe. */
+    lastTimeMs: number | null;
+    /** The n of the most recent probe. */
+    lastN: number | null;
+  };
+  const CHURN_N_MIN = 64;
+  const CHURN_N_MAX = 5_000_000;
+  // Take this many probes at each level before doubling to the next.
+  // 5 gives enough samples for a sane mean while still moving up briskly.
+  const CHURN_SAMPLES_PER_LEVEL = 5;
+  // Per-probe budget — a single probe exceeding this saturates the algo.
+  // 5s is generous enough that the slowest comparison sorts at large n still
+  // have a chance to complete; anything past 5s isn't worth chasing further.
+  const CHURN_BUDGET_MS = 5000;
+  // After saturating, this fraction of probes for that algo sample randomly
+  // from the explored-levels set for drift detection. The rest cycle to
+  // non-saturated algos so unfinished sweeps keep progressing.
+  const CHURN_DRIFT_SAMPLE_PROB = 0.25;
+  const CHURN_TICK_MIN_MS = 60;            // jittered spacing between probes
+  const CHURN_TICK_MAX_MS = 350;
+  // Tightened from the original 8s / 4-point gate — churn now feels "live":
+  // the rankings table, network graph, session views, and 3D History all see
+  // updates roughly every 2 seconds (or every 2 buffered probes, whichever
+  // comes first). The cost is 4× more setState calls, but the renderers are
+  // already memoized where it matters.
+  const CHURN_FLUSH_INTERVAL_MS = 2_000;
+  const CHURN_FLUSH_MIN_POINTS  = 2;
+  const [churnMode, setChurnMode] = useState(false);
+  const [churnState, setChurnState] = useState<Record<string, ChurnAlgoState>>({});
+  const [churnTotals, setChurnTotals] = useState<{ probes: number; timeouts: number; startedAt: number | null; lastProbeAt: number | null }>({
+    probes: 0, timeouts: 0, startedAt: null, lastProbeAt: null,
+  });
+  // Rolling per-algo probe history for the live visualization. Capped per algo
+  // so old probes age out — the dashboard is "what's happened recently", not
+  // "everything ever" (ghostRuns is the permanent record).
+  type ChurnProbeRecord = { ts: number; n: number; timeMs: number; timedOut: boolean; ceiling: number };
+  const CHURN_HIST_PER_ALGO = 80;
+  const [churnHistory, setChurnHistory] = useState<Record<string, ChurnProbeRecord[]>>({});
+  // Sweep-completion flag — true when every algo in the pool has saturated.
+  // State drives UI rendering; ref drives the tick's short-circuit gate (refs
+  // see the latest value without waiting for the next React render).
+  const [churnComplete, setChurnComplete] = useState(false);
+  const churnCompleteRef = useRef(false);
+  // Ref-mirrors so the loop closure reads the freshest values without being
+  // re-spun every render. The loop schedules itself; React state changes can't
+  // be allowed to cancel mid-cycle every time numbers update.
+  const churnActiveRef = useRef(false);
+  const churnTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const churnStateRef = useRef<Record<string, ChurnAlgoState>>({});
+  const churnHistoryRef = useRef<Record<string, ChurnProbeRecord[]>>({});
+  // Per-algo buffer of probe points waiting to be flushed to ghostRuns. We
+  // batch so a typical hour of churn produces a sane number of polylines
+  // rather than thousands of one-point entries.
+  const churnAccumRef = useRef<Record<string, Array<{ n: number; timeMs: number; spaceBytes: number; ts: number }>>>({});
+  const churnLastFlushRef = useRef<number>(0);
+
   const [curveData, setCurveData] = useState<CurveData>({});
   const [currentN, setCurrentN] = useState<number | null>(null);
   const [currentAlgo, setCurrentAlgo] = useState<string | null>(null);
@@ -6059,6 +7517,140 @@ export default function BenchmarkVisualizer() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [chartMode, setChartMode] = useState<"time" | "space" | "ratio" | "space-ratio" | "3d" | "memory" | "product">("time");
   const [adversarialEnabled, setAdversarialEnabled] = useState(true);
+  // Polymorphic sweep: when on, each measured sort sorts an integer + float +
+  // string array, summed as one timing. Set by the advanced "Polymorphic" preset.
+  const [polymorphicMode, setPolymorphicMode] = useState(false);
+  // Timestamp when the current run started — used by the dashboard to compute
+  // a live ETA from elapsed × (remaining / done). Cleared in reset().
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  // "Notify when done" — fires a Web Notification (with title-bar fallback)
+  // when the run finishes. Permission is requested when the user enables it
+  // from the dashboard.
+  const [notifyOnDone, setNotifyOnDone] = useState(false);
+  // Sort engine: V8 (the JS implementations) or Wasm (the AssemblyScript
+  // module in /public/wasm-sorts/sorts.wasm). The Wasm bundle is loaded lazily
+  // on mount; if it's missing the toggle stays disabled and the dispatch
+  // silently falls back to V8.
+  const [engine, setEngine] = useState<"v8" | "wasm" | "webgpu">("v8");
+  const [wasmBundle, setWasmBundle] = useState<WasmSortBundle | null>(null);
+  // WebGPU bundle: either a ready handle (adapter + device + per-algo wrappers)
+  // or a "missing" marker that carries the diagnostic reason (browser lacks
+  // the API, no adapter, adapter request threw, etc.) for the status banner.
+  // On v1 the `byId` map is empty — detection + badge plumbing is wired but
+  // no GPU kernels have been ported yet. Dispatch falls through to V8 for any
+  // algorithm whose id isn't in WEBGPU_SUPPORTED.
+  const [webgpuBundle, setWebgpuBundle] = useState<WebGpuSortBundle | { ready: false; reason: string } | null>(null);
+  // Per-run set of algorithm ids that ACTUALLY executed via Wasm (engine was
+  // "wasm" AND the algo is in WASM_SUPPORTED AND dataType was integer). Used
+  // to tag results rows + mini cards with a "Wasm" badge — non-supported
+  // algos fall through to V8 even when the engine pill is on, so we can't
+  // just key off the engine state alone.
+  const [wasmExecutedAlgos, setWasmExecutedAlgos] = useState<Set<string>>(new Set());
+  // Same idea for the WebGPU badge — a per-run set populated only when the
+  // dispatch actually routed through a GPU wrapper. Today this stays empty
+  // (no kernels) and the badge never appears; it'll start populating the
+  // moment a sort gets ported and added to WEBGPU_SUPPORTED.
+  const [webgpuExecutedAlgos, setWebgpuExecutedAlgos] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    let cancelled = false;
+    getWasmSorts().then(b => { if (!cancelled && b.ready) setWasmBundle(b); });
+    // WebGPU hydration: we keep BOTH the ready and missing states (unlike
+    // Wasm, which only keeps the ready handle) so the status banner can
+    // distinguish "browser doesn't support it" from "haven't checked yet".
+    getWebgpuSorts().then(b => { if (!cancelled) setWebgpuBundle(b); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Toggle "notify when done": enabling asks for the Notification permission
+  // (if it hasn't been answered yet); if the user denies, the toggle still
+  // enables — the title-bar fallback in the firing effect will pick it up.
+  const toggleNotifyOnDone = useCallback(async () => {
+    if (notifyOnDone) { setNotifyOnDone(false); return; }
+    setNotifyOnDone(true);
+    try {
+      if (typeof Notification !== "undefined" && Notification.permission === "default") {
+        await Notification.requestPermission();
+      }
+    } catch { /* swallow */ }
+  }, [notifyOnDone]);
+
+  // Fire a "benchmark complete" notification when the run finishes, if the
+  // user toggled "Notify when done" in the dashboard. Falls back to a
+  // title-bar flash when Notifications are unavailable or denied.
+  const prevStatusForNotifyRef = useRef<"idle" | "running" | "done">("idle");
+  useEffect(() => {
+    const prev = prevStatusForNotifyRef.current;
+    prevStatusForNotifyRef.current = status as "idle" | "running" | "done";
+    if (prev !== "running" || status !== "done" || !notifyOnDone) return;
+    const title = "Benchmark complete";
+    const body = `Done at ${new Date().toLocaleTimeString()}`;
+    const fireTitleFallback = () => {
+      if (typeof document === "undefined") return;
+      const orig = document.title;
+      document.title = `✓ ${title} — ${orig}`;
+      const restore = () => {
+        document.title = orig;
+        document.removeEventListener("visibilitychange", restore);
+        window.removeEventListener("focus", restore);
+      };
+      document.addEventListener("visibilitychange", restore);
+      window.addEventListener("focus", restore);
+    };
+    try {
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+        new Notification(title, { body });
+        return;
+      }
+    } catch { /* swallow */ }
+    fireTitleFallback();
+  }, [status, notifyOnDone]);
+  // Duplicate input each round (default ON). ON copies each round's shared input
+  // into a reused scratch array (correct, fair, low-allocation). OFF sorts the
+  // shared input in place (lowest memory, diagnostic — see the toggle's note).
+  const [duplicatePerRound, setDuplicatePerRound] = useState(true);
+  // Persisted running log of winners across runs, broken out by data type.
+  // Each successful (algo, size) point from a run contributes one sample to a
+  // rolling average keyed by (dataType, algoId, size). Hydrated after mount
+  // to avoid SSR mismatch, then written back to localStorage on each update.
+  const [winnerLog, setWinnerLog] = useState<WinnerLog>({});
+  const winnerLogHydratedRef = useRef(false);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("codecookbook.winnerLog");
+      if (raw) setWinnerLog(JSON.parse(raw) as WinnerLog);
+    } catch { /* ignore parse / quota errors */ }
+    winnerLogHydratedRef.current = true;
+  }, []);
+  // Session-wide curve log: per (dataType, algoId, n) we store rolling means of
+  // timing and aux memory, persisted to localStorage so the SessionCurves view
+  // accumulates across every benchmark run the user has done in this session.
+  const [sessionLog, setSessionLog] = useState<SessionLog>({});
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("codecookbook.sessionLog");
+      if (raw) setSessionLog(JSON.parse(raw) as SessionLog);
+    } catch { /* ignore parse / quota errors */ }
+  }, []);
+  // Status message for the Session-data toolbar's Import button. Auto-clears
+  // after ~4 s so the toolbar doesn't keep stale messaging stuck on screen.
+  const [sessionImportMsg, setSessionImportMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  useEffect(() => {
+    if (!sessionImportMsg) return;
+    const t = setTimeout(() => setSessionImportMsg(null), 4000);
+    return () => clearTimeout(t);
+  }, [sessionImportMsg]);
+  // Session totals — count of completed runs + first-run timestamp. Both
+  // persisted; the timestamp seeds the "session age" readout in the summary.
+  const [runCount, setRunCount] = useState(0);
+  const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null);
+  useEffect(() => {
+    try {
+      const c = localStorage.getItem("codecookbook.runCount");
+      if (c) setRunCount(Number(c) || 0);
+      const a = localStorage.getItem("codecookbook.sessionStartedAt");
+      if (a) setSessionStartedAt(Number(a) || null);
+    } catch { /* ignore */ }
+  }, []);
   const [miniCardSort, setMiniCardSort] = useState<"time" | "space" | "both">("time");
   const [customInput, setCustomInput] = useState("");
   const [pendingCustomN, setPendingCustomN] = useState<number | null>(null);
@@ -6068,6 +7660,10 @@ export default function BenchmarkVisualizer() {
   // signed 32-bit range instead of the legacy [0, 10000) range.
   const [intUniqueOnly, setIntUniqueOnly] = useState(false);
   const [intFullInt32, setIntFullInt32] = useState(false);
+  // Value distribution for the "random" scenario (uniform, normal, exponential,
+  // bimodal). Affects integer + float generation; the other scenarios have
+  // fixed structural semantics and ignore it.
+  const [valueDist, setValueDist] = useState<ValueDistribution>("uniform");
   const [quickPivot, setQuickPivot] = useState<QuickPivot>("median3");
   const [shellGaps, setShellGaps] = useState<ShellGaps>("ciura");
   const [dataType, setDataType] = useState<DataType>("integer");
@@ -6352,6 +7948,61 @@ export default function BenchmarkVisualizer() {
   const sortedSizes = [...selectedSizes].sort((a, b) => a - b);
   const activeAlgos = [...selected].filter(id => !slowDisabled(id));
 
+  // ── Derived "what we know about each (algo, dtype, n)" memos ────────────
+  // These read from the persistent sessionLog so the config card can show
+  // long-term averages rather than just current-run values. Both rebuild
+  // when sessionLog changes (i.e., after every flushed churn batch or run).
+
+  /** For each n value the user might click, the average measured time across
+   *  every (algo, dtype) bucket the sessionLog has for it. Single number
+   *  answer to "if I include this size, how long does one round at this n
+   *  typically take?" — useful for predicting how big a benchmark you're
+   *  about to launch. */
+  const nAvgTimes = useMemo(() => {
+    const sums: Record<string, { sum: number; count: number }> = {};
+    for (const dt of Object.keys(sessionLog)) {
+      const algoMap = sessionLog[dt] ?? {};
+      for (const algo of Object.keys(algoMap)) {
+        const byN = algoMap[algo] ?? {};
+        for (const [nKey, pt] of Object.entries(byN)) {
+          if (!pt || pt.meanTimeMs <= 0) continue;
+          if (!sums[nKey]) sums[nKey] = { sum: 0, count: 0 };
+          sums[nKey].sum += pt.meanTimeMs;
+          sums[nKey].count++;
+        }
+      }
+    }
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(sums)) out[k] = v.sum / v.count;
+    return out;
+  }, [sessionLog]);
+
+  /** Per-algo × per-dtype best timing recorded so far. "Best" = at the
+   *  largest measured n, since that's the most asymptotically meaningful
+   *  sample. Returns null per (algo, dtype) when no data has landed yet. */
+  const algoBestTimes = useMemo(() => {
+    const out: Record<string, Partial<Record<DataType, { n: number; ms: number } | null>>> = {};
+    for (const dtRaw of Object.keys(sessionLog)) {
+      const dt = dtRaw as DataType;
+      if (dt !== "integer" && dt !== "float" && dt !== "string") continue;
+      const algoMap = sessionLog[dt] ?? {};
+      for (const algo of Object.keys(algoMap)) {
+        const byN = algoMap[algo] ?? {};
+        let bestN = -1, bestMs = 0;
+        for (const [nKey, pt] of Object.entries(byN)) {
+          const n = Number(nKey);
+          if (!Number.isFinite(n) || n <= 0 || !pt || pt.meanTimeMs <= 0) continue;
+          if (n > bestN) { bestN = n; bestMs = pt.meanTimeMs; }
+        }
+        if (bestN > 0) {
+          if (!out[algo]) out[algo] = {};
+          out[algo][dt] = { n: bestN, ms: bestMs };
+        }
+      }
+    }
+    return out;
+  }, [sessionLog]);
+
   const exportCSV = () => {
     const rows: (string | number)[][] = [
       ["algo", "n", "timeMs_best", "timeMs_mean", "timeMs_stdDev", "spaceBytes", "timedOut", "scenarios"],
@@ -6612,6 +8263,383 @@ export default function BenchmarkVisualizer() {
   const canRun = (activeAlgos.length > 0 || enabledSavedSorts.length > 0) && selectedSizes.size > 0 && scenarios.size > 0 && status !== "running";
   const canRunCustomOnly = enabledSavedSorts.length > 0 && selectedSizes.size > 0 && scenarios.size > 0 && status !== "running";
 
+  // ── Churn Mode loop ──────────────────────────────────────────────────────
+  // The probe + driver are wrapped in a single ref-stored closure so the
+  // setTimeout chain doesn't tear down on every state change. The outer
+  // useEffect only watches `churnMode` — toggling it is the cancel signal.
+  const churnTickRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  churnTickRef.current = async () => {
+    if (!churnActiveRef.current) return;
+    // Pause while a normal benchmark is running so we don't fight it for cycles
+    // (and so a user-launched run gets clean unshared timing).
+    if (status === "running") return;
+
+    // Eligible pool: anything currently selected, not slowDisabled. The
+    // active engine (V8 / Wasm / WebGPU) is honored — supported algos route
+    // through that engine just like a real benchmark run would, so churn
+    // exercises whatever the user actually has selected. Falls back to V8
+    // for unsupported (id, engine, dtype) tuples (same dispatch rule as run()).
+    const candidates = [...selected].filter(id => !slowDisabled(id));
+    const enabledCustoms = savedSorts.filter(s => s.enabled).map(s => `custom-${s.id}`);
+    const pool = [...candidates, ...enabledCustoms];
+    if (pool.length === 0) return;
+
+    // Sweep-completion gate. If every algo in the pool has saturated, the
+    // sweep has answered its question — further probing on already-timed-out
+    // levels just adds noise. We mark `churnComplete` so the indicator can
+    // announce it, flush any straggler probes one last time, and stop. If
+    // the user adds a new algo to their selection later, that algo won't be
+    // saturated and churn auto-resumes (no manual restart needed).
+    const unsaturatedIds = pool.filter(pid => !(churnStateRef.current[pid]?.saturated));
+    if (unsaturatedIds.length === 0) {
+      if (!churnCompleteRef.current) {
+        churnCompleteRef.current = true;
+        setChurnComplete(true);
+        // Final flush so the last few probes land in the persistent stores
+        // before we go quiet.
+        const pending = churnAccumRef.current;
+        if (Object.values(pending).some(b => b.length > 0)) {
+          churnAccumRef.current = {};
+          flushChurnBuffer(pending, Date.now());
+        }
+      }
+      return;
+    }
+    // We've got at least one unsaturated algo, so the sweep is still active.
+    // Make sure the complete flag is cleared in case the user just enabled a
+    // new algo that brought the pool back to "in progress".
+    if (churnCompleteRef.current) {
+      churnCompleteRef.current = false;
+      setChurnComplete(false);
+    }
+
+    // Split the pool by saturation. Saturated algos are revisited at random
+    // CHURN_DRIFT_SAMPLE_PROB of the time for drift detection; the rest of
+    // the budget goes to non-saturated algos so unfinished sweeps progress.
+    const useUnsaturated = Math.random() >= CHURN_DRIFT_SAMPLE_PROB;
+    const sourcePool = useUnsaturated ? unsaturatedIds : pool;
+    const id = sourcePool[Math.floor(Math.random() * sourcePool.length)];
+
+    // Lazy-init this algo's adaptive state on first sight.
+    const prev: ChurnAlgoState = churnStateRef.current[id] ?? {
+      currentLevel: CHURN_N_MIN,
+      samplesAtLevel: 0,
+      saturated: false,
+      maxCompletedLevel: 0,
+      exploredLevels: [],
+      samples: 0, timeouts: 0, lastTimeMs: null, lastN: null,
+    };
+
+    // Pick the probe size. Non-saturated: stick at currentLevel until 5 samples
+    // are in. Saturated: random previously-explored level for drift sampling.
+    const n: number = prev.saturated && prev.exploredLevels.length > 0
+      ? prev.exploredLevels[Math.floor(Math.random() * prev.exploredLevels.length)]
+      : prev.currentLevel;
+
+    // Resolve the function for this algo. Mirrors run() dispatch order
+    // (wasm > webgpu > custom > factory variants > SORT_FNS) so churn timings
+    // are comparable to what a full benchmark would record.
+    const savedCustom = id.startsWith("custom-") ? savedSorts.find(s => `custom-${s.id}` === id) : null;
+    // Wasm dispatch — same gating rule as the run loop.
+    const wasmFn = engine === "wasm" && wasmBundle && dataType === "integer" && WASM_SUPPORTED.has(id)
+      ? (wasmBundle.byId[id] as (arr: unknown[]) => unknown[])
+      : null;
+    // WebGPU dispatch — returns Promise<unknown[]>; the timing path below awaits.
+    const gpuBundle = (engine === "webgpu" && webgpuBundle && webgpuBundle.ready) ? webgpuBundle : null;
+    const gpuFn = gpuBundle && dataType === "integer" && WEBGPU_SUPPORTED.has(id)
+      ? (gpuBundle.byId[id] as unknown as (arr: unknown[]) => unknown[] | Promise<unknown[]>)
+      : null;
+    const baseFn: ((arr: unknown[]) => unknown[] | Promise<unknown[]>) | null =
+      gpuFn  ? gpuFn :
+      wasmFn ? wasmFn :
+      id === "custom"     ? buildCustomFn(customSortCode, setCustomSortError) :
+      savedCustom         ? buildCustomFn(savedCustom.code, () => { /* swallow */ }) :
+      id === "quick"      ? makeQuickSort(quickPivot) as never :
+      id === "shell"      ? makeShellSort(shellGaps) as never :
+      dataType === "string" && id === "timsort" ? ((arr: unknown[]) => [...arr].sort()) :
+      SORT_FNS[id]        ? freshSortFn(SORT_FNS[id]) as never :
+      null;
+    if (!baseFn) return;
+    // Tag execution-engine badges so the indicators flip on the same moment
+    // they would during a real benchmark run.
+    if (wasmFn) setWasmExecutedAlgos(s => s.has(id) ? s : new Set(s).add(id));
+    if (gpuFn)  setWebgpuExecutedAlgos(s => s.has(id) ? s : new Set(s).add(id));
+
+    // Generate input. Always "random" with no custom distribution — churn's
+    // drift-detection job is about run-over-run variance, not adversarial
+    // coverage. If the user wants distribution-specific data, they can toggle
+    // off churn and run a precise benchmark instead.
+    const arr: unknown[] =
+      dataType === "string" ? generateStringInput(n, "random") :
+      dataType === "float"  ? generateFloatInput(n, "random") :
+                              generateBenchmarkInput(n, "random");
+
+    // Time the probe. measureAllocBytes can't see Wasm/GPU off-heap memory and
+    // can't capture async work (its patches unpin synchronously), so we only
+    // use it on the pure-JS path; GPU/Wasm probes report allocBytes=0 which
+    // is honest for "JS-heap allocations".
+    let allocBytes = 0, timeMs = 0, timedOut = false, errored = false;
+    const isAsync = !!gpuFn;
+    try {
+      const work = (arr as unknown[]).slice();
+      const t0 = performance.now();
+      if (isAsync) {
+        // GPU path — await the readback for honest end-to-end timing.
+        const ret = baseFn(work) as unknown;
+        if (ret && typeof (ret as { then?: unknown }).then === "function") {
+          await (ret as Promise<unknown>);
+        }
+      } else if (wasmFn) {
+        // Wasm: synchronous but skip the alloc instrumentation (off-heap).
+        baseFn(work);
+      } else {
+        allocBytes = measureAllocBytes(() => { (baseFn as (a: unknown[]) => unknown[])(work); });
+      }
+      timeMs = performance.now() - t0;
+      timedOut = timeMs > CHURN_BUDGET_MS;
+    } catch {
+      errored = true;
+      timedOut = true;
+    }
+
+    // Sweep progression: count this sample, advance the level when we've hit
+    // CHURN_SAMPLES_PER_LEVEL clean probes, saturate on any timeout. The
+    // level doubles on advance — 64 → 128 → 256 → ... → CHURN_N_MAX.
+    let nextLevel = prev.currentLevel;
+    let nextSamplesAtLevel = prev.samplesAtLevel + 1;
+    let nextSaturated = prev.saturated;
+    let nextMaxCompleted = prev.maxCompletedLevel;
+    if (!prev.saturated) {
+      if (timedOut || errored) {
+        nextSaturated = true;
+      } else if (nextSamplesAtLevel >= CHURN_SAMPLES_PER_LEVEL) {
+        nextMaxCompleted = Math.max(nextMaxCompleted, prev.currentLevel);
+        const doubled = prev.currentLevel * 2;
+        if (doubled > CHURN_N_MAX) {
+          // Hit the explore-space ceiling without a timeout — treat as
+          // saturated so we switch to drift sampling.
+          nextSaturated = true;
+        } else {
+          nextLevel = doubled;
+          nextSamplesAtLevel = 0;
+        }
+      }
+    }
+    const nextExplored = prev.exploredLevels.includes(n)
+      ? prev.exploredLevels
+      : [...prev.exploredLevels, n];
+    const nextState: ChurnAlgoState = {
+      currentLevel: nextLevel,
+      samplesAtLevel: nextSamplesAtLevel,
+      saturated: nextSaturated,
+      maxCompletedLevel: nextMaxCompleted,
+      exploredLevels: nextExplored,
+      samples: prev.samples + 1,
+      timeouts: prev.timeouts + (timedOut ? 1 : 0),
+      lastTimeMs: errored ? null : timeMs,
+      lastN: n,
+    };
+    churnStateRef.current = { ...churnStateRef.current, [id]: nextState };
+
+    // Accumulate the probe for the next ghost-runs flush. Skip errored probes —
+    // they're noise the 3D view can't render meaningfully.
+    if (!errored) {
+      const buf = churnAccumRef.current[id] ?? [];
+      buf.push({ n, timeMs, spaceBytes: allocBytes, ts: Date.now() });
+      churnAccumRef.current = { ...churnAccumRef.current, [id]: buf };
+    }
+
+    // Record into the rolling visualization history. Errored probes are
+    // included (with timeMs=0, timedOut=true) so the recent-probes scatter
+    // still shows them as red dots; the ghostRuns flush above filtered them
+    // out because the 3D polyline path can't render them. The `ceiling` field
+    // now carries the post-probe currentLevel — the sparkline reads it as a
+    // monotonic-up staircase showing the sweep progression.
+    {
+      const rec: ChurnProbeRecord = { ts: Date.now(), n, timeMs: errored ? 0 : timeMs, timedOut, ceiling: nextLevel };
+      const prevHist = churnHistoryRef.current[id] ?? [];
+      const newHist = prevHist.length >= CHURN_HIST_PER_ALGO
+        ? [...prevHist.slice(prevHist.length - CHURN_HIST_PER_ALGO + 1), rec]
+        : [...prevHist, rec];
+      churnHistoryRef.current = { ...churnHistoryRef.current, [id]: newHist };
+    }
+
+    // Update React state — once per probe is fine; the loop never runs faster
+    // than ~16/s so we're not flooding the scheduler.
+    setChurnState(churnStateRef.current);
+    setChurnHistory(churnHistoryRef.current);
+    setChurnTotals(t => ({
+      probes: t.probes + 1,
+      timeouts: t.timeouts + (timedOut ? 1 : 0),
+      startedAt: t.startedAt ?? Date.now(),
+      lastProbeAt: Date.now(),
+    }));
+
+    // Flush check: time-based (every CHURN_FLUSH_INTERVAL_MS) or count-based
+    // (any algo's buffer ≥ CHURN_FLUSH_MIN_POINTS). The flush fans the buffer
+    // out into FOUR state stores so churn behaves like an "auto-run":
+    //   • ghostRuns — historical band, drives the 3D History + 2D ghost overlay
+    //   • curveData — the main per-run chart on the right pane (so churn
+    //                 points appear in the same chart Run would populate)
+    //   • sessionLog — rolling means feeding SessionCurves / SessionMatrix /
+    //                  SessionBigO / SortNetworkGraph
+    //   • winnerLog — rolling means feeding the WinnersLog panel
+    // All four updates use the same rolling-mean shape the regular run loop
+    // uses at the end of a benchmark, so a churn-driven session is
+    // indistinguishable from one populated by repeated Run clicks.
+    const now = Date.now();
+    const sinceFlush = now - churnLastFlushRef.current;
+    const maxBuffered = Math.max(0, ...Object.values(churnAccumRef.current).map(b => b.length));
+    if (sinceFlush >= CHURN_FLUSH_INTERVAL_MS || maxBuffered >= CHURN_FLUSH_MIN_POINTS) {
+      const toFlush = churnAccumRef.current;
+      churnAccumRef.current = {};
+      churnLastFlushRef.current = now;
+      flushChurnBuffer(toFlush, now);
+    }
+  };
+
+  // Single fan-out helper — used by both the periodic in-loop flush and the
+  // final flush that fires when the user toggles churn off. Pulled into a
+  // closure so we don't duplicate the four setState bodies in two places.
+  const flushChurnBuffer = (
+    toFlush: Record<string, Array<{ n: number; timeMs: number; spaceBytes: number; ts: number }>>,
+    now: number,
+  ): void => {
+    // 1. Ghost runs — one batch entry per algo per flush.
+    setGhostRuns(prevRuns => {
+      const next: Record<string, GhostRun[]> = { ...prevRuns };
+      for (const [aid, pts] of Object.entries(toFlush)) {
+        if (pts.length === 0) continue;
+        const byN = new Map<number, typeof pts[number]>();
+        for (const p of pts) byN.set(p.n, p);
+        const points: GhostPoint[] = [...byN.values()]
+          .sort((a, b) => a.n - b.n)
+          .map(p => ({ n: p.n, timeMs: p.timeMs, spaceBytes: p.spaceBytes }));
+        const updated = [...(next[aid] ?? []), { ts: now, points }];
+        next[aid] = updated.length > GHOST_MAX ? updated.slice(-GHOST_MAX) : updated;
+      }
+      return next;
+    });
+
+    // 2. curveData — the right-pane chart. Per (algo, n) we keep the best
+    // (fastest) timing across all probes that have hit that bucket; that
+    // matches the "best of N rounds" convention the regular run uses.
+    setCurveData(prev => {
+      const next: CurveData = { ...prev };
+      for (const [aid, pts] of Object.entries(toFlush)) {
+        if (pts.length === 0) continue;
+        const cur: CurvePoint[] = next[aid] ? [...next[aid]] : [];
+        const byN = new Map<number, CurvePoint>();
+        for (const cp of cur) byN.set(cp.n, cp);
+        for (const p of pts) {
+          const existing = byN.get(p.n);
+          if (existing) {
+            byN.set(p.n, {
+              ...existing,
+              timeMs:     Math.min(existing.timeMs, p.timeMs),
+              meanMs:     existing.meanMs != null ? Math.min(existing.meanMs, p.timeMs) : p.timeMs,
+              spaceBytes: Math.max(existing.spaceBytes ?? 0, p.spaceBytes),
+              allocBytes: Math.max(existing.allocBytes ?? 0, p.spaceBytes),
+            });
+          } else {
+            byN.set(p.n, {
+              n: p.n,
+              timeMs: p.timeMs,
+              meanMs: p.timeMs,
+              spaceBytes: p.spaceBytes,
+              allocBytes: p.spaceBytes,
+            });
+          }
+        }
+        next[aid] = [...byN.values()].sort((a, b) => a.n - b.n);
+      }
+      return next;
+    });
+
+    // 3. sessionLog — rolling mean per (dataType, algo, n). One sample
+    // contributed per probe so the runs counter ticks up exactly as it
+    // would across many manual Run clicks.
+    setSessionLog(prev => {
+      const next: SessionLog = { ...prev };
+      const dtKey = dataType;
+      const dtMap = { ...(next[dtKey] ?? {}) };
+      for (const [aid, pts] of Object.entries(toFlush)) {
+        if (pts.length === 0) continue;
+        const algoMap = { ...(dtMap[aid] ?? {}) };
+        for (const p of pts) {
+          const key = String(p.n);
+          const existing = algoMap[key] ?? { meanTimeMs: 0, meanSpaceBytes: 0, runs: 0 };
+          const runs = existing.runs + 1;
+          const meanTimeMs    = (existing.meanTimeMs    * existing.runs + p.timeMs)    / runs;
+          const meanSpaceBytes = (existing.meanSpaceBytes * existing.runs + p.spaceBytes) / runs;
+          algoMap[key] = { meanTimeMs, meanSpaceBytes, runs };
+        }
+        dtMap[aid] = algoMap;
+      }
+      next[dtKey] = dtMap;
+      try { localStorage.setItem("codecookbook.sessionLog", JSON.stringify(next)); } catch { /* quota */ }
+      return next;
+    });
+
+    // 4. winnerLog — same rolling-mean shape, but time-only (winners log
+    // doesn't track space).
+    setWinnerLog(prev => {
+      const next: WinnerLog = { ...prev };
+      const dtKey = dataType;
+      const dtMap = { ...(next[dtKey] ?? {}) };
+      for (const [aid, pts] of Object.entries(toFlush)) {
+        if (pts.length === 0) continue;
+        const algoMap = { ...(dtMap[aid] ?? {}) };
+        for (const p of pts) {
+          const key = String(p.n);
+          const existing = algoMap[key] ?? { meanMs: 0, runs: 0 };
+          const runs = existing.runs + 1;
+          const meanMs = (existing.meanMs * existing.runs + p.timeMs) / runs;
+          algoMap[key] = { meanMs, runs };
+        }
+        dtMap[aid] = algoMap;
+      }
+      next[dtKey] = dtMap;
+      try { localStorage.setItem("codecookbook.winnerLog", JSON.stringify(next)); } catch { /* quota */ }
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    if (!churnMode) {
+      churnActiveRef.current = false;
+      if (churnTimeoutRef.current != null) { clearTimeout(churnTimeoutRef.current); churnTimeoutRef.current = null; }
+      // Final flush of any pending probes so partial data isn't lost when the
+      // user toggles off mid-cycle.
+      const pending = churnAccumRef.current;
+      const pendingHasData = Object.values(pending).some(b => b.length > 0);
+      if (pendingHasData) {
+        const flushNow = Date.now();
+        churnAccumRef.current = {};
+        churnLastFlushRef.current = flushNow;
+        // Same four-store fan-out the in-loop flush does. Toggling off
+        // mid-cycle shouldn't strand a partial batch in the buffer.
+        flushChurnBuffer(pending, flushNow);
+      }
+      return;
+    }
+    churnActiveRef.current = true;
+    setChurnTotals(t => ({ ...t, startedAt: t.startedAt ?? Date.now() }));
+    const loop = async () => {
+      if (!churnActiveRef.current) return;
+      try { await churnTickRef.current(); } catch { /* swallow — keep churning */ }
+      if (!churnActiveRef.current) return;
+      const delay = CHURN_TICK_MIN_MS + Math.random() * (CHURN_TICK_MAX_MS - CHURN_TICK_MIN_MS);
+      churnTimeoutRef.current = setTimeout(loop, delay);
+    };
+    loop();
+    return () => {
+      churnActiveRef.current = false;
+      if (churnTimeoutRef.current != null) { clearTimeout(churnTimeoutRef.current); churnTimeoutRef.current = null; }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [churnMode]);
+
   const run = useCallback(async (algoOverride?: string[]) => {
     const maxSz = selectedSizes.size > 0 ? Math.max(...selectedSizes) : 0;
     // Mirror slowDisabled exactly so the run list matches the checked-off checkboxes.
@@ -6621,7 +8649,23 @@ export default function BenchmarkVisualizer() {
     // eligible. This protects against half-edited code accidentally running
     // and produces a stable record (with name + id) for the chart.
     const enabledCustomIds = savedSorts.filter(s => s.enabled).map(s => `custom-${s.id}`);
-    const algos = algoOverride ?? [
+    // Polymorphic sweep mode: each measured "sort" sorts an integer, a float,
+    // AND a string array of the size, summed into one timing. It runs on the
+    // main thread (the worker protocol only ships number[][]) and is restricted
+    // to comparison sorts whose comparators work across all three types.
+    const polyActive = polymorphicMode;
+    // Worker isolation can't honor the in-place reuse mode (the worker copies
+    // its inputs internally), so fall back to the main thread when duplication
+    // is off — same as polymorphic mode.
+    // Worker isolation can't honor in-place reuse, polymorphic wrappers, the
+    // Wasm engine (the worker doesn't load /wasm-sorts/sorts.wasm), OR the
+    // WebGPU engine (workers can't share a GPUDevice with the main thread
+    // without OffscreenCanvas plumbing we don't have) — any of those force
+    // main-thread timing.
+    const wasmActive   = engine === "wasm"   && wasmBundle != null;
+    const webgpuActive = engine === "webgpu" && webgpuBundle != null && webgpuBundle.ready === true;
+    const workerIso = useWorkerIsolation && !polyActive && duplicatePerRound && !wasmActive && !webgpuActive;
+    let algos = algoOverride ?? [
       ...selected,
       ...enabledCustomIds,
     ].filter(id =>
@@ -6631,6 +8675,8 @@ export default function BenchmarkVisualizer() {
         !(!UNLIMITED_IDS.has(id) && maxSz > LARGE_THRESHOLD)
       )
     );
+    // In polymorphic mode, keep only type-safe comparison sorts.
+    if (polyActive) algos = algos.filter(id => POLY_SAFE.has(id));
     const scenarioList = [...scenarios] as BenchmarkScenario[];
     if (!algos.length || !selectedSizes.size || !scenarioList.length) return;
 
@@ -6639,6 +8685,9 @@ export default function BenchmarkVisualizer() {
 
     stopRef.current = false;
     excludedRef.current = new Set();
+    setRunStartedAt(Date.now());
+    setWasmExecutedAlgos(new Set());
+    setWebgpuExecutedAlgos(new Set());
     setStatus("running");
     // Reset the visibility-warning flag for the new run, then seed it correctly
     // if the tab is already hidden when Run is clicked (e.g., from a script).
@@ -6723,13 +8772,15 @@ export default function BenchmarkVisualizer() {
 
       // Generate inputs once per size so every algorithm sorts the exact same data each round
       const intFlagsOn = dataType === "integer" && (intUniqueOnly || intFullInt32);
+      const distOn = valueDist !== "uniform";
       const customDist: CustomDistribution | undefined =
-        (customPreSorted > 0 || customDuplicates > 0 || intFlagsOn)
+        (customPreSorted > 0 || customDuplicates > 0 || intFlagsOn || distOn)
           ? {
               preSortedPct: customPreSorted,
               duplicatePct: customDuplicates,
               ...(intUniqueOnly && dataType === "integer" ? { uniqueOnly: true } : {}),
               ...(intFullInt32  && dataType === "integer" ? { fullInt32: true } : {}),
+              ...(distOn ? { distribution: valueDist } : {}),
             }
           : undefined;
       // Build weighted pool: "sorted" appears once, all others three times — so it's rare in the mix.
@@ -6743,7 +8794,7 @@ export default function BenchmarkVisualizer() {
 
       for (const id of algos) {
         if (stopRef.current) break;
-        const incompatSet = dataType !== "integer" ? ALGO_INCOMPATIBLE[dataType] : null;
+        const incompatSet = !polyActive && dataType !== "integer" ? ALGO_INCOMPATIBLE[dataType] : null;
         if (timedOutAlgos.has(id) || excludedRef.current.has(id) || incompatSet?.has(id)) { done++; setProgress({ done, total }); continue; }
         setCurrentAlgo(id);
         await new Promise<void>(resolve => {
@@ -6759,14 +8810,51 @@ export default function BenchmarkVisualizer() {
         // deoptimized — see the freshSortFn comment for the full rationale.
         // Resolve a saved-sort custom function by its id, if any.
         const savedCustom = id.startsWith("custom-") ? savedSorts.find(s => `custom-${s.id}` === id) : null;
-        const fn: ((arr: unknown[]) => unknown[]) | null = id === "custom" ? buildCustomFn(customSortCode, setCustomSortError) :
+        // Wasm dispatch: when the Wasm engine is selected AND the .wasm has
+        // loaded AND this algo is supported on the Wasm side AND the data
+        // type is integer (the only type the v1 Wasm sorts handle), route
+        // through the Wasm fn. Otherwise fall through to the JS ternary.
+        const wasmFn = wasmActive && dataType === "integer" && WASM_SUPPORTED.has(id)
+          ? (wasmBundle!.byId[id] as (arr: unknown[]) => unknown[])
+          : null;
+        if (wasmFn) {
+          // Tag this algorithm so the results UI can stamp its row with a
+          // "Wasm" badge. setState on a Set requires a fresh instance.
+          setWasmExecutedAlgos(prev => prev.has(id) ? prev : new Set(prev).add(id));
+        }
+        // WebGPU dispatch: same shape as Wasm. Only routes when the engine is
+        // selected, the adapter+device probe succeeded, the algo has a kernel
+        // (WEBGPU_SUPPORTED), and the data type is integer. v1 keeps the
+        // supported set empty so this is unreachable today — wired so adding
+        // a kernel is a 1-line change in lib/webgpuSorts.ts. Kernels are
+        // permitted to be async (Promise<number[]>); the timing path below
+        // already awaits the fn's return value so this is transparent to the
+        // benchmark loop.
+        const gpuBundle = (webgpuActive && webgpuBundle && webgpuBundle.ready) ? webgpuBundle : null;
+        const gpuFn = gpuBundle && dataType === "integer" && WEBGPU_SUPPORTED.has(id)
+          ? (gpuBundle.byId[id] as unknown as (arr: unknown[]) => unknown[] | Promise<unknown[]>)
+          : null;
+        if (gpuFn) {
+          // Tag for the "GPU" badge — same pattern as Wasm.
+          setWebgpuExecutedAlgos(prev => prev.has(id) ? prev : new Set(prev).add(id));
+        }
+        const baseFn: ((arr: unknown[]) => unknown[]) | null =
+                   gpuFn  ? (gpuFn as (arr: unknown[]) => unknown[]) :
+                   wasmFn ? wasmFn :
+                   id === "custom" ? buildCustomFn(customSortCode, setCustomSortError) :
                    savedCustom                          ? buildCustomFn(savedCustom.code, () => { /* per-saved errors swallowed; reflected via failed proof */ }) :
                    id === "quick"                       ? makeQuickSort(quickPivot) as never :
                    id === "shell"                       ? makeShellSort(shellGaps) as never :
                    dataType === "string" && id === "timsort" ? ((arr: unknown[]) => [...arr].sort()) :
                    SORT_FNS[id] ? freshSortFn(SORT_FNS[id]) as never :
                    null;
-        if (!fn) { done++; setProgress({ done, total }); continue; }
+        if (!baseFn) { done++; setProgress({ done, total }); continue; }
+        // Polymorphic sweep: a single measured "sort" sorts one integer, one
+        // float, and one string array of this size — summing all three. The
+        // wrapper sorts the passed (integer) array, then float + string copies.
+        const fn: (arr: unknown[]) => unknown[] = polyActive
+          ? makePolymorphicFn(baseFn, sz, scenarioList[0])
+          : baseFn;
 
         // Hoist adversarial round count so both worker and normal paths can use it
         const algoRoundInputs = adversarialEnabled
@@ -6775,13 +8863,13 @@ export default function BenchmarkVisualizer() {
         const algoRounds = adversarialEnabled ? rounds + 1 : rounds;
 
         // ── Worker isolation path ─────────────────────────────────────────────
-        if (useWorkerIsolation) {
+        if (workerIso) {
           // Capture proof BEFORE submitting to the worker. The worker does the
           // timed sorts in its own isolate; this one-off main-thread sort uses
           // the rebuilt `fn` (already isolated by freshSortFn) on a small copy,
           // so it doesn't pollute timing and doesn't run inside the worker.
           if (!capturedAlgos.has(id) && roundInputs[0]) {
-            const proof = captureSampleProof(roundInputs[0] as (number | string)[], fn, {
+            const proof = await captureSampleProof(roundInputs[0] as (number | string)[], fn, {
               n: sz, dataType, scenario: scenarioList[0],
             });
             setSampleProofs(prev => prev[id] ? prev : { ...prev, [id]: proof });
@@ -6848,11 +8936,46 @@ export default function BenchmarkVisualizer() {
             await new Promise<void>(r => setTimeout(r, 0));
             continue;
           }
+          // Even under worker isolation, run main-thread space passes so every
+          // algorithm — especially custom sorts, which have no reliable
+          // theoretical estimate — gets a real auxiliary-byte measurement (and
+          // thus an accurate in-place verdict). We run BOTH the instrumented
+          // measureAllocBytes pass AND a perf.memory heap-delta pass; the
+          // verdict takes max(allocBytes, spaceBytes), so allocations that
+          // escape the instrumentation (spread, object literals, engine
+          // scratch) still show up via heap delta.
+          let allocBytesW: number | undefined;
+          let heapDeltaW = 0;
+          if (!result.timedOut) {
+            const spaceInput = dataType === "string" ? generateStringInput(sz, scenarioList[0])
+                             : dataType === "float"  ? generateFloatInput(sz, scenarioList[0], customDist)
+                             : generateBenchmarkInput(sz, scenarioList[0], customDist);
+            const spaceCopy = [...spaceInput];
+            try { allocBytesW = measureAllocBytes(() => (fn as (a: unknown[]) => unknown[])(spaceCopy)); }
+            catch { allocBytesW = undefined; }
+
+            const perfMem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
+            if (perfMem) {
+              const spaceInput2 = dataType === "string" ? generateStringInput(sz, scenarioList[0])
+                                : dataType === "float"  ? generateFloatInput(sz, scenarioList[0], customDist)
+                                : generateBenchmarkInput(sz, scenarioList[0], customDist);
+              const spaceCopy2 = [...spaceInput2];
+              const m0 = perfMem.usedJSHeapSize;
+              try { (fn as (a: unknown[]) => unknown[])(spaceCopy2); } catch { /* ignore */ }
+              const m1 = perfMem.usedJSHeapSize;
+              heapDeltaW = Math.max(0, m1 - m0);
+            }
+          }
           if (!acc[id]) acc[id] = [];
           acc[id].push({
             n: sz, timeMs: result.timeMs, meanMs: result.meanMs, stdDev: result.stdDev,
             roundTimes: result.roundTimes,
-            spaceBytes: theoreticalSpaceBytes(id, sz),
+            spaceBytes: heapDeltaW > 0 ? heapDeltaW : theoreticalSpaceBytes(id, sz),
+            // Real heap-delta signal only — undefined when GC / lack of
+            // perf.memory left us with nothing measurable. The verdict uses
+            // this (not spaceBytes) to decide on "O(n) aux ✗?".
+            heapDeltaBytes: heapDeltaW > 0 ? heapDeltaW : undefined,
+            allocBytes: allocBytesW,
             timedOut: result.timedOut || undefined,
           });
           if (result.timedOut) timedOutAlgos.add(id);
@@ -6877,6 +9000,19 @@ export default function BenchmarkVisualizer() {
         const warmupTimes: number[] = [];
         const STABILITY_THRESHOLD = 0.05; // 5% CV
 
+        // Per-round working array. The `roundInputs` arrays are SHARED across
+        // all algorithms at this size, so we must not let one algo's in-place
+        // sort mutate them. When duplicating (default) we copy each round's
+        // input into a single reused scratch array — allocated ONCE here rather
+        // than a fresh `[...input]` every round, which is what drove the
+        // per-round allocation churn. When duplication is off (diagnostic) we
+        // sort the shared input directly: lowest memory, but later algorithms
+        // at this size then see already-sorted data, so timings are only valid
+        // for the first algorithm / a single round.
+        const scratch: unknown[] = duplicatePerRound
+          ? new Array((algoRoundInputs[0] as unknown[]).length)
+          : [];
+
         for (let r = 0; r < algoRounds && !didTimeout; r++) {
           // Yield to the event loop between rounds so a click on Stop can register
           // and stopRef.current can flip before the next sort starts.
@@ -6889,20 +9025,33 @@ export default function BenchmarkVisualizer() {
           // Capture per-algo proof on first encounter — works for any dataType
           // since captureSampleProof preserves value types.
           if (!capturedAlgos.has(id)) {
-            const proof = captureSampleProof(input as (number | string)[], fn, {
+            const proof = await captureSampleProof(input as (number | string)[], fn, {
               n: sz, dataType, scenario: scenarioList[0],
             });
             setSampleProofs(prev => prev[id] ? prev : { ...prev, [id]: proof });
             capturedAlgos.add(id);
           }
 
-          const copy = [...input];
+          let copy: unknown[];
+          if (duplicatePerRound) {
+            const src = input as unknown[];
+            for (let q = 0; q < src.length; q++) scratch[q] = src[q];
+            copy = scratch;
+          } else {
+            copy = input as unknown[];
+          }
           const t0 = performance.now();
           // Wrap the sort call so a throwing custom function doesn't kill the
           // whole benchmark. On error, mark the algo as failed via sampleProofs,
           // bail out of the round loop, and let the rest of the run continue.
+          // GPU kernels return a Promise so the GPU readback can complete
+          // before we record `lastElapsed` — without the await the timing
+          // would measure only command-queue submission, not the actual sort.
           try {
-            fn(copy);
+            const ret = fn(copy) as unknown;
+            if (ret && typeof (ret as { then?: unknown }).then === "function") {
+              await (ret as Promise<unknown>);
+            }
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             setSampleProofs(prev => prev[id] ? prev : {
@@ -6965,14 +9114,22 @@ export default function BenchmarkVisualizer() {
         //    but unreliable for fast algorithms (GC snapshot updates lazily).
         let spaceBytes: number;
         let allocBytes: number | undefined;
+        let heapDeltaForPoint: number | undefined;
         if (!didTimeout) {
           const spaceInput = dataType === "string" ? generateStringInput(sz, scenarioList[0])
                            : dataType === "float"  ? generateFloatInput(sz, scenarioList[0], customDist)
                            : generateBenchmarkInput(sz, scenarioList[0], customDist);
+          // The whole point of this measurement is to prove how much memory the
+          // ALGORITHM allocates. The harness needs fresh unsorted data to sort,
+          // but that copy is the harness's cost, not the algorithm's — so we
+          // build it OUTSIDE the measured region. Measuring only fn(spaceCopy)
+          // makes allocBytes a clean in-place proof: ~0 for a genuinely in-place
+          // sort, ~8·n for one that allocates an O(n) buffer (merge, radix…).
+          const spaceCopy = [...spaceInput];
           // Both space-measurement passes wrap the sort call so a buggy custom
           // function falls back to theoretical bytes instead of crashing the run.
           try {
-            allocBytes = measureAllocBytes(() => (fn as (a: unknown[]) => unknown[])([...spaceInput]));
+            allocBytes = measureAllocBytes(() => (fn as (a: unknown[]) => unknown[])(spaceCopy));
           } catch { allocBytes = undefined; }
 
           const perfMem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
@@ -6987,12 +9144,13 @@ export default function BenchmarkVisualizer() {
             heapDelta = Math.max(0, m1 - m0);
           }
           spaceBytes = heapDelta > 0 ? heapDelta : theoreticalSpaceBytes(id, sz);
+          heapDeltaForPoint = heapDelta > 0 ? heapDelta : undefined;
         } else {
           spaceBytes = theoreticalSpaceBytes(id, sz);
         }
 
         if (!acc[id]) acc[id] = [];
-        acc[id].push({ n: sz, timeMs: best, meanMs, stdDev, roundTimes: postWarmupTimes.length > 1 ? [...postWarmupTimes] : undefined, spaceBytes, allocBytes, timedOut: didTimeout || undefined });
+        acc[id].push({ n: sz, timeMs: best, meanMs, stdDev, roundTimes: postWarmupTimes.length > 1 ? [...postWarmupTimes] : undefined, spaceBytes, heapDeltaBytes: heapDeltaForPoint, allocBytes, timedOut: didTimeout || undefined });
         if (didTimeout) timedOutAlgos.add(id);
 
         done++;
@@ -7025,6 +9183,73 @@ export default function BenchmarkVisualizer() {
       return next;
     });
 
+    // Bump session totals — count of completed runs + first-run timestamp.
+    setRunCount(c => {
+      const next = c + 1;
+      try { localStorage.setItem("codecookbook.runCount", String(next)); } catch { /* quota */ }
+      return next;
+    });
+    if (sessionStartedAt == null) {
+      const t = Date.now();
+      setSessionStartedAt(t);
+      try { localStorage.setItem("codecookbook.sessionStartedAt", String(t)); } catch { /* quota */ }
+    }
+
+    // Update the persistent session-curves log: same rolling-mean idea as the
+    // winners log, but stores BOTH meanTimeMs and meanSpaceBytes so the
+    // SessionCurves component can draw cross-session speed + memory curves.
+    setSessionLog(prev => {
+      const next: SessionLog = { ...prev };
+      const dtKey = dataType;
+      const dtMap = { ...(next[dtKey] ?? {}) };
+      for (const id of Object.keys(acc)) {
+        const algoMap = { ...(dtMap[id] ?? {}) };
+        for (const p of (acc[id] ?? [])) {
+          if (p.timedOut || p.timeMs <= 0) continue;
+          const tSample = p.meanMs ?? p.timeMs;
+          // Prefer the instrumented aux byte count when present (even 0 is
+          // valid); fall back to the heap-delta spaceBytes otherwise.
+          const sSample = p.allocBytes != null ? p.allocBytes : (p.spaceBytes ?? 0);
+          const key = String(p.n);
+          const existing = algoMap[key] ?? { meanTimeMs: 0, meanSpaceBytes: 0, runs: 0 };
+          const runs = existing.runs + 1;
+          const meanTimeMs    = (existing.meanTimeMs    * existing.runs + tSample) / runs;
+          const meanSpaceBytes = (existing.meanSpaceBytes * existing.runs + sSample) / runs;
+          algoMap[key] = { meanTimeMs, meanSpaceBytes, runs };
+        }
+        dtMap[id] = algoMap;
+      }
+      next[dtKey] = dtMap;
+      try { localStorage.setItem("codecookbook.sessionLog", JSON.stringify(next)); } catch { /* quota */ }
+      return next;
+    });
+
+    // Update the persistent winners log: every successful (algo, size) point
+    // from this run contributes one sample to a rolling average keyed by
+    // (dataType, algoId, size). Skip timed-out / failed sorts so they don't
+    // poison the means.
+    setWinnerLog(prev => {
+      const next: WinnerLog = { ...prev };
+      const dtKey = dataType;
+      const dtMap = { ...(next[dtKey] ?? {}) };
+      for (const id of Object.keys(acc)) {
+        const algoMap = { ...(dtMap[id] ?? {}) };
+        for (const p of (acc[id] ?? [])) {
+          if (p.timedOut || p.timeMs <= 0) continue;
+          const sampleMs = p.meanMs ?? p.timeMs;
+          const key = String(p.n);
+          const existing = algoMap[key] ?? { meanMs: 0, runs: 0 };
+          const runs = existing.runs + 1;
+          const meanMs = (existing.meanMs * existing.runs + sampleMs) / runs;
+          algoMap[key] = { meanMs, runs };
+        }
+        dtMap[id] = algoMap;
+      }
+      next[dtKey] = dtMap;
+      try { localStorage.setItem("codecookbook.winnerLog", JSON.stringify(next)); } catch { /* quota */ }
+      return next;
+    });
+
     setStatus("done");
 
   }, [
@@ -7043,6 +9268,9 @@ export default function BenchmarkVisualizer() {
     // Integer-only generator flags — without these in the dep list, toggling
     // them won't take effect until something else triggers a re-memo.
     intUniqueOnly, intFullInt32,
+    polymorphicMode, duplicatePerRound,
+    valueDist,
+    engine, wasmBundle,
   ]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const stop = () => {
@@ -7243,12 +9471,179 @@ export default function BenchmarkVisualizer() {
 
       <div className="flex flex-col lg:flex-row">
 
-        {/* â”€â”€ Left pane: config â”€â”€ */}
+        {/* ── Left pane: controls + config + session-wide views ──
+            Order is intentional: the things you DO (Run, Churn, engine status)
+            sit at the top so they're always visible without scrolling. Below
+            that comes the config card (algos, sizes, scenarios, advanced).
+            Below that comes the readout (Settings summary), and finally the
+            cross-run session views (summary, winners, big-O, matrix, curves,
+            sort network, 3D history). Top-to-bottom matches a typical
+            workflow: act → configure → review. */}
         <div
           className="lg:w-1/2 lg:h-full lg:overflow-y-auto border-b lg:border-b-0 lg:border-r"
           style={{ borderColor: "var(--color-border)" }}
         >
-          <div className="px-5 py-4">
+          <div className="px-5 py-4 flex flex-col gap-3">
+            {/* ── Controls panel (top-anchored) ── */}
+            <div
+              className="rounded-xl p-3 flex flex-col gap-2"
+              style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)" }}
+            >
+              {/* Engine indicator — visible whenever Wasm is the chosen
+                  engine, so the next-run engine state is legible without
+                  expanding Advanced. Also surfaces "requested but not loaded"
+                  so the user can see why their badges never appeared. */}
+              {engine === "wasm" && (
+                <div className="print:hidden text-[10px]" style={{ fontFamily: "monospace" }}>
+                  {wasmBundle ? (
+                    <span style={{
+                      display: "inline-flex", alignItems: "center", gap: 4,
+                      padding: "1px 7px", borderRadius: 4,
+                      background: "rgba(124,106,247,0.15)",
+                      border: "1px solid rgba(124,106,247,0.5)",
+                      color: "var(--color-accent)", fontWeight: 700,
+                    }}>
+                      Engine: Wasm ready — fires for insertion / quick / logos on integer data
+                    </span>
+                  ) : (
+                    <span style={{
+                      display: "inline-flex", alignItems: "center", gap: 4,
+                      padding: "1px 7px", borderRadius: 4,
+                      background: "rgba(255,183,77,0.10)",
+                      border: "1px solid rgba(255,183,77,0.45)",
+                      color: "#ffb74d",
+                    }}>
+                      Engine: Wasm selected but .wasm not loaded — every algo will silently fall back to V8. Run <code>npm run build:wasm</code>, then refresh.
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {/* Same banner shape for the WebGPU engine. Three states:
+                  - bundle.ready=true AND WEBGPU_SUPPORTED non-empty → cyan "GPU ready" banner
+                  - bundle.ready=true AND WEBGPU_SUPPORTED empty   → amber "selected but no kernels ported" banner
+                  - bundle.ready=false                              → amber "selected but unavailable" banner */}
+              {engine === "webgpu" && webgpuBundle != null && (
+                <div className="print:hidden text-[10px]" style={{ fontFamily: "monospace" }}>
+                  {webgpuBundle.ready && WEBGPU_SUPPORTED.size > 0 ? (
+                    <span style={{
+                      display: "inline-flex", alignItems: "center", gap: 4,
+                      padding: "1px 7px", borderRadius: 4,
+                      background: "rgba(34,197,194,0.14)",
+                      border: "1px solid rgba(34,197,194,0.55)",
+                      color: "#0e9b96", fontWeight: 700,
+                    }}>
+                      Engine: WebGPU ready — fires for {[...WEBGPU_SUPPORTED].join(" / ")} on integer data
+                    </span>
+                  ) : webgpuBundle.ready ? (
+                    <span style={{
+                      display: "inline-flex", alignItems: "center", gap: 4,
+                      padding: "1px 7px", borderRadius: 4,
+                      background: "rgba(255,183,77,0.10)",
+                      border: "1px solid rgba(255,183,77,0.45)",
+                      color: "#ffb74d",
+                    }}>
+                      Engine: WebGPU adapter detected but no GPU kernels ported yet — every algo will fall back to V8 until <code>WEBGPU_SUPPORTED</code> in <code>lib/webgpuSorts.ts</code> gains an entry.
+                    </span>
+                  ) : (
+                    <span style={{
+                      display: "inline-flex", alignItems: "center", gap: 4,
+                      padding: "1px 7px", borderRadius: 4,
+                      background: "rgba(255,183,77,0.10)",
+                      border: "1px solid rgba(255,183,77,0.45)",
+                      color: "#ffb74d",
+                    }}>
+                      Engine: WebGPU selected but unavailable — {webgpuBundle.reason}. Every algo will fall back to V8.
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {/* Run / Stop buttons moved to a floating bottom-right panel
+                  that swaps with RunningDashboard depending on status —
+                  see the FloatingRunPanel render near the bottom of this file. */}
+
+              {/* ── Churn Mode toggle + live telemetry ──
+                  Lives directly below the Run button because it's the
+                  "background mode" sibling of "fire one measured run". */}
+              {(() => {
+                const churnEligible = ([...selected].filter(id => !slowDisabled(id)).length + savedSorts.filter(s => s.enabled).length) > 0;
+                const startedAt = churnTotals.startedAt;
+                const runtimeMs = churnMode && startedAt != null ? Date.now() - startedAt : 0;
+                const probesPerSec = runtimeMs > 250 ? (churnTotals.probes / (runtimeMs / 1000)) : 0;
+                return (
+                  <div className="print:hidden flex flex-col gap-2">
+                    <ChurnIndicator
+                      active={churnMode}
+                      complete={churnComplete}
+                      onToggle={() => {
+                        // Toggle-ON starts a fresh session: totals zeroed and
+                        // history cleared so the sparklines draw from scratch.
+                        // Toggle-OFF leaves the displays frozen so the user can
+                        // review the last session's data. Per-algo adaptive
+                        // state (the AIMD memory) persists across toggles so
+                        // the learned ceilings aren't thrown away.
+                        if (churnMode) {
+                          setChurnMode(false);
+                        } else {
+                          setChurnTotals({ probes: 0, timeouts: 0, startedAt: null, lastProbeAt: null });
+                          churnHistoryRef.current = {};
+                          setChurnHistory({});
+                          // Reset the sweep-completion flags so a fresh
+                          // session starts in the "sweeping" state, not in
+                          // "done" left over from the previous session.
+                          churnCompleteRef.current = false;
+                          setChurnComplete(false);
+                          setChurnMode(true);
+                        }
+                      }}
+                      disabled={!churnEligible || status === "running"}
+                      probeCount={churnTotals.probes}
+                      probesPerSec={probesPerSec}
+                    />
+                    {churnMode && (
+                      <div className="cc-churn-box" style={{ padding: "8px 10px", borderRadius: 6 }}>
+                        <ChurnTelemetry
+                          state={churnState}
+                          history={churnHistory}
+                          totals={churnTotals}
+                          algoNames={ALGO_NAMES}
+                          algoColors={ALGO_COLORS}
+                          runtimeMs={runtimeMs}
+                          budgetMs={CHURN_BUDGET_MS}
+                          nMin={CHURN_N_MIN}
+                          nMax={CHURN_N_MAX}
+                          samplesPerLevel={CHURN_SAMPLES_PER_LEVEL}
+                          complete={churnComplete}
+                        />
+                        <p style={{ fontSize: 8, color: "var(--color-muted)", marginTop: 6, fontFamily: "monospace", lineHeight: 1.4 }}>
+                          structured sweep: {CHURN_SAMPLES_PER_LEVEL} samples per level, then double n · saturates on any probe &gt; {CHURN_BUDGET_MS / 1000}s · stops when every algo has saturated · routes through the active engine ({engine === "wasm" ? "Wasm" : engine === "webgpu" ? "WebGPU" : "V8"}) · flushes to curveData / sessionLog / winnerLog / ghostRuns every ~{CHURN_FLUSH_INTERVAL_MS / 1000}s so every panel updates in near-real-time
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Settings summary — what *will* run. A compact readout of the
+                  active config so the user can verify before clicking Run
+                  without expanding the config card below. */}
+              {status !== "running" && (
+                <div className="text-[10px] print:hidden flex flex-col gap-0.5" style={{ color: "var(--color-muted)", fontFamily: "monospace", borderTop: "1px dashed var(--color-border)", paddingTop: 6 }}>
+                  <span>
+                    {[...activeAlgos, ...enabledSavedSorts.map(s => `custom-${s.id}`)]
+                      .map(id => ALGO_NAMES[id] ?? id)
+                      .join(", ") || <span style={{ color: "#ef5350" }}>no algorithms selected</span>}
+                  </span>
+                  <span>
+                    {[...scenarios].join(", ")} · n={sortedSizes.map(n => fmtN(n)).join(", ")} · {rounds} round{rounds !== 1 ? "s" : ""} · {warmup} warm-up · engine: {engine === "wasm" && wasmBundle ? "Wasm" : engine === "webgpu" && webgpuBundle?.ready ? "WebGPU" : "V8"}
+                  </span>
+                </div>
+              )}
+
+            </div>
+
+            {/* ── Config card (algos, sizes, scenarios, advanced) ── */}
             <div
               className="rounded-xl p-4"
               style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)" }}
@@ -7285,11 +9680,18 @@ export default function BenchmarkVisualizer() {
                   {SIZE_BUTTONS.map(({ n }) => {
                     const on = selectedSizes.has(n);
                     const disabled = !UNLIMITED_IDS.has([...selected][0] ?? "") && n > LARGE_THRESHOLD && selected.size > 0 && [...selected].every(id => !UNLIMITED_IDS.has(id));
+                    // Per-n average measured time across every (algo, dtype)
+                    // bucket the session has seen at this size. Empty → no
+                    // sub-line, button stays compact.
+                    const avgMs = nAvgTimes[String(n)];
                     return (
                       <button
                         key={n}
                         onClick={() => on ? removeSize(n) : addSize(n)}
                         disabled={disabled}
+                        title={avgMs != null
+                          ? `n=${n.toLocaleString()} — average ${fmtTime(avgMs)} per (algo, dtype) bucket across the session`
+                          : `n=${n.toLocaleString()} — no measurements yet`}
                         style={btn(on ? "primary" : "secondary", {
                           flexDirection: "column", padding: "3px 7px",
                           background: on ? "rgba(139,58,42,0.12)" : "var(--color-surface-1)",
@@ -7302,6 +9704,11 @@ export default function BenchmarkVisualizer() {
                         <span style={{ fontSize: 9, fontFamily: "monospace", fontWeight: on ? 700 : 500, lineHeight: 1.2 }}>
                           {n.toLocaleString()}
                         </span>
+                        {avgMs != null && (
+                          <span style={{ fontSize: 7, fontFamily: "monospace", lineHeight: 1.1, opacity: 0.7, marginTop: 1 }}>
+                            ~{fmtTime(avgMs)}
+                          </span>
+                        )}
                       </button>
                     );
                   })}
@@ -7379,7 +9786,11 @@ export default function BenchmarkVisualizer() {
               <div className="mb-4 print:hidden">
                 <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--color-muted)" }}>Quick presets</p>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                  {SCENARIO_PRESETS.map(preset => (
+                  {SCENARIO_PRESETS
+                    .filter(preset => has("advanced") || !(preset as { poly?: boolean }).poly)
+                    .map(preset => {
+                    const isPoly = Boolean((preset as { poly?: boolean }).poly);
+                    return (
                     <button
                       key={preset.label}
                       title={preset.desc}
@@ -7388,17 +9799,25 @@ export default function BenchmarkVisualizer() {
                         setSelectedSizes(new Set(preset.sizes as unknown as number[]));
                         setScenarios(new Set(preset.scenarios));
                         if (preset.pivot) setQuickPivot(preset.pivot);
+                        setPolymorphicMode(isPoly);
                       }}
                       style={{
                         padding: "2px 9px", fontSize: 9, borderRadius: 4, cursor: "pointer",
-                        background: "var(--color-surface-1)", border: "1px solid var(--color-border)",
-                        color: "var(--color-muted)", whiteSpace: "nowrap",
+                        background: isPoly && polymorphicMode ? "color-mix(in srgb, var(--color-accent) 18%, transparent)" : "var(--color-surface-1)",
+                        border: `1px solid ${isPoly && polymorphicMode ? "var(--color-accent)" : "var(--color-border)"}`,
+                        color: isPoly && polymorphicMode ? "var(--color-accent)" : "var(--color-muted)", whiteSpace: "nowrap",
                       }}
                     >
-                      {preset.label}
+                      {isPoly ? `⇄ ${preset.label}` : preset.label}
                     </button>
-                  ))}
+                    );
+                  })}
                 </div>
+                {polymorphicMode && (
+                  <p className="text-[10px] mt-1.5" style={{ color: "var(--color-accent)", fontFamily: "monospace" }}>
+                    Polymorphic sweep active — each measured sort sorts integer + float + string (summed); runs on the main thread, type-safe sorts only.
+                  </p>
+                )}
               </div>
 
               {/* Algorithm checkboxes */}
@@ -7451,24 +9870,41 @@ export default function BenchmarkVisualizer() {
                             — {group.label}
                           </span>
                         </div>
-                        <div className="flex flex-wrap gap-1.5">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
                           {group.items.map(item => {
                             const disabled = slowDisabled(item.id);
                             const checked = selected.has(item.id) && !disabled;
                             const dotColor = ALGO_COLORS[item.id];
                             const incompatible = dataType !== "integer" && ALGO_INCOMPATIBLE[dataType].has(item.id);
+                            // Pull the property metadata we already track for
+                            // each algo. Stable / in-place are nullable in the
+                            // tables so missing entries silently degrade.
+                            const timeBigO = ALGO_TIME[item.id];
+                            const isStable = ALGO_STABLE[item.id];
+                            const inPlace = ALGO_INFO[item.id]?.inPlace;
+                            // Best-time-per-dtype lookup — empty until the
+                            // session has recorded a measurement for this
+                            // (algo, dtype). We render only the dtypes that
+                            // have data, sorted in the canonical I → F → S
+                            // order so the row stays predictable.
+                            const bestTimes = algoBestTimes[item.id] ?? {};
+                            const dtypesWithData: DataType[] = (["integer", "float", "string"] as const)
+                              .filter(d => bestTimes[d] != null);
                             return (
                               <React.Fragment key={item.id}>
                               <label
-                                className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs select-none"
+                                className="flex flex-col gap-0.5 px-2 py-1 rounded text-xs select-none"
                                 style={{
                                   background: checked ? "rgba(139,58,42,0.08)" : "var(--color-surface-1)",
                                   border: `1px solid ${checked ? "var(--color-accent)" : "var(--color-border)"}`,
                                   color: disabled ? "var(--color-muted)" : "var(--color-text)",
                                   opacity: disabled ? 0.4 : 1,
                                   cursor: disabled ? "not-allowed" : "pointer",
+                                  minHeight: 28,
                                 }}
                               >
+                                {/* Row 1 — header: checkbox · dot · name · skip badge · code button */}
+                                <div className="flex items-center gap-1.5" style={{ minHeight: 18 }}>
                                 <input
                                   type="checkbox"
                                   checked={checked}
@@ -7484,7 +9920,9 @@ export default function BenchmarkVisualizer() {
                                   flexShrink: 0,
                                   opacity: checked ? 1 : 0.4,
                                 }} />
-                                {item.name}
+                                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {item.name}
+                                </span>
                                 {incompatible && (
                                   <span style={{ fontSize: 9, padding: "0 4px", borderRadius: 3, background: "rgba(239,154,154,0.15)", color: "#ef9a9a", border: "1px solid rgba(239,154,154,0.3)" }}>
                                     skip
@@ -7516,6 +9954,63 @@ export default function BenchmarkVisualizer() {
                                   </button>
                                 )}
                                 {/* Logos Sort custom-variant button removed. */}
+                                </div>
+
+                                {/* Row 2 — property chips: complexity + stable +
+                                    in-place. Compact 9-pt monospace; chips are
+                                    pure information, never click targets. */}
+                                <div style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap", fontSize: 8, fontFamily: "monospace", lineHeight: 1.3, color: "var(--color-muted)", paddingLeft: 22 }}>
+                                  {timeBigO && (
+                                    <span title={`Theoretical time complexity: ${timeBigO}`} style={{ color: "var(--color-text)", opacity: 0.7 }}>
+                                      {timeBigO}
+                                    </span>
+                                  )}
+                                  {inPlace != null && (
+                                    <span
+                                      title={inPlace ? "In-place: only O(1) auxiliary memory" : "Not in-place: allocates O(n) (or more) auxiliary"}
+                                      style={{ color: inPlace ? "#4db6ac" : "#d4831f", opacity: 0.85 }}
+                                    >
+                                      {inPlace ? "in-place" : "+aux"}
+                                    </span>
+                                  )}
+                                  {isStable != null && (
+                                    <span
+                                      title={isStable ? "Stable: preserves the relative order of equal keys" : "Unstable: equal keys may be reordered"}
+                                      style={{ color: isStable ? "#7e57c2" : "var(--color-muted)", opacity: 0.85 }}
+                                    >
+                                      {isStable ? "stable" : "unstable"}
+                                    </span>
+                                  )}
+                                </div>
+
+                                {/* Row 3 — best times per dtype, only when the
+                                    session has recorded data. Each chip carries
+                                    the dtype convention on its border so the
+                                    line-style cue is consistent with the rest
+                                    of the app. Conditionally rendered so algos
+                                    with no measurements stay compact. */}
+                                {dtypesWithData.length > 0 && (
+                                  <div style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap", fontSize: 8, fontFamily: "monospace", lineHeight: 1.3, paddingLeft: 22, marginTop: 1 }}>
+                                    {dtypesWithData.map(dt => {
+                                      const v = bestTimes[dt]!;
+                                      return (
+                                        <span
+                                          key={dt}
+                                          title={`${DT_LABEL[dt]}: ${fmtTime(v.ms)} at n=${v.n.toLocaleString()}`}
+                                          style={{
+                                            display: "inline-flex", alignItems: "center", gap: 2,
+                                            padding: "0 3px", borderRadius: 2,
+                                            border: `1px ${cyLineStyle(dt)} var(--color-muted)`,
+                                            color: "var(--color-text)",
+                                          }}
+                                        >
+                                          <span style={{ color: "var(--color-muted)" }}>{DT_LABEL[dt][0]}</span>
+                                          <span>{fmtTime(v.ms)}</span>
+                                        </span>
+                                      );
+                                    })}
+                                  </div>
+                                )}
                               </label>
                               </React.Fragment>
                             );
@@ -7803,6 +10298,40 @@ export default function BenchmarkVisualizer() {
                             color: "var(--color-text)", outline: "none",
                           }}
                         />
+                        {/* Sample all — applies the most rigorous battery of
+                            measurement settings (sizes, scenarios, rounds,
+                            adversarial, etc.) without touching which sorts are
+                            selected, so it stress-tests the custom sort against
+                            whichever algos the user already has checked. */}
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedSizes(new Set([100, 1000, 10000, 100000, 1000000]));
+                              setScenarios(new Set(["sorted", "nearlySorted", "random", "reversed", "duplicates"]));
+                              setRounds(12);
+                              setWarmup(4);
+                              setAdversarialEnabled(true);
+                              setUseWorkerIsolation(true);
+                              setDuplicatePerRound(true);
+                              setTimeoutEnabled(true);
+                              setPolymorphicMode(false);
+                            }}
+                            title="Apply the toughest measurement settings to this custom sort: all 5 scenarios · 100 → 1 M · 12 rounds + 4 warm-up · adversarial on · worker isolation on. Does not change which algorithms are selected."
+                            style={{
+                              padding: "3px 10px", fontSize: 10, borderRadius: 5, cursor: "pointer",
+                              background: "rgba(239,83,80,0.10)",
+                              border: "1px solid rgba(239,83,80,0.45)",
+                              color: "#ef5350",
+                              fontFamily: "monospace", fontWeight: 600,
+                            }}
+                          >
+                            ⚡ Sample all (rigorous)
+                          </button>
+                          <span className="text-[10px]" style={{ color: "var(--color-muted)", fontFamily: "monospace" }}>
+                            cranks scenarios · sizes · rounds · adversarial — keeps your selected algorithms
+                          </span>
+                        </div>
                       </div>
 
                       {/* Saved sorts list — each row has an enable toggle, color
@@ -8005,293 +10534,309 @@ export default function BenchmarkVisualizer() {
                 </button>
 
                 {advancedOpen && (
-                  <div className="mt-3 flex flex-col gap-4">
-                    {/* Scenario wheel */}
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-wider mb-1.5" style={{ color: "var(--color-muted)" }}>
-                        Scenarios <span className="font-normal normal-case" style={{ color: "var(--color-muted)" }}>— one drawn at random per round</span>
-                      </p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {SCENARIO_OPTIONS.map(s => {
-                          const on = scenarios.has(s.id);
-                          return (
-                            <label
-                              key={s.id}
-                              className="flex items-center gap-1.5 rounded text-xs select-none"
-                              style={{
-                                padding: "2px 8px",
-                                background: on ? "rgba(139,58,42,0.08)" : "var(--color-surface-1)",
-                                border: `1px solid ${on ? "var(--color-accent)" : "var(--color-border)"}`,
-                                color: on ? "var(--color-text)" : "var(--color-muted)",
-                                cursor: "pointer",
-                              }}
-                            >
+                  <div className="mt-3 flex flex-col gap-3">
+
+                    {/* ── Group: Input data ── */}
+                    <AdvGroup title="Input data">
+                      <AdvSection title="Scenarios" hint="one drawn at random per round">
+                        <div className="flex flex-wrap gap-1.5">
+                          {SCENARIO_OPTIONS.map(s => {
+                            const on = scenarios.has(s.id);
+                            return (
+                              <label
+                                key={s.id}
+                                className="flex items-center gap-1.5 rounded text-xs select-none"
+                                style={{
+                                  padding: "2px 8px",
+                                  background: on ? "rgba(139,58,42,0.08)" : "var(--color-surface-1)",
+                                  border: `1px solid ${on ? "var(--color-accent)" : "var(--color-border)"}`,
+                                  color: on ? "var(--color-text)" : "var(--color-muted)",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={on}
+                                  onChange={() => setScenarios(prev => {
+                                    const next = new Set(prev);
+                                    on ? next.delete(s.id) : next.add(s.id);
+                                    return next;
+                                  })}
+                                  style={{ accentColor: "var(--color-accent)" }}
+                                />
+                                {s.label}
+                                {s.rare && <span style={{ fontSize: 9, padding: "0 4px", borderRadius: 3, background: "var(--color-surface-3)", color: "var(--color-muted)", fontStyle: "italic" }}>rare</span>}
+                                <span style={{ color: "var(--color-muted)", fontSize: 10 }}>— {s.desc}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </AdvSection>
+
+                      <AdvSection title="Value distribution" hint="how random values are sampled — applies to the random scenario">
+                        <div className="flex flex-wrap gap-1.5 items-center">
+                          {([
+                            { id: "uniform",     label: "Uniform",     desc: "Flat — equally likely across the range (default)" },
+                            { id: "normal",      label: "Normal",      desc: "Bell curve — clustered around the midpoint (μ = mid, σ = range/6)" },
+                            { id: "exponential", label: "Exponential", desc: "Most mass near the low end, long right tail" },
+                            { id: "bimodal",     label: "Bimodal",     desc: "Two clusters — peaks at 30% and 70% of the range" },
+                          ] as const).map(opt => {
+                            const active = valueDist === opt.id;
+                            return (
+                              <button
+                                key={opt.id}
+                                onClick={() => setValueDist(opt.id)}
+                                title={opt.desc}
+                                style={{
+                                  padding: "3px 10px", fontSize: 10, borderRadius: 5, cursor: "pointer",
+                                  background: active ? "color-mix(in srgb, var(--color-accent) 18%, transparent)" : "var(--color-surface-1)",
+                                  border: `1px solid ${active ? "var(--color-accent)" : "var(--color-border)"}`,
+                                  color: active ? "var(--color-accent)" : "var(--color-muted)",
+                                  fontFamily: "monospace", fontWeight: active ? 600 : 400,
+                                }}
+                              >
+                                {opt.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <p className="text-[10px] mt-1.5" style={{ color: "var(--color-muted)", fontFamily: "monospace" }}>
+                          Only affects the <code>random</code> scenario (and integer/float data types); sorted / nearlySorted / reversed / duplicates keep their fixed semantics. Out-of-range samples are clamped to the range bounds.
+                        </p>
+                      </AdvSection>
+
+                      <AdvSection title="Custom distribution" hint="layered on top of selected scenarios">
+                        <div className="flex flex-col gap-2">
+                          {([
+                            { label: "% pre-sorted prefix", value: customPreSorted, set: setCustomPreSorted },
+                            { label: "% duplicate injection", value: customDuplicates, set: setCustomDuplicates },
+                          ] as const).map(({ label, value, set }) => {
+                            const disabled = label.startsWith("% duplicate") && intUniqueOnly && dataType === "integer";
+                            return (
+                            <div key={label} className="flex items-center gap-3" style={{ opacity: disabled ? 0.4 : 1 }}>
+                              <span className="text-xs font-mono shrink-0" style={{ color: "var(--color-muted)", width: 150 }}>{label}</span>
                               <input
-                                type="checkbox"
-                                checked={on}
-                                onChange={() => setScenarios(prev => {
-                                  const next = new Set(prev);
-                                  on ? next.delete(s.id) : next.add(s.id);
-                                  return next;
-                                })}
-                                style={{ accentColor: "var(--color-accent)" }}
+                                type="range" min={0} max={100} step={5} value={value}
+                                disabled={disabled}
+                                onChange={e => set(Number(e.target.value))}
+                                style={{ flex: 1, accentColor: "var(--color-accent)" }}
                               />
-                              {s.label}
-                              {s.rare && <span style={{ fontSize: 9, padding: "0 4px", borderRadius: 3, background: "var(--color-surface-3)", color: "var(--color-muted)", fontStyle: "italic" }}>rare</span>}
-                              <span style={{ color: "var(--color-muted)", fontSize: 10 }}>— {s.desc}</span>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    {/* Rounds + Warmup */}
-                    <div className="flex flex-wrap items-end gap-5">
-                      <div className="flex flex-col gap-1">
-                        <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>Rounds</span>
-                        <Spinner value={rounds} onChange={setRounds} min={1} max={50} label="Rounds" />
-                      </div>
-                      <div className="flex flex-col gap-1">
-                        <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>Warmup (discard first)</span>
-                        <Spinner value={warmup} onChange={v => setWarmup(Math.min(v, rounds - 1))} min={0} max={Math.max(0, rounds - 1)} label="Warmup" />
-                      </div>
-                      <span className="text-xs pb-0.5" style={{ color: "var(--color-muted)" }}>
-                        {Math.max(0, rounds - warmup)} rounds recorded · best kept
-                      </span>
-                    </div>
-
-                    {/* Per-algorithm options */}
-                    {(selected.has("quick") || selected.has("shell")) && (
-                      <div>
-                        <p className="text-xs font-semibold uppercase tracking-wider mb-1.5" style={{ color: "var(--color-muted)" }}>
-                          Algorithm options
-                        </p>
-                        <div className="flex flex-col gap-2">
-                          {selected.has("quick") && (
-                            <div className="flex items-start gap-3">
-                              <span className="text-xs shrink-0 pt-0.5" style={{ color: "var(--color-muted)", width: 128 }}>
-                                Quick Sort pivot
+                              <span className="text-xs font-mono shrink-0" style={{ color: "var(--color-text)", width: 32, textAlign: "right" }}>
+                                {value}%
                               </span>
-                              <div className="flex flex-wrap gap-1">
-                                {QUICK_PIVOT_OPTS.map(opt => (
-                                  <button
-                                    key={opt.id}
-                                    onClick={() => setQuickPivot(opt.id)}
-                                    title={opt.desc}
-                                    style={{
-                                      padding: "2px 8px", fontSize: 10,
-                                      background: quickPivot === opt.id ? "rgba(139,58,42,0.15)" : "var(--color-surface-1)",
-                                      border: `1px solid ${quickPivot === opt.id ? "var(--color-accent)" : "var(--color-border)"}`,
-                                      borderRadius: 4, cursor: "pointer",
-                                      color: quickPivot === opt.id ? "var(--color-text)" : "var(--color-muted)",
-                                    }}
-                                  >
-                                    {opt.label}
-                                  </button>
-                                ))}
-                              </div>
                             </div>
-                          )}
-                          {selected.has("shell") && (
-                            <div className="flex items-start gap-3">
-                              <span className="text-xs shrink-0 pt-0.5" style={{ color: "var(--color-muted)", width: 128 }}>
-                                Shell Sort gaps
-                              </span>
-                              <div className="flex flex-wrap gap-1">
-                                {SHELL_GAPS_OPTS.map(opt => (
-                                  <button
-                                    key={opt.id}
-                                    onClick={() => setShellGaps(opt.id)}
-                                    title={opt.desc}
-                                    style={{
-                                      padding: "2px 8px", fontSize: 10,
-                                      background: shellGaps === opt.id ? "rgba(139,58,42,0.15)" : "var(--color-surface-1)",
-                                      border: `1px solid ${shellGaps === opt.id ? "var(--color-accent)" : "var(--color-border)"}`,
-                                      borderRadius: 4, cursor: "pointer",
-                                      color: shellGaps === opt.id ? "var(--color-text)" : "var(--color-muted)",
-                                    }}
-                                  >
-                                    {opt.label}
-                                  </button>
-                                ))}
-                              </div>
-                            </div>
-                          )}
+                          );})}
                         </div>
-                      </div>
-                    )}
+                      </AdvSection>
 
-                    {/* Custom distribution sliders */}
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-wider mb-1.5" style={{ color: "var(--color-muted)" }}>
-                        Custom distribution <span className="font-normal normal-case">— layered on top of selected scenarios</span>
-                      </p>
-                      <div className="flex flex-col gap-2">
-                        {([
-                          { label: "% pre-sorted prefix", value: customPreSorted, set: setCustomPreSorted },
-                          { label: "% duplicate injection", value: customDuplicates, set: setCustomDuplicates },
-                        ] as const).map(({ label, value, set }) => {
-                          // Duplicate-injection is mutually exclusive with the
-                          // "unique values" integer flag; grey it out so the
-                          // conflict is visible.
-                          const disabled = label.startsWith("% duplicate") && intUniqueOnly && dataType === "integer";
-                          return (
-                          <div key={label} className="flex items-center gap-3" style={{ opacity: disabled ? 0.4 : 1 }}>
-                            <span className="text-xs font-mono shrink-0" style={{ color: "var(--color-muted)", width: 150 }}>{label}</span>
-                            <input
-                              type="range" min={0} max={100} step={5} value={value}
-                              disabled={disabled}
-                              onChange={e => set(Number(e.target.value))}
-                              style={{ flex: 1, accentColor: "var(--color-accent)" }}
-                            />
-                            <span className="text-xs font-mono shrink-0" style={{ color: "var(--color-text)", width: 32, textAlign: "right" }}>
-                              {value}%
-                            </span>
+                      {dataType === "integer" && (
+                        <AdvSection title="Integer options">
+                          <div className="flex flex-col gap-2">
+                            <AdvToggle checked={intUniqueOnly} onChange={setIntUniqueOnly} label="Unique values only">
+                              Guarantees no duplicates across the input — generated via Fisher–Yates shuffle of the value range
+                              (or rejection sampling when the range is wide). Mutually exclusive with the duplicate-injection
+                              slider above; that slider greys out while this is on.
+                            </AdvToggle>
+                            <AdvToggle checked={intFullInt32} onChange={setIntFullInt32} label="Full 32-bit range">
+                              Sample from <code>[-2,147,483,648, 2,147,483,647]</code> instead of the default <code>[0, 10000)</code>.
+                              <span style={{ color: "#ffb74d" }}> Disables counting-sort&apos;s O(n+k) advantage</span> — its
+                              bucket array would be 4 GB, so it falls back to comparison performance like everyone else.
+                            </AdvToggle>
                           </div>
-                        );})}
-                      </div>
-                    </div>
-
-                    {/* Integer-only options — only visible when dataType === "integer".
-                        Float and string have their own generators that don't need these. */}
-                    {dataType === "integer" && (
-                      <div>
-                        <p className="text-xs font-semibold uppercase tracking-wider mb-1.5" style={{ color: "var(--color-muted)" }}>
-                          Integer options
-                        </p>
-                        <div className="flex flex-col gap-2">
-                          <label className="flex items-start gap-2" style={{ cursor: "pointer" }}>
-                            <input
-                              type="checkbox"
-                              checked={intUniqueOnly}
-                              onChange={e => setIntUniqueOnly(e.target.checked)}
-                              style={{ marginTop: 2, accentColor: "var(--color-accent)" }}
-                            />
-                            <div>
-                              <span className="text-xs font-semibold" style={{ color: "var(--color-text)" }}>
-                                Unique values only
-                              </span>
-                              <p className="text-xs mt-0.5" style={{ color: "var(--color-muted)" }}>
-                                Guarantees no duplicates across the input — generated via Fisher–Yates shuffle of the value range
-                                (or rejection sampling when the range is wide). Mutually exclusive with the duplicate-injection
-                                slider above; that slider greys out while this is on.
-                              </p>
-                            </div>
-                          </label>
-                          <label className="flex items-start gap-2" style={{ cursor: "pointer" }}>
-                            <input
-                              type="checkbox"
-                              checked={intFullInt32}
-                              onChange={e => setIntFullInt32(e.target.checked)}
-                              style={{ marginTop: 2, accentColor: "var(--color-accent)" }}
-                            />
-                            <div>
-                              <span className="text-xs font-semibold" style={{ color: "var(--color-text)" }}>
-                                Full 32-bit range
-                              </span>
-                              <p className="text-xs mt-0.5" style={{ color: "var(--color-muted)" }}>
-                                Sample from <code>[-2,147,483,648, 2,147,483,647]</code> instead of the default <code>[0, 10000)</code>.
-                                <span style={{ color: "#ffb74d" }}> Disables counting-sort&apos;s O(n+k) advantage</span> — its
-                                bucket array would be 4 GB, so it falls back to comparison performance like everyone else.
-                              </p>
-                            </div>
-                          </label>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Adversarial input toggle */}
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-wider mb-1.5" style={{ color: "var(--color-muted)" }}>
-                        Adversarial input
-                      </p>
-                      <button
-                        onClick={() => setAdversarialEnabled(v => !v)}
-                        title="Generates worst-case input specifically designed to maximize comparisons for each algorithm (e.g., median-of-3 killer for Quicksort)"
-                        style={{
-                          display: "inline-flex", alignItems: "center", gap: 6,
-                          padding: "3px 10px", fontSize: 10, borderRadius: 5, cursor: "pointer",
-                          background: adversarialEnabled ? "rgba(239,83,80,0.12)" : "var(--color-surface-1)",
-                          border: `1px solid ${adversarialEnabled ? "#ef5350" : "var(--color-border)"}`,
-                          color: adversarialEnabled ? "#ef5350" : "var(--color-muted)",
-                          fontFamily: "monospace",
-                        }}
-                      >
-                        ⚡ Adversarial {adversarialEnabled ? "on" : "off"}
-                      </button>
-                      {adversarialEnabled && (
-                        <p className="text-xs mt-1.5" style={{ color: "var(--color-muted)", fontFamily: "monospace" }}>
-                          One extra worst-case input per algorithm per size is added to the timing pool. For Quicksort this is the median-of-3 killer pattern; reversed for insertion/selection/bubble; large-spread for counting/radix; all-same-bucket for bucket sort.
-                        </p>
+                        </AdvSection>
                       )}
-                    </div>
-                    {/* Worker isolation toggle */}
-                    <div>
-                      <label className="flex items-start gap-2" style={{ cursor: "pointer" }}>
-                        <input
-                          type="checkbox"
-                          checked={useWorkerIsolation}
-                          onChange={e => setUseWorkerIsolation(e.target.checked)}
-                          style={{ marginTop: 2, accentColor: "var(--color-accent)" }}
-                        />
-                        <div>
-                          <span className="text-xs font-semibold" style={{ color: "var(--color-text)" }}>
-                            Web Worker isolation
-                          </span>
-                          <p className="text-xs mt-0.5" style={{ color: "var(--color-muted)" }}>
-                            Each algorithm runs in its own Worker thread — JIT compilation and GC for one algo cannot pollute timing of another.
-                            <span style={{ color: "#ffb74d" }}> Tradeoff: ~10–50 ms overhead per worker creation; space measurement falls back to theoretical.</span>
-                          </p>
-                        </div>
-                      </label>
-                    </div>
+                    </AdvGroup>
 
-                    {/* Per-sort timeout */}
-                    <div>
-                      <label className="flex items-start gap-2" style={{ cursor: "pointer" }}>
-                        <input
-                          type="checkbox"
-                          checked={timeoutEnabled}
-                          onChange={e => setTimeoutEnabled(e.target.checked)}
-                          style={{ marginTop: 2, accentColor: "var(--color-accent)" }}
-                        />
-                        <div style={{ flex: 1 }}>
-                          <span className="text-xs font-semibold" style={{ color: "var(--color-text)" }}>
-                            Per-sort timeout
-                          </span>
-                          <p className="text-xs mt-0.5" style={{ color: "var(--color-muted)" }}>
-                            Any single sort exceeding this wall-clock budget is marked timed out and the algorithm is excluded from larger n.
-                            <span style={{ color: "#ffb74d" }}> Disable for long benchmarks where a 10 s cap would prematurely terminate slow O(n²) algorithms.</span>
-                          </p>
-                          <div className="flex items-center gap-2 mt-1.5">
-                            <input
-                              type="number"
-                              min={1}
-                              max={600}
-                              value={timeoutSec}
-                              disabled={!timeoutEnabled}
-                              onChange={e => {
-                                const v = Number(e.target.value);
-                                if (Number.isFinite(v) && v >= 1 && v <= 600) setTimeoutSec(v);
-                              }}
-                              onClick={e => e.stopPropagation()}
-                              style={{
-                                fontFamily: "monospace", fontSize: 11, width: 60,
-                                padding: "3px 6px", borderRadius: 4,
-                                background: "var(--color-surface-2)",
-                                border: "1px solid var(--color-border)",
-                                color: "var(--color-text)",
-                                opacity: timeoutEnabled ? 1 : 0.4,
-                                cursor: timeoutEnabled ? "text" : "not-allowed",
-                              }}
-                            />
-                            <span style={{ fontSize: 11, fontFamily: "monospace", color: "var(--color-muted)" }}>
-                              seconds
-                            </span>
+                    {/* ── Group: Measurement ── */}
+                    <AdvGroup title="Measurement">
+                      <AdvSection title="Rounds & warm-up">
+                        <div className="flex flex-wrap items-end gap-5">
+                          <div className="flex flex-col gap-1">
+                            <span className="text-xs" style={{ color: "var(--color-muted)" }}>Rounds</span>
+                            <Spinner value={rounds} onChange={setRounds} min={1} max={50} label="Rounds" />
                           </div>
+                          <div className="flex flex-col gap-1">
+                            <span className="text-xs" style={{ color: "var(--color-muted)" }}>Warmup (discard first)</span>
+                            <Spinner value={warmup} onChange={v => setWarmup(Math.min(v, rounds - 1))} min={0} max={Math.max(0, rounds - 1)} label="Warmup" />
+                          </div>
+                          <span className="text-xs pb-0.5" style={{ color: "var(--color-muted)" }}>
+                            {Math.max(0, rounds - warmup)} rounds recorded · best kept
+                          </span>
                         </div>
-                      </label>
-                    </div>
+                      </AdvSection>
+
+                      <AdvSection title="Sort engine" hint="V8 (default JIT) · AssemblyScript-compiled Wasm · WebGPU compute">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {(() => {
+                            const webgpuReady = webgpuBundle != null && webgpuBundle.ready === true;
+                            const webgpuReason = webgpuBundle && webgpuBundle.ready === false ? webgpuBundle.reason : null;
+                            const opts = [
+                              { id: "v8" as const,     label: "V8 (JS)", desc: "Use the JavaScript implementations — the default for every algorithm.", disabled: false, disabledReason: "" },
+                              { id: "wasm" as const,   label: "Wasm",    desc: "Route supported algorithms through the AssemblyScript .wasm module. Currently insertion, quicksort, and Logos (int32 port), integer data only; other algos / dtypes silently fall back to V8.", disabled: !wasmBundle, disabledReason: "Wasm module not built yet — run `npm run build:wasm` once to enable." },
+                              { id: "webgpu" as const, label: "WebGPU",  desc: "Route GPU-ported algorithms through a WebGPU compute pipeline. No kernels are shipped in v1 — selecting this engine while the supported set is empty falls through to V8 for every algorithm, but the badge wiring is live so ported sorts will light up immediately.", disabled: !webgpuReady, disabledReason: webgpuReason ?? "WebGPU support not detected yet." },
+                            ];
+                            return opts.map(opt => {
+                              const active = engine === opt.id;
+                              return (
+                                <button
+                                  key={opt.id}
+                                  onClick={() => { if (!opt.disabled) setEngine(opt.id); }}
+                                  disabled={opt.disabled}
+                                  title={opt.disabled ? opt.disabledReason : opt.desc}
+                                  style={{
+                                    padding: "3px 10px", fontSize: 10, borderRadius: 5,
+                                    cursor: opt.disabled ? "not-allowed" : "pointer",
+                                    background: active ? "color-mix(in srgb, var(--color-accent) 18%, transparent)" : "var(--color-surface-1)",
+                                    border: `1px solid ${active ? "var(--color-accent)" : "var(--color-border)"}`,
+                                    color: opt.disabled ? "var(--color-muted)" : active ? "var(--color-accent)" : "var(--color-muted)",
+                                    fontFamily: "monospace", fontWeight: active ? 600 : 400,
+                                    opacity: opt.disabled ? 0.5 : 1,
+                                  }}
+                                >
+                                  {opt.label}
+                                </button>
+                              );
+                            });
+                          })()}
+                        </div>
+                        <p className="text-[10px] mt-1.5" style={{ color: "var(--color-muted)", fontFamily: "monospace" }}>
+                          {wasmBundle
+                            ? "Wasm engine ready · supports insertion, quicksort, and Logos (int32 port) on integer data · marshalling cost is included in the timing (honest 'JS calling Wasm' number)"
+                            : "Wasm engine disabled — run npm install + npm run build:wasm to compile /public/wasm-sorts/sorts.wasm"}
+                          {engine === "wasm" && wasmBundle && " · forces main-thread timing (worker isolation skipped)"}
+                        </p>
+                        <p className="text-[10px] mt-1" style={{ color: "var(--color-muted)", fontFamily: "monospace" }}>
+                          {webgpuBundle == null
+                            ? "WebGPU detection pending…"
+                            : webgpuBundle.ready
+                              ? `WebGPU adapter detected${webgpuBundle.info.vendor || webgpuBundle.info.device ? ` (${[webgpuBundle.info.vendor, webgpuBundle.info.device].filter(Boolean).join(" · ")})` : ""}${WEBGPU_SUPPORTED.size === 0 ? " · no GPU kernels ported yet — selecting this engine currently falls through to V8 for every algorithm" : ` · supports ${[...WEBGPU_SUPPORTED].join(", ")} on integer data`}`
+                              : `WebGPU disabled — ${webgpuBundle.reason}`}
+                          {engine === "webgpu" && webgpuBundle?.ready && " · forces main-thread timing (worker isolation skipped)"}
+                        </p>
+                      </AdvSection>
+
+                      <AdvToggle checked={duplicatePerRound} onChange={setDuplicatePerRound} label="Duplicate input each round">
+                        On (default): each round sorts a fresh copy of the input, so every round and every algorithm
+                        measures pristine data. The copy reuses one scratch array per algorithm/size, so it adds no
+                        per-round allocation.
+                        <span style={{ color: "#ffb74d" }}> Off: sorts the shared input in place — lowest memory, but later
+                        algorithms / rounds see already-sorted data, so it&apos;s a single-round diagnostic only and forces
+                        main-thread mode.</span>
+                      </AdvToggle>
+
+                      <AdvToggle checked={useWorkerIsolation} onChange={setUseWorkerIsolation} label="Web Worker isolation" disabled={!duplicatePerRound}>
+                        Each algorithm runs in its own Worker thread — JIT compilation and GC for one algo cannot pollute timing of another.
+                        <span style={{ color: "#ffb74d" }}> Tradeoff: ~10–50 ms overhead per worker creation; space measurement falls back to theoretical.</span>
+                        {!duplicatePerRound && <span style={{ color: "#ffb74d" }}> (Disabled while &ldquo;Duplicate input&rdquo; is off.)</span>}
+                      </AdvToggle>
+
+                      <AdvToggle checked={timeoutEnabled} onChange={setTimeoutEnabled} label="Per-sort timeout">
+                        Any single sort exceeding this wall-clock budget is marked timed out and the algorithm is excluded from larger n.
+                        <span style={{ color: "#ffb74d" }}> Default 3 s — disable (or raise) for long benchmarks where slow O(n²) algos would prematurely terminate.</span>
+                        <div className="flex items-center gap-2 mt-1.5">
+                          <input
+                            type="number"
+                            min={1}
+                            max={600}
+                            value={timeoutSec}
+                            disabled={!timeoutEnabled}
+                            onChange={e => {
+                              const v = Number(e.target.value);
+                              if (Number.isFinite(v) && v >= 1 && v <= 600) setTimeoutSec(v);
+                            }}
+                            onClick={e => e.stopPropagation()}
+                            style={{
+                              fontFamily: "monospace", fontSize: 11, width: 60,
+                              padding: "3px 6px", borderRadius: 4,
+                              background: "var(--color-surface-2)",
+                              border: "1px solid var(--color-border)",
+                              color: "var(--color-text)",
+                              opacity: timeoutEnabled ? 1 : 0.4,
+                              cursor: timeoutEnabled ? "text" : "not-allowed",
+                            }}
+                          />
+                          <span style={{ fontSize: 11, fontFamily: "monospace", color: "var(--color-muted)" }}>seconds</span>
+                        </div>
+                      </AdvToggle>
+                    </AdvGroup>
+
+                    {/* ── Group: Stress & algorithm tuning ── */}
+                    <AdvGroup title="Stress & algorithm tuning" defaultOpen={false}>
+                      {(selected.has("quick") || selected.has("shell")) && (
+                        <AdvSection title="Algorithm options">
+                          <div className="flex flex-col gap-2">
+                            {selected.has("quick") && (
+                              <div className="flex items-start gap-3">
+                                <span className="text-xs shrink-0 pt-0.5" style={{ color: "var(--color-muted)", width: 128 }}>Quick Sort pivot</span>
+                                <div className="flex flex-wrap gap-1">
+                                  {QUICK_PIVOT_OPTS.map(opt => (
+                                    <button
+                                      key={opt.id}
+                                      onClick={() => setQuickPivot(opt.id)}
+                                      title={opt.desc}
+                                      style={{
+                                        padding: "2px 8px", fontSize: 10,
+                                        background: quickPivot === opt.id ? "rgba(139,58,42,0.15)" : "var(--color-surface-1)",
+                                        border: `1px solid ${quickPivot === opt.id ? "var(--color-accent)" : "var(--color-border)"}`,
+                                        borderRadius: 4, cursor: "pointer",
+                                        color: quickPivot === opt.id ? "var(--color-text)" : "var(--color-muted)",
+                                      }}
+                                    >
+                                      {opt.label}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            {selected.has("shell") && (
+                              <div className="flex items-start gap-3">
+                                <span className="text-xs shrink-0 pt-0.5" style={{ color: "var(--color-muted)", width: 128 }}>Shell Sort gaps</span>
+                                <div className="flex flex-wrap gap-1">
+                                  {SHELL_GAPS_OPTS.map(opt => (
+                                    <button
+                                      key={opt.id}
+                                      onClick={() => setShellGaps(opt.id)}
+                                      title={opt.desc}
+                                      style={{
+                                        padding: "2px 8px", fontSize: 10,
+                                        background: shellGaps === opt.id ? "rgba(139,58,42,0.15)" : "var(--color-surface-1)",
+                                        border: `1px solid ${shellGaps === opt.id ? "var(--color-accent)" : "var(--color-border)"}`,
+                                        borderRadius: 4, cursor: "pointer",
+                                        color: shellGaps === opt.id ? "var(--color-text)" : "var(--color-muted)",
+                                      }}
+                                    >
+                                      {opt.label}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </AdvSection>
+                      )}
+
+                      <AdvSection title="Adversarial input">
+                        <button
+                          onClick={() => setAdversarialEnabled(v => !v)}
+                          title="Generates worst-case input specifically designed to maximize comparisons for each algorithm (e.g., median-of-3 killer for Quicksort)"
+                          style={{
+                            display: "inline-flex", alignItems: "center", gap: 6,
+                            padding: "3px 10px", fontSize: 10, borderRadius: 5, cursor: "pointer",
+                            background: adversarialEnabled ? "rgba(239,83,80,0.12)" : "var(--color-surface-1)",
+                            border: `1px solid ${adversarialEnabled ? "#ef5350" : "var(--color-border)"}`,
+                            color: adversarialEnabled ? "#ef5350" : "var(--color-muted)",
+                            fontFamily: "monospace",
+                          }}
+                        >
+                          ⚡ Adversarial {adversarialEnabled ? "on" : "off"}
+                        </button>
+                        {adversarialEnabled && (
+                          <p className="text-xs mt-1.5" style={{ color: "var(--color-muted)", fontFamily: "monospace" }}>
+                            One extra worst-case input per algorithm per size is added to the timing pool. For Quicksort this is the median-of-3 killer pattern; reversed for insertion/selection/bubble; large-spread for counting/radix; all-same-bucket for bucket sort.
+                          </p>
+                        )}
+                      </AdvSection>
+                    </AdvGroup>
                   </div>
                 )}
               </div>}
@@ -8313,105 +10858,216 @@ export default function BenchmarkVisualizer() {
                 </div>
               )}
 
-              {/* Buttons */}
-              <div className="print:hidden flex gap-1.5">
-                {status === "running" ? (
-                  <>
-                    <div style={{ flex: 1, fontSize: 10, fontFamily: "monospace", color: "var(--color-muted)", display: "flex", alignItems: "center", gap: 6, overflow: "hidden" }}>
-                      <span style={{ color: "var(--color-accent)", flexShrink: 0 }}>{currentAlgo ? (ALGO_NAMES[currentAlgo] ?? currentAlgo) : "…"}</span>
-                      <span style={{ flexShrink: 0 }}>n={currentN?.toLocaleString() ?? "…"}</span>
-                      <span style={{ flexShrink: 0, color: "var(--color-muted)" }}>{progress.done}/{progress.total}</span>
-                    </div>
+              {/* ── Session data toolbar ──
+                  Export + import of the aggregate stores the session views
+                  read from (sessionLog / winnerLog / ghostRuns). JSON is the
+                  round-trippable everything-bagel; CSV is the flat-table
+                  version for spreadsheet / pandas analysis. Import accepts
+                  the JSON format only — overwriting state with mismatched
+                  CSV would silently lose the winnerLog and ghostRuns. */}
+              {(() => {
+                const stamp = () => {
+                  const d = new Date();
+                  const pad = (n: number) => String(n).padStart(2, "0");
+                  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+                };
+                const hasData =
+                  Object.keys(sessionLog).length > 0 ||
+                  Object.keys(winnerLog).length > 0 ||
+                  Object.keys(ghostRuns).length > 0;
+                const exportJson = () => {
+                  if (!hasData) return;
+                  downloadSessionBlob(
+                    buildSessionDataJson(sessionLog, winnerLog, ghostRuns),
+                    `codecookbook-session-${stamp()}.json`,
+                    "application/json",
+                  );
+                };
+                const exportCsv = () => {
+                  if (!hasData) return;
+                  downloadSessionBlob(
+                    buildSessionDataCsv(sessionLog),
+                    `codecookbook-session-${stamp()}.csv`,
+                    "text/csv",
+                  );
+                };
+                const onImportPick = (e: React.ChangeEvent<HTMLInputElement>) => {
+                  const file = e.target.files?.[0];
+                  // Reset the input value so picking the same file twice in a
+                  // row still fires `onChange` (otherwise React keeps the old
+                  // file object and the second pick is a no-op).
+                  e.target.value = "";
+                  if (!file) return;
+                  file.text().then(text => {
+                    const result = parseSessionDataJson(text);
+                    if (!result.ok) {
+                      setSessionImportMsg({ kind: "error", text: result.error });
+                      return;
+                    }
+                    // Hydrate state + localStorage. We deliberately REPLACE
+                    // rather than merge — merging would silently double-count
+                    // runs in the rolling-mean buckets.
+                    setSessionLog(result.data.sessionLog);
+                    setWinnerLog(result.data.winnerLog);
+                    setGhostRuns(result.data.ghostRuns);
+                    try { localStorage.setItem("codecookbook.sessionLog", JSON.stringify(result.data.sessionLog)); } catch {}
+                    try { localStorage.setItem("codecookbook.winnerLog",  JSON.stringify(result.data.winnerLog));  } catch {}
+                    try { localStorage.setItem("codecookbook.ghostRuns",  JSON.stringify(result.data.ghostRuns));  } catch {}
+                    const counts = Object.keys(result.data.sessionLog).length;
+                    setSessionImportMsg({ kind: "ok", text: `Imported ${counts} data type${counts !== 1 ? "s" : ""} from ${file.name}` });
+                  }).catch(err => {
+                    setSessionImportMsg({ kind: "error", text: `Couldn't read file: ${err instanceof Error ? err.message : "unknown error"}` });
+                  });
+                };
+                const btnStyle: React.CSSProperties = {
+                  fontSize: 9, padding: "3px 8px", borderRadius: 4, cursor: "pointer",
+                  background: "var(--color-surface-1)", border: "1px solid var(--color-border)",
+                  color: "var(--color-muted)", fontFamily: "monospace",
+                };
+                return (
+                  <div className="rounded-xl px-3 py-2 flex flex-wrap items-center gap-2 print:hidden" style={{ background: "var(--color-surface-1)", border: "1px solid var(--color-border)" }}>
+                    <span className="text-[9px] uppercase tracking-wider" style={{ color: "var(--color-muted)", fontWeight: 600 }}>
+                      Session data
+                    </span>
                     <button
-                      onClick={stop}
-                      disabled={stopPending}
-                      style={btn("danger", { padding: "4px 12px", opacity: stopPending ? 0.5 : 1, cursor: stopPending ? "not-allowed" : "pointer" })}
+                      onClick={exportJson}
+                      disabled={!hasData}
+                      title="Export the full session (sessionLog + winnerLog + ghostRuns). Round-trippable via Import."
+                      style={{ ...btnStyle, opacity: hasData ? 1 : 0.4, cursor: hasData ? "pointer" : "not-allowed" }}
                     >
-                      <Square size={11} strokeWidth={2} fill="currentColor" /> {stopPending ? "Stopping…" : "Stop"}
+                      ↓ JSON
                     </button>
-                  </>
-                ) : (
-                  <>
                     <button
-                      onClick={() => run()}
-                      disabled={!canRun}
-                      style={btn("primary", { padding: "4px 12px", flex: 1, justifyContent: "center", opacity: canRun ? 1 : 0.5, cursor: canRun ? "pointer" : "not-allowed" })}
+                      onClick={exportCsv}
+                      disabled={!hasData}
+                      title="Export sessionLog flattened to one row per (dataType, algo, n). Loads directly into pandas / spreadsheets. WinnerLog and ghost runs not included — use JSON for those."
+                      style={{ ...btnStyle, opacity: hasData ? 1 : 0.4, cursor: hasData ? "pointer" : "not-allowed" }}
                     >
-                      <Play size={11} strokeWidth={2} />
-                      {status === "done" ? "Re-run" : "Run"}
+                      ↓ CSV
                     </button>
-
-                    {status === "done" && (
-                      <button onClick={reset} style={btn("secondary", { padding: "4px 12px" })}>
-                        <RotateCcw size={11} strokeWidth={1.75} /> Reset
-                      </button>
-                    )}
-                  </>
-                )}
-              </div>
-
-              {/* Status: algorithms + settings + current run progress. Sits below the
-                  run/stop buttons so it reads as "what's running" rather than "what to run". */}
-              <div className="text-xs mt-2 print:hidden flex flex-col gap-0.5" style={{ color: "var(--color-muted)", fontFamily: "monospace" }}>
-                {status === "running" ? (
-                  <>
-                    <span>
-                      <span style={{ color: "var(--color-accent)", fontWeight: 600 }}>
-                        {currentAlgo ? (ALGO_NAMES[currentAlgo] ?? currentAlgo) : "…"}
+                    <label
+                      title="Import a previously-exported JSON session file. REPLACES current data (merge would silently double-count runs)."
+                      style={{ ...btnStyle, display: "inline-flex", alignItems: "center", gap: 4 }}
+                    >
+                      ↑ Import
+                      <input
+                        type="file"
+                        accept="application/json,.json"
+                        onChange={onImportPick}
+                        style={{ display: "none" }}
+                      />
+                    </label>
+                    {sessionImportMsg && (
+                      <span style={{
+                        fontSize: 9, fontFamily: "monospace",
+                        color: sessionImportMsg.kind === "ok" ? "#4db6ac" : "#ef5350",
+                        marginLeft: 4,
+                      }}>
+                        {sessionImportMsg.kind === "ok" ? "✓ " : "✗ "}{sessionImportMsg.text}
                       </span>
-                      {" · "}
-                      n={currentN?.toLocaleString() ?? "…"}
-                      {" · "}
-                      <span style={{ color: "var(--color-text)" }}>{progress.done}/{progress.total}</span>
-                      {progress.total > 0 && (
-                        <span style={{ opacity: 0.7 }}>
-                          {" ("}{Math.round((progress.done / progress.total) * 100)}%)
-                        </span>
-                      )}
-                    </span>
-                    <span>
-                      {[...scenarios].join(", ")} · {rounds} round{rounds !== 1 ? "s" : ""} · {warmup} warm-up{useWorkerIsolation ? " · worker isolation" : ""}{adversarialEnabled ? " · adversarial" : ""}
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <span>
-                      {[...activeAlgos, ...enabledSavedSorts.map(s => `custom-${s.id}`)]
-                        .map(id => ALGO_NAMES[id] ?? id)
-                        .join(", ") || <span style={{ color: "#ef5350" }}>no algorithms selected</span>}
-                    </span>
-                    <span>
-                      {[...scenarios].join(", ")} · n={sortedSizes.map(n => fmtN(n)).join(", ")} · {rounds} round{rounds !== 1 ? "s" : ""} · {warmup} warm-up
-                    </span>
-                  </>
-                )}
-              </div>
+                    )}
+                  </div>
+                );
+              })()}
 
-              {/* Stop-delay hint: shown only in main-thread mode when Stop hasn't taken effect yet */}
-              {stopPending && status === "running" && !useWorkerIsolation && (
-                <div
-                  className="mt-2"
-                  style={{
-                    fontSize: 10, fontFamily: "monospace", lineHeight: 1.4,
-                    padding: "6px 10px", borderRadius: 5,
-                    background: "rgba(255,183,77,0.10)",
-                    border: "1px solid rgba(255,183,77,0.45)",
-                    color: "#ffb74d",
-                  }}
-                >
-                  Stop is delayed — JavaScript can&apos;t interrupt a running sort on the main thread.
-                  Will bail at the next round/algorithm boundary.{" "}
-                  <button
-                    onClick={() => setUseWorkerIsolation(true)}
-                    style={{
-                      background: "none", border: "none",
-                      color: "#ffb74d", textDecoration: "underline",
-                      cursor: "pointer", padding: 0, font: "inherit",
-                    }}
-                  >
-                    Enable Worker isolation
-                  </button>{" "}
-                  for instant stop on the next run.
+              {/* Three at-a-glance numbers + best-per-type callouts. */}
+              <SessionSummary
+                log={sessionLog}
+                runCount={runCount}
+                sessionStartedAt={sessionStartedAt}
+                algoNames={ALGO_NAMES}
+                algoColors={ALGO_COLORS}
+              />
+
+              {/* Running log of winners across runs — broken out by data type.
+                  Persisted to localStorage; accumulates rolling means per
+                  (dataType, algoId, size) at the end of each successful run.
+                  `spaceMap` is the SessionLog (which carries meanSpaceBytes per
+                  bucket), used to compute the in-place % column on each row. */}
+              <WinnersLog
+                log={winnerLog}
+                spaceMap={sessionLog}
+                ghostRuns={ghostRuns}
+                algoNames={ALGO_NAMES}
+                algoColors={ALGO_COLORS}
+                onClear={() => {
+                  setWinnerLog({});
+                  try { localStorage.removeItem("codecookbook.winnerLog"); } catch { /* noop */ }
+                }}
+              />
+
+              {/* Empirical Big-O fit across the session — flags when a sort's
+                  measured slope drifts more than 0.2 from its theoretical
+                  complexity class. Useful sanity check for implementations. */}
+              <SessionBigO
+                log={sessionLog}
+                algoNames={ALGO_NAMES}
+                algoColors={ALGO_COLORS}
+                algoTime={ALGO_TIME}
+              />
+
+              {/* Session-wide head-to-head matrices. Like the per-run pair
+                  matrix, but tallying W/L across EVERY (dataType, n) bucket
+                  in the session, separately for time and aux memory. */}
+              <SessionMatrix
+                log={sessionLog}
+                algoNames={ALGO_NAMES}
+                algoColors={ALGO_COLORS}
+              />
+
+              {/* Session-wide aggregate speed + memory curves. Same shape as
+                  the per-run curve, but persisted across every benchmark in
+                  this session. Color by algorithm, dashed/dotted/solid by
+                  integer/float/string so all three types overlay on one chart. */}
+              <SessionCurves
+                log={sessionLog}
+                algoNames={ALGO_NAMES}
+                algoColors={ALGO_COLORS}
+                onClear={() => {
+                  setSessionLog({});
+                  try { localStorage.removeItem("codecookbook.sessionLog"); } catch { /* noop */ }
+                }}
+              />
+
+              {/* ── Sort network graph ──
+                  Cytoscape rendering of every (algorithm, data-type) measurement
+                  in the session. Each algo is a node connected to one of three
+                  data-type hubs by an edge whose color encodes speed (green =
+                  fastest of that algo's dtypes, red = slowest), width encodes
+                  memory (log-scaled across all edges), and line-style encodes
+                  the dtype convention (integer = dotted, float = dashed,
+                  string = solid — applied everywhere, see lib/dataTypeStyle.ts). */}
+              <SortNetworkGraph
+                log={sessionLog}
+                algoNames={ALGO_NAMES}
+                algoColors={ALGO_COLORS}
+              />
+
+              {/* ── 3D history view ──
+                  Lower-left long-term-view: every stored ghost run rendered as
+                  a faded polyline in the same n/time/space axes as the per-run
+                  Chart3D in the right pane. Newest run at full brightness,
+                  oldest at ~5%. Storage cap is GHOST_MAX (100); the slider
+                  inside the component gates how many of those actually draw.
+                  Mode toggle lets the user switch between an all-algos overlay
+                  (the wow-shot) and a single-algo focus (where drift is
+                  actually readable). Hidden until at least one algorithm has
+                  some history to show. */}
+              {chartAlgos.length > 0 && (Object.values(ghostRuns).some(r => r.length > 0) || hasCurveData) && (
+                <div className="rounded-xl p-4" style={{ background: "var(--color-surface-1)", border: "1px solid var(--color-border)" }}>
+                  <div className="flex items-center justify-between mb-3">
+                    <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
+                      3D History
+                    </p>
+                    <span className="text-xs" style={{ color: "var(--color-muted)", fontFamily: "monospace", fontSize: 9 }}>
+                      drift across runs · last {GHOST_MAX} kept
+                    </span>
+                  </div>
+                  <Chart3DHistory
+                    current={curveDataExt}
+                    ghostRuns={ghostRuns}
+                    algos={chartAlgos}
+                  />
                 </div>
               )}
             </div>
@@ -8487,12 +11143,6 @@ export default function BenchmarkVisualizer() {
                           </span>
                         )}
                       </div>
-                    )}
-                    {status === "running" && (
-                      <p className="text-xs mt-0.5" style={{ color: "var(--color-muted)" }}>
-                        Timing {currentAlgo ? ALGO_NAMES[currentAlgo] : "…"} at n={currentN?.toLocaleString()}…
-                        <span className="ml-2 font-mono">({progress.done}/{progress.total})</span>
-                      </p>
                     )}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
@@ -8579,7 +11229,7 @@ export default function BenchmarkVisualizer() {
                 {/* Tab-hidden warning banner — browsers throttle background-tab
                     timers, so any timing captured while hidden is unreliable.
                     Dismissable so the user can acknowledge and move on. */}
-                {tabHiddenDuringRun && (status === "running" || status === "done") && (
+                {tabHiddenDuringRun && status === "done" && (
                   <div
                     className="mt-2"
                     style={{
@@ -8876,90 +11526,6 @@ export default function BenchmarkVisualizer() {
             )}
           </div>
 
-      {/* ── All Algorithms section ── */}
-      {chartAlgosBase.length > 0 && (
-        <div
-          className="px-5 py-6"
-          style={{ borderTop: "1px solid var(--color-border)" }}
-        >
-          <div className="flex items-center justify-between mb-4">
-            <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
-              All Algorithms
-            </p>
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-xs" style={{ color: "var(--color-muted)" }}>Sort by:</span>
-                        <div className="flex rounded overflow-hidden" style={{ border: "1px solid var(--color-border)" }}>
-                          {(["time", "space", "both"] as const).map(mode => (
-                            <button
-                              key={mode}
-                              onClick={() => setMiniCardSort(mode)}
-                              className="text-xs px-2 py-0.5"
-                              style={{
-                                background: miniCardSort === mode ? "var(--color-accent)" : "var(--color-surface-1)",
-                                color: miniCardSort === mode ? "#fff" : "var(--color-muted)",
-                                border: "none", cursor: "pointer", fontWeight: miniCardSort === mode ? 600 : 400,
-                              }}
-                            >
-                              {mode === "time" ? "Time" : mode === "space" ? "Space" : "Both"}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                    {(() => {
-                      const sortedCards = [...chartAlgosBase].sort((a, b) => {
-                        const rankOf = (id: string): number | null => {
-                          const rt = summaryResults.find(r => r.id === id)?.rank ?? null;
-                          const rs = summarySpaceResults.find(r => r.id === id)?.rank ?? null;
-                          if (miniCardSort === "time")  return rt;
-                          if (miniCardSort === "space") return rs;
-                          if (rt != null && rs != null) return (rt + rs) / 2;
-                          return rt ?? rs ?? null;
-                        };
-                        const ra = rankOf(a), rb = rankOf(b);
-                        if (ra != null && rb != null) return ra - rb;
-                        if (ra != null) return -1;
-                        if (rb != null) return 1;
-                        const bgoA = BIG_O_RANK[miniCardSort === "space" ? (ALGO_SPACE[a] ?? "") : (ALGO_TIME[a] ?? "")] ?? 99;
-                        const bgoB = BIG_O_RANK[miniCardSort === "space" ? (ALGO_SPACE[b] ?? "") : (ALGO_TIME[b] ?? "")] ?? 99;
-                        return bgoA - bgoB;
-                      });
-                      const maxSpaceBytes = Math.max(
-                        ...chartAlgosBase.map(id => {
-                          const pts = (curveDataExt[id] ?? []).filter(p => !p.timedOut);
-                          return pts.sort((a, b) => b.n - a.n)[0]?.spaceBytes ?? 0;
-                        }), 1
-                      );
-                      const maxTotalSteps = Math.max(
-                        ...chartAlgosBase.map(id => prerunSteps[id]?.length ?? 0), 1
-                      );
-                      return (
-                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-2">
-                          {sortedCards.map(id => (
-                            <AlgoMiniCard
-                              key={id}
-                              id={id}
-                              steps={prerunSteps[id] ?? null}
-                              benchData={curveDataExt[id] ?? null}
-                              isActive={status === "running" && currentAlgo === id}
-                              rank={summaryResults.find(r => r.id === id)?.rank ?? null}
-                              spaceRank={miniCardSort !== "time" ? (summarySpaceResults.find(r => r.id === id)?.rank ?? null) : null}
-                              showBoth={miniCardSort === "both"}
-                              loop={status === "running"}
-                              maxSpaceBytes={maxSpaceBytes}
-                              maxTotalSteps={maxTotalSteps}
-                              onStop={status === "running" ? () => stopAlgo(id) : undefined}
-                              failed={sampleProofs[id]?.failed}
-                              pulseEnabled={pulseEnabled}
-                              onTogglePulse={togglePulse}
-                            />
-                          ))}
-                        </div>
-                      );
-          })()}
-        </div>
-      )}
-
       {/* ── Rankings section ── */}
       {summaryResults.length > 0 && (
         <div
@@ -9066,6 +11632,7 @@ export default function BenchmarkVisualizer() {
                     <button style={hdBtn("tvsb",  1)}      onClick={() => handleSort("tvsb")}>t vs best{sortIcon("tvsb")}</button>
                     <button style={hdBtn("tbigo", 1)}      onClick={() => handleSort("tbigo")}>t big O{sortIcon("tbigo")}</button>
                     <button style={hdBtn("fit",   1)}      onClick={() => handleSort("fit")} title="Empirically fitted exponent k (time ∝ nᵏ)">fit nᵏ{sortIcon("fit")}</button>
+                    <div style={cellHd(1)}                 title="Coefficient of variation across the last GHOST_MAX runs at this n. Low (<5%) = rock-steady; medium (5–15%) = some jitter; high (>15%) = noisy or thermally-throttled. Needs ≥2 ghost runs at this n to compute.">stab.</div>
                     <div style={cellHd(1)}                 title="Working-set cache level at the largest measured n">cache</div>
                     <button style={hdBtn("space", 1, CSW)} onClick={() => handleSort("space")}>space{sortIcon("space")}</button>
                     <button style={hdBtn("svsb",  1)}      onClick={() => handleSort("svsb")}>s vs best{sortIcon("svsb")}</button>
@@ -9107,6 +11674,7 @@ export default function BenchmarkVisualizer() {
                             <div style={cell("var(--color-muted)", 1)}>{estMs != null ? `${(estMs / summaryFastest).toFixed(0)}×` : "—"}</div>
                             <div style={cell("var(--color-muted)", 1)}>{ALGO_TIME[id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? "—"}</div>
                             <div style={cell("var(--color-muted)", 1)}>{fit?.label ?? "—"}</div>
+                            <div style={cell("var(--color-muted)", 1)} title="No CoV: the algo timed out and isn't sampled in ghost runs at this n">—</div>
                             <div style={cell("var(--color-muted)", 1)}>—</div>
                             <div style={cell("var(--color-muted)", 1, CSW)}>—</div>
                             <div style={cell("var(--color-muted)", 1)}>—</div>
@@ -9139,6 +11707,7 @@ export default function BenchmarkVisualizer() {
                             <div style={cell("var(--color-muted)", 1)}>{(row.timeMs / summaryFastest).toFixed(1)}×</div>
                             <div style={cell("var(--color-muted)", 1)}>{row.label.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn")}</div>
                             <div style={cell("var(--color-muted)", 1)}>—</div>
+                            <div style={cell("var(--color-muted)", 1)} title="Reference rows are projected, not measured — no CoV applies">—</div>
                             <div style={cell("var(--color-muted)", 1)}>—</div>
                             <div style={cell("var(--color-muted)", 1, CSW)}>—</div>
                             <div style={cell("var(--color-muted)", 1)}>—</div>
@@ -9211,6 +11780,30 @@ export default function BenchmarkVisualizer() {
                                 textDecorationColor: "rgba(239,83,80,0.55)",
                               }}>
                                 {ALGO_NAMES[row.id]}
+                                {wasmExecutedAlgos.has(row.id) && (
+                                  <span title={`This algorithm ran via the AssemblyScript-compiled Wasm module (int32 port). Marshalling cost is included in the timing.`} style={{
+                                    fontSize: 6, fontWeight: 700, fontFamily: "monospace",
+                                    padding: "0px 3px", borderRadius: 2, whiteSpace: "nowrap",
+                                    background: "rgba(124,106,247,0.18)",
+                                    border: "1px solid rgba(124,106,247,0.55)",
+                                    color: "var(--color-accent)", textDecoration: "none",
+                                    flexShrink: 0,
+                                  }}>
+                                    Wasm
+                                  </span>
+                                )}
+                                {webgpuExecutedAlgos.has(row.id) && (
+                                  <span title={`This algorithm ran via a WebGPU compute pipeline (int32). Buffer copy-in / copy-out cost is included in the timing.`} style={{
+                                    fontSize: 6, fontWeight: 700, fontFamily: "monospace",
+                                    padding: "0px 3px", borderRadius: 2, whiteSpace: "nowrap",
+                                    background: "rgba(34,197,194,0.18)",
+                                    border: "1px solid rgba(34,197,194,0.55)",
+                                    color: "#0e9b96", textDecoration: "none",
+                                    flexShrink: 0,
+                                  }}>
+                                    GPU
+                                  </span>
+                                )}
                                 {sampleProofs[row.id]?.failed && (
                                   <span title={`Sort produced out-of-order output (sample index ${sampleProofs[row.id].badIdx}). Result is unreliable.`} style={{
                                     fontSize: 6, fontWeight: 700, fontFamily: "monospace",
@@ -9258,6 +11851,43 @@ export default function BenchmarkVisualizer() {
                           <div style={{ ...cell("var(--color-muted)", 1), opacity: 0.8, cursor: "default" }} title={timeFit ? `Empirical fit: time ∝ n^${timeFit.k.toFixed(3)} (log-log regression)` : "Not enough data to fit"}>
                             {timeFit ? `n${toSup(timeFit.k.toFixed(2))}` : "—"}
                           </div>
+                          {/* stab. column — coefficient of variation across the
+                              algo's last GHOST_MAX ghost runs at this n. Reads
+                              every stored run's points[] for matches, builds the
+                              sample vector, returns CoV%. Color tiers: green
+                              <5%, amber 5-15%, red ≥15%. Falls through to "—"
+                              when fewer than 2 runs have a point at this n. */}
+                          {(() => {
+                            if (!largestDone) return <div style={cell("var(--color-muted)", 1)} title="No completed n to evaluate stability at yet">—</div>;
+                            const samples: number[] = [];
+                            for (const run of (ghostRuns[row.id] ?? [])) {
+                              for (const p of run.points) {
+                                if (p.n === largestDone && p.timeMs > 0) {
+                                  samples.push(p.timeMs);
+                                  break; // one sample per run per n
+                                }
+                              }
+                            }
+                            if (samples.length < 2) {
+                              return <div style={cell("var(--color-muted)", 1)} title={`Need ≥2 ghost runs at n=${largestDone.toLocaleString()} (have ${samples.length})`}>—</div>;
+                            }
+                            const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
+                            if (mean <= 0) return <div style={cell("var(--color-muted)", 1)} title="Mean ≤0 — can't compute CoV">—</div>;
+                            // Sample stdev (Bessel's correction — n-1 in denominator).
+                            const variance = samples.reduce((s, x) => s + (x - mean) ** 2, 0) / (samples.length - 1);
+                            const std = Math.sqrt(variance);
+                            const cov = (std / mean) * 100;
+                            const color = cov < 5 ? "#4db6ac" : cov < 15 ? "#ffb74d" : "#ef5350";
+                            const label = cov < 5 ? "stable" : cov < 15 ? "jittery" : "noisy";
+                            return (
+                              <div
+                                style={cell(color, 1)}
+                                title={`CoV = ${cov.toFixed(1)}% across ${samples.length} ghost run${samples.length !== 1 ? "s" : ""} at n=${largestDone.toLocaleString()} (mean ${fmtTime(mean)}, σ ${fmtTime(std)}) — ${label}`}
+                              >
+                                {cov.toFixed(0)}%
+                              </div>
+                            );
+                          })()}
                           {(() => {
                             if (!largestDone) return <div style={cell("var(--color-muted)", 1)}>—</div>;
                             const cl = cacheLevel(row.id, largestDone);
@@ -9265,9 +11895,22 @@ export default function BenchmarkVisualizer() {
                           })()}
                           <div style={{ ...cell("var(--color-text)", 1, CSW), opacity: 0.75 }} title={`aux ${ALGO_SPACE[row.id] ?? "—"} · total ${totalSpaceLabel(row.id)}`}>
                             <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 1 }}>
-                              <span style={{ color: allocIsMeasured ? "#4db6ac" : "var(--color-muted)", fontFamily: "monospace", fontSize: "inherit" }} title="Auxiliary alloc: bytes counted via patched Array methods">
+                              <span style={{ color: allocIsMeasured ? "#4db6ac" : "var(--color-muted)", fontFamily: "monospace", fontSize: "inherit" }} title="Auxiliary alloc: bytes counted via patched Array + typed-array constructors">
                                 {allocIsMeasured ? fmtBytes(allocVal!) : "—"} <span style={{ fontSize: 7 }}>aux</span>
                               </span>
+                              {(() => {
+                                // Use heapDeltaBytes (real measurement only)
+                                // rather than spaceVal (which can carry a
+                                // theoretical estimate that'd false-flag the
+                                // verdict for unknown / custom sorts).
+                                const v = inPlaceVerdict(allocVal, pt?.heapDeltaBytes, largestDone ?? 0);
+                                if (!v) return null;
+                                return (
+                                  <span title={v.title} style={{ fontSize: 7, fontFamily: "monospace", fontWeight: 700, padding: "0 5px", borderRadius: 8, background: v.bg, color: v.color, cursor: "help" }}>
+                                    {v.label}
+                                  </span>
+                                );
+                              })()}
                               {allocIsMeasured && largestDone != null && (
                                 <span style={{ fontSize: 7, fontFamily: "monospace", color: "#80cbc4", opacity: 0.85 }} title={`Total: auxiliary (${fmtBytes(allocVal!)}) + input (${fmtBytes(largestDone * 8)})`}>
                                   {fmtBytes(allocVal! + largestDone * 8)} total
@@ -9314,11 +11957,182 @@ export default function BenchmarkVisualizer() {
           />
         </div>
       )}
+
+      {/* ── All Algorithms section ──
+          Lives at the bottom of the right pane: once a user has scanned the
+          chart + rankings + complexity analysis, this is the catch-all
+          per-algorithm grid (mini cards with sparklines + memory mass). */}
+      {chartAlgosBase.length > 0 && (
+        <div
+          className="px-5 py-6"
+          style={{ borderTop: "1px solid var(--color-border)" }}
+        >
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
+              All Algorithms
+            </p>
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs" style={{ color: "var(--color-muted)" }}>Sort by:</span>
+              <div className="flex rounded overflow-hidden" style={{ border: "1px solid var(--color-border)" }}>
+                {(["time", "space", "both"] as const).map(mode => (
+                  <button
+                    key={mode}
+                    onClick={() => setMiniCardSort(mode)}
+                    className="text-xs px-2 py-0.5"
+                    style={{
+                      background: miniCardSort === mode ? "var(--color-accent)" : "var(--color-surface-1)",
+                      color: miniCardSort === mode ? "#fff" : "var(--color-muted)",
+                      border: "none", cursor: "pointer", fontWeight: miniCardSort === mode ? 600 : 400,
+                    }}
+                  >
+                    {mode === "time" ? "Time" : mode === "space" ? "Space" : "Both"}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          {(() => {
+            const sortedCards = [...chartAlgosBase].sort((a, b) => {
+              const rankOf = (id: string): number | null => {
+                const rt = summaryResults.find(r => r.id === id)?.rank ?? null;
+                const rs = summarySpaceResults.find(r => r.id === id)?.rank ?? null;
+                if (miniCardSort === "time")  return rt;
+                if (miniCardSort === "space") return rs;
+                if (rt != null && rs != null) return (rt + rs) / 2;
+                return rt ?? rs ?? null;
+              };
+              const ra = rankOf(a), rb = rankOf(b);
+              if (ra != null && rb != null) return ra - rb;
+              if (ra != null) return -1;
+              if (rb != null) return 1;
+              const bgoA = BIG_O_RANK[miniCardSort === "space" ? (ALGO_SPACE[a] ?? "") : (ALGO_TIME[a] ?? "")] ?? 99;
+              const bgoB = BIG_O_RANK[miniCardSort === "space" ? (ALGO_SPACE[b] ?? "") : (ALGO_TIME[b] ?? "")] ?? 99;
+              return bgoA - bgoB;
+            });
+            const maxSpaceBytes = Math.max(
+              ...chartAlgosBase.map(id => {
+                const pts = (curveDataExt[id] ?? []).filter(p => !p.timedOut);
+                return pts.sort((a, b) => b.n - a.n)[0]?.spaceBytes ?? 0;
+              }), 1
+            );
+            const maxTotalSteps = Math.max(
+              ...chartAlgosBase.map(id => prerunSteps[id]?.length ?? 0), 1
+            );
+            return (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-2">
+                {sortedCards.map(id => (
+                  <AlgoMiniCard
+                    key={id}
+                    id={id}
+                    steps={prerunSteps[id] ?? null}
+                    benchData={curveDataExt[id] ?? null}
+                    isActive={status === "running" && currentAlgo === id}
+                    rank={summaryResults.find(r => r.id === id)?.rank ?? null}
+                    spaceRank={miniCardSort !== "time" ? (summarySpaceResults.find(r => r.id === id)?.rank ?? null) : null}
+                    showBoth={miniCardSort === "both"}
+                    loop={status === "running"}
+                    maxSpaceBytes={maxSpaceBytes}
+                    maxTotalSteps={maxTotalSteps}
+                    onStop={status === "running" ? () => stopAlgo(id) : undefined}
+                    failed={sampleProofs[id]?.failed}
+                    wasmExecuted={wasmExecutedAlgos.has(id)}
+                    webgpuExecuted={webgpuExecutedAlgos.has(id)}
+                    pulseEnabled={pulseEnabled}
+                    onTogglePulse={togglePulse}
+                  />
+                ))}
+              </div>
+            );
+          })()}
+        </div>
+      )}
         </div>
 
       </div>
 
       </div>{/* end benchmark section */}
+
+      {/* ── Live running dashboard — consolidated status + sparklines ── */}
+      {status === "running" && (
+        <RunningDashboard
+          algos={runConfig?.algos ?? activeAlgos}
+          currentAlgo={currentAlgo}
+          currentN={currentN}
+          progress={progress}
+          curveData={curveData}
+          memSamples={memSamples}
+          configLine={`${[...scenarios].join(", ")} · ${rounds} round${rounds !== 1 ? "s" : ""} · ${warmup} warm-up${polymorphicMode ? " · polymorphic (int+float+string)" : (useWorkerIsolation ? " · worker isolation" : "")}${adversarialEnabled ? " · adversarial" : ""}${engine === "wasm" && wasmBundle != null ? " · engine: Wasm" : ""}${engine === "webgpu" && webgpuBundle?.ready ? " · engine: WebGPU" : ""}`}
+          algoNames={ALGO_NAMES}
+          algoColors={ALGO_COLORS}
+          onStop={stop}
+          stopPending={stopPending}
+          tabHidden={tabHiddenDuringRun}
+          workerIsolation={useWorkerIsolation}
+          runStartedAt={runStartedAt}
+          notifyOnDone={notifyOnDone}
+          onToggleNotify={toggleNotifyOnDone}
+        />
+      )}
+
+      {/* ── Floating Run panel ──
+          Sits in the same bottom-right slot as RunningDashboard but is only
+          visible while idle/done. The two swap based on `status`: idle → Run,
+          running → live dashboard with a Stop button, done → Re-run + Reset.
+          Hidden on print and on the mobile sticky-bar viewport size (the
+          mobile bar at the bottom of the page already covers Run/Stop). */}
+      {status !== "running" && (
+        <div
+          className="hidden lg:flex print:hidden fixed lg:right-4 lg:bottom-4 z-40 flex-col gap-1 rounded-xl"
+          style={{
+            background: "color-mix(in srgb, var(--color-surface-1) 96%, transparent)",
+            backdropFilter: "blur(8px)",
+            WebkitBackdropFilter: "blur(8px)",
+            border: "1px solid var(--color-border)",
+            boxShadow: "0 12px 40px -8px rgba(0,0,0,0.45)",
+            padding: "10px 12px",
+            minWidth: 240,
+          }}
+        >
+          <div className="flex gap-1.5">
+            <button
+              onClick={() => run()}
+              disabled={!canRun}
+              style={btn("primary", { padding: "6px 14px", flex: 1, justifyContent: "center", fontSize: 12, opacity: canRun ? 1 : 0.5, cursor: canRun ? "pointer" : "not-allowed" })}
+            >
+              <Play size={12} strokeWidth={2} />
+              {status === "done" ? "Re-run" : "Run"}
+            </button>
+            {status === "done" && (
+              <button onClick={reset} style={btn("secondary", { padding: "6px 12px", fontSize: 12 })}>
+                <RotateCcw size={12} strokeWidth={1.75} /> Reset
+              </button>
+            )}
+          </div>
+          {/* One-line summary so the user can verify what's about to run
+              without bouncing back to the config card on the left. */}
+          <div className="text-[9px] mt-1" style={{ color: "var(--color-muted)", fontFamily: "monospace", lineHeight: 1.4 }}>
+            {canRun ? (
+              <>
+                {(activeAlgos.length + enabledSavedSorts.length)} algo{(activeAlgos.length + enabledSavedSorts.length) !== 1 ? "s" : ""}
+                {" · "}
+                n={sortedSizes.length === 0 ? "—" : sortedSizes.length === 1 ? fmtN(sortedSizes[0]) : `${fmtN(sortedSizes[0])}…${fmtN(sortedSizes[sortedSizes.length - 1])}`}
+                {" · "}
+                {rounds}× · {engine === "wasm" && wasmBundle ? "Wasm" : engine === "webgpu" && webgpuBundle?.ready ? "WebGPU" : "V8"}
+              </>
+            ) : (
+              <span style={{ color: "#ef5350" }}>
+                {activeAlgos.length + enabledSavedSorts.length === 0
+                  ? "select at least one algorithm"
+                  : selectedSizes.size === 0
+                    ? "select at least one input size"
+                    : scenarios.size === 0
+                      ? "select at least one scenario"
+                      : "not ready"}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ── Mobile sticky run/stop bar ── */}
       <div

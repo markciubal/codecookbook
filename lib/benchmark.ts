@@ -4,7 +4,11 @@ export type DataType = "integer" | "float" | "string";
 /** Algorithms that cannot sort this data type correctly. */
 export const ALGO_INCOMPATIBLE: Record<Exclude<DataType, "integer">, ReadonlySet<string>> = {
   float:  new Set(["radix", "bucket"]),
-  string: new Set(["counting", "radix", "bucket"]),
+  // Bitonic pads internally with `Number.POSITIVE_INFINITY` sentinels. JS's
+  // mixed number/string `>` is undefined, so the padding doesn't sort to the
+  // tail on string input — the CPU bitonic only handles numeric data. The
+  // GPU bitonic is int32-only anyway, so this restriction lines up cleanly.
+  string: new Set(["counting", "radix", "bucket", "bitonic"]),
 };
 
 /** Tunable constants for Logos Sort. */
@@ -30,12 +34,18 @@ export const DEFAULT_LOGOS_PARAMS: LogosParams = {
   countingMult: 4,
 };
 
+export type ValueDistribution = "uniform" | "normal" | "exponential" | "bimodal";
+
 export interface CustomDistribution {
   preSortedPct: number;  // 0–100: % of elements already in sorted position (prefix sorted)
   duplicatePct: number;  // 0–100: % of elements replaced with duplicates
   // Optional integer-specific knobs:
   uniqueOnly?: boolean;  // if true, guarantee no duplicate values (overrides duplicatePct)
   fullInt32?: boolean;   // if true, draw from the full signed 32-bit range [INT32_MIN, INT32_MAX]
+  // Value distribution for the "random" scenario (other scenarios have fixed
+  // semantics — sorted/reversed/nearlySorted/duplicates — and ignore this).
+  // Defaults to "uniform" (the existing behavior).
+  distribution?: ValueDistribution;
 }
 
 // 32-bit signed integer bounds — used by the `fullInt32` integer option.
@@ -60,6 +70,46 @@ function randInt(fullInt32: boolean): number {
   // Use a 32-bit unsigned, then map to signed by subtracting 2^31 — uniform.
   const unsigned = (hi * 0x10000 + lo) >>> 0;
   return unsigned + INT32_MIN; // shift into signed range
+}
+
+/**
+ * Sample a single integer from the requested distribution, mapped onto the
+ * active integer range (legacy [0, 10000) or signed 32-bit when fullInt32).
+ *
+ *   • uniform     — existing behavior (delegates to randInt).
+ *   • normal      — Box-Muller; mean = range midpoint, σ = range/6 (~±3σ).
+ *   • exponential — λ = 5/range so most mass clusters near the low end.
+ *   • bimodal     — two Gaussians centered at 30 % and 70 % of the range.
+ *
+ * Out-of-range samples are clamped to the range bounds (a small bias at the
+ * tails, but keeps the array within the same numeric domain as uniform).
+ */
+function sampleDist(dist: ValueDistribution, fullInt32: boolean): number {
+  if (dist === "uniform") return randInt(fullInt32);
+  const lo = fullInt32 ? INT32_MIN : 0;
+  const hi = fullInt32 ? INT32_MAX : 9999;
+  const range = hi - lo + 1;
+  const clamp = (v: number) => v < lo ? lo : v > hi ? hi : Math.round(v);
+  // Box-Muller standard normal (one of two outputs).
+  const stdNormal = () => {
+    let u1 = Math.random(); if (u1 === 0) u1 = 1e-12;
+    const u2 = Math.random();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  };
+  if (dist === "normal") {
+    const mid = lo + range / 2;
+    const sigma = range / 6;
+    return clamp(mid + stdNormal() * sigma);
+  }
+  if (dist === "exponential") {
+    let u = Math.random(); if (u === 0) u = 1e-12;
+    const mean = range / 5;
+    return clamp(lo + (-Math.log(u)) * mean);
+  }
+  // bimodal — pick one of two centers, then a small Gaussian around it.
+  const peak = lo + range * (Math.random() < 0.5 ? 0.3 : 0.7);
+  const sigmaB = range / 12;
+  return clamp(peak + stdNormal() * sigmaB);
 }
 
 /**
@@ -113,11 +163,18 @@ export function generateBenchmarkInput(
   const uniqueOnly = custom?.uniqueOnly === true;
   let arr: number[];
   switch (scenario) {
-    case "random":
+    case "random": {
+      // Distribution applies only to the random scenario — sorted/reversed/
+      // nearlySorted/duplicates have fixed structural semantics that a
+      // distribution would obscure. uniqueOnly likewise overrides shape.
+      const dist = custom?.distribution ?? "uniform";
       arr = uniqueOnly
         ? uniqueIntegers(n, fullInt32)
-        : Array.from({ length: n }, () => randInt(fullInt32));
+        : dist === "uniform"
+          ? Array.from({ length: n }, () => randInt(fullInt32))
+          : Array.from({ length: n }, () => sampleDist(dist, fullInt32));
       break;
+    }
     case "nearlySorted": {
       // "Nearly sorted" needs increasing values regardless of mode. If
       // fullInt32 is requested, stretch the increment to cover the range so
@@ -156,10 +213,14 @@ export function generateBenchmarkInput(
         ? Array.from({ length: n }, (_, i) => INT32_MIN + i * Math.max(1, Math.floor(INT32_RANGE / Math.max(n, 1))))
         : Array.from({ length: n }, (_, i) => i + 1);
       break;
-    default:
+    default: {
+      const dist = custom?.distribution ?? "uniform";
       arr = uniqueOnly
         ? uniqueIntegers(n, fullInt32)
-        : Array.from({ length: n }, () => randInt(fullInt32));
+        : dist === "uniform"
+          ? Array.from({ length: n }, () => randInt(fullInt32))
+          : Array.from({ length: n }, () => sampleDist(dist, fullInt32));
+    }
   }
 
   if (custom) {
@@ -1545,6 +1606,52 @@ function timSortJS(input: number[]): number[] {
   return arr;
 }
 
+/* ── Bitonic Sort ───────────────────────────────────────────────────────────
+ * The canonical GPU-friendly sort: a fixed network of (k, j) compare-swap
+ * passes whose comparisons depend only on indices, never on data values. That
+ * data-independence is what makes it parallelize cleanly on a GPU — every
+ * index can run in lockstep with no divergence.
+ *
+ * On CPU it's O(n log² n) work, worse than O(n log n) comparison sorts. It's
+ * included here mainly as the reference companion to the WebGPU bitonic
+ * kernel in lib/webgpuSorts.ts; running both lets the user see the
+ * V8-vs-GPU speedup directly with the same algorithm on both sides.
+ *
+ * Bitonic requires a power-of-two length. We pad up internally with
+ * +Infinity sentinels (which sort to the high end under `>` comparison),
+ * then slice off the tail before returning. The padding cost is real and
+ * counted in the timing — same honesty rule as the GPU marshalling buffers. */
+function bitonicSort(input: number[]): number[] {
+  const n = input.length;
+  if (n <= 1) return input.slice();
+  // Round up to next power-of-2. For n=10k → 16384 (1.6× work), for n=1M →
+  // 1048576 (1.05× work) — overhead shrinks as n grows toward a power-of-2.
+  let p = 1;
+  while (p < n) p *= 2;
+  const arr: number[] = new Array(p);
+  for (let i = 0; i < n; i++) arr[i] = input[i];
+  for (let i = n; i < p; i++) arr[i] = Number.POSITIVE_INFINITY;
+  // Iterative bitonic sort network. Outer k = subsequence-pair size,
+  // inner j = compare distance. The direction bit (i & k) flips every k
+  // indices so adjacent bitonic subsequences sort in opposite directions —
+  // that's the trick that turns concatenated sorted runs into one sorted run.
+  for (let k = 2; k <= p; k <<= 1) {
+    for (let j = k >> 1; j > 0; j >>= 1) {
+      for (let i = 0; i < p; i++) {
+        const l = i ^ j;
+        if (l > i) {
+          const ascending = (i & k) === 0;
+          const a = arr[i], b = arr[l];
+          if (ascending ? a > b : a < b) { arr[i] = b; arr[l] = a; }
+        }
+      }
+    }
+  }
+  // Drop the +Infinity padding tail.
+  arr.length = n;
+  return arr;
+}
+
 export const SORT_FNS: Record<string, (arr: number[]) => number[]> = {
   logos:     logosSort,
   adaptive:  adaptiveSort,
@@ -1568,6 +1675,7 @@ export const SORT_FNS: Record<string, (arr: number[]) => number[]> = {
   pancake:   pancakeSort,
   cycle:     cycleSort,
   oddeven:   oddEvenSort,
+  bitonic:   bitonicSort,
 };
 
 // ── Per-algorithm variant factories ───────────────────────────────────────────
@@ -1684,6 +1792,17 @@ export function measureAllocBytes(fn: () => void): number {
   const origConcat  = Array.prototype.concat;
   const origFlat    = (Array.prototype as { flat?: (...a: unknown[]) => unknown[] }).flat;
   const origFlatMap = (Array.prototype as { flatMap?: (...a: unknown[]) => unknown[] }).flatMap;
+  const origMap     = Array.prototype.map;
+  const origFilter  = Array.prototype.filter;
+  const origReduce  = Array.prototype.reduce;
+  const origReduceRight = Array.prototype.reduceRight;
+  const origSplice  = Array.prototype.splice;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const origToReversed = (Array.prototype as any).toReversed as (() => unknown[]) | undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const origToSorted   = (Array.prototype as any).toSorted   as ((cmp?: (a: unknown, b: unknown) => number) => unknown[]) | undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const origToSpliced  = (Array.prototype as any).toSpliced  as ((...a: unknown[]) => unknown[]) | undefined;
   const origFrom    = Array.from;
 
   // Patch slice
@@ -1722,6 +1841,71 @@ export function measureAllocBytes(fn: () => void): number {
     };
   }
 
+  // Patch map / filter — both return a new Array. Critical: a sort that does
+  // `arr.map(x => f(x))` or `arr.filter(...)` was previously invisible to the
+  // counter and would falsely read in-place.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (Array.prototype as any).map = function(...args: Parameters<typeof origMap>) {
+    const r: unknown[] = origMap.apply(this, args);
+    bytes += r.length * B;
+    return r;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (Array.prototype as any).filter = function(...args: Parameters<typeof origFilter>) {
+    const r: unknown[] = origFilter.apply(this, args);
+    bytes += r.length * B;
+    return r;
+  };
+
+  // Patch reduce / reduceRight — only count when the result is itself an
+  // array (common pattern: `arr.reduce((acc, x) => [...acc, ...], [])`).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (Array.prototype as any).reduce = function(...args: Parameters<typeof origReduce>) {
+    const r = origReduce.apply(this, args);
+    if (Array.isArray(r)) bytes += r.length * B;
+    return r;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (Array.prototype as any).reduceRight = function(...args: Parameters<typeof origReduceRight>) {
+    const r = origReduceRight.apply(this, args);
+    if (Array.isArray(r)) bytes += r.length * B;
+    return r;
+  };
+
+  // Patch splice — returns a new array of removed elements.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (Array.prototype as any).splice = function(...args: Parameters<typeof origSplice>) {
+    const r: unknown[] = origSplice.apply(this, args);
+    bytes += r.length * B;
+    return r;
+  };
+
+  // Patch the ES2023 non-mutating variants — each returns a fresh array.
+  if (origToReversed) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (Array.prototype as any).toReversed = function() {
+      const r: unknown[] = origToReversed.call(this);
+      bytes += r.length * B;
+      return r;
+    };
+  }
+  if (origToSorted) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (Array.prototype as any).toSorted = function(cmp?: (a: unknown, b: unknown) => number) {
+      const r: unknown[] = origToSorted.call(this, cmp);
+      bytes += r.length * B;
+      return r;
+    };
+  }
+  if (origToSpliced) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (Array.prototype as any).toSpliced = function(...args: unknown[]) {
+      const r: unknown[] = origToSpliced.apply(this, args);
+      bytes += r.length * B;
+      return r;
+    };
+  }
+
   // Patch Array.from
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (Array as any).from = function(...args: Parameters<typeof Array.from>) {
@@ -1754,6 +1938,71 @@ export function measureAllocBytes(fn: () => void): number {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (globalThis as any).Array = PatchedArray;
 
+  // Patch typed-array + ArrayBuffer constructors. Without this, a sort that
+  // uses typed-array scratch (LSD radix, flash sort, histograms) is invisible
+  // to the Array patches above and would falsely read ~0 aux — masquerading as
+  // in-place. We count only the length form `new T(n)`; a view over an existing
+  // buffer (`new T(buf)`) shares memory already counted, so we skip it (its
+  // first argument is an object, not a number). Internal buffer allocation by
+  // `new T(n)` doesn't call the JS ArrayBuffer constructor, so no double-count.
+  const TYPED_NAMES = ["Int8Array","Uint8Array","Uint8ClampedArray","Int16Array","Uint16Array","Int32Array","Uint32Array","Float32Array","Float64Array"];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const origTyped: Record<string, any> = {};
+  for (const name of TYPED_NAMES) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const Orig = (globalThis as any)[name];
+    if (typeof Orig !== "function") continue;
+    origTyped[name] = Orig;
+    function PatchedTyped(this: unknown, ...args: unknown[]) {
+      const r = new Orig(...(args as []));
+      if (typeof args[0] === "number") bytes += r.byteLength;
+      return r;
+    }
+    PatchedTyped.prototype = Orig.prototype;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any)[name] = PatchedTyped;
+  }
+  const OrigArrayBuffer = globalThis.ArrayBuffer;
+  function PatchedArrayBuffer(this: unknown, ...args: unknown[]) {
+    const r = new OrigArrayBuffer(...(args as [number]));
+    if (typeof args[0] === "number") bytes += args[0] as number;
+    return r;
+  }
+  PatchedArrayBuffer.prototype = OrigArrayBuffer.prototype;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (globalThis as any).ArrayBuffer = PatchedArrayBuffer;
+
+  // Patch Set / Map constructors — sorts sometimes use these for dedup or
+  // bucket maps. Count rough size from the iterable's length when present
+  // (e.g., `new Set(arr)`); for empty constructors we count 0 and let later
+  // adds escape, which is acceptable for the in-place verdict (small overheads
+  // remain invisible, big O(n) seeding does not).
+  const OrigSet = globalThis.Set;
+  function PatchedSet(this: unknown, ...args: unknown[]) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const r = new (OrigSet as any)(...(args as []));
+    const it = args[0] as { length?: number; size?: number } | undefined;
+    if (it && typeof it.length === "number") bytes += it.length * B;
+    else if (it && typeof it.size === "number") bytes += it.size * B;
+    return r;
+  }
+  PatchedSet.prototype = OrigSet.prototype;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (globalThis as any).Set = PatchedSet;
+
+  const OrigMap = globalThis.Map;
+  function PatchedMap(this: unknown, ...args: unknown[]) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const r = new (OrigMap as any)(...(args as []));
+    const it = args[0] as { length?: number; size?: number } | undefined;
+    if (it && typeof it.length === "number") bytes += it.length * B * 2; // key + value
+    else if (it && typeof it.size === "number") bytes += it.size * B * 2;
+    return r;
+  }
+  PatchedMap.prototype = OrigMap.prototype;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (globalThis as any).Map = PatchedMap;
+
   try {
     fn();
   } finally {
@@ -1761,8 +2010,22 @@ export function measureAllocBytes(fn: () => void): number {
     (Array.prototype as any).concat  = origConcat;
     if (origFlat)    (Array.prototype as any).flat    = origFlat;
     if (origFlatMap) (Array.prototype as any).flatMap = origFlatMap;
+    (Array.prototype as any).map    = origMap;
+    (Array.prototype as any).filter = origFilter;
+    (Array.prototype as any).reduce = origReduce;
+    (Array.prototype as any).reduceRight = origReduceRight;
+    (Array.prototype as any).splice = origSplice;
+    if (origToReversed) (Array.prototype as any).toReversed = origToReversed;
+    if (origToSorted)   (Array.prototype as any).toSorted   = origToSorted;
+    if (origToSpliced)  (Array.prototype as any).toSpliced  = origToSpliced;
     (Array as any).from = origFrom;
     (globalThis as any).Array = OrigArray;
+    for (const name of TYPED_NAMES) {
+      if (origTyped[name]) (globalThis as any)[name] = origTyped[name];
+    }
+    (globalThis as any).ArrayBuffer = OrigArrayBuffer;
+    (globalThis as any).Set = OrigSet;
+    (globalThis as any).Map = OrigMap;
   }
 
   return bytes;

@@ -1,0 +1,20 @@
+{
+  "targets": {
+    "release": {
+      "outFile": "public/wasm-sorts/sorts.wasm",
+      "textFile": "public/wasm-sorts/sorts.wat",
+      "sourceMap": false,
+      "optimizeLevel": 3,
+      "shrinkLevel": 0,
+      "converge": false,
+      "noAssert": true,
+      "runtime": "stub",
+      "exportRuntime": false,
+      "exportStart": false
+    }
+  },
+  "options": {
+    "bindings": "raw"
+  },
+  "entries": ["wasm-sorts/assembly/index.ts"]
+}
