@@ -237,6 +237,100 @@ function timsort(input: number[]): number[] {
   return arr;
 }`,
 
+  powersort: `function powerSortJS(input: number[]): number[] {
+  // Powersort — Munro & Wild (2018). Same skeleton as TimSort (natural runs +
+  // binary insertion to minrun + buffered merge) but with a provably
+  // near-optimal merge ORDER: each run boundary gets a "node power" = its depth
+  // in the perfectly balanced merge tree, and the run stack is kept so powers
+  // increase toward the top. This is the merge policy CPython adopted in 3.11.
+  const arr = [...input];
+  const n = arr.length;
+  if (n < 2) return arr;
+
+  function minRunLength(len: number): number {
+    let r = 0;
+    while (len >= 64) { r |= len & 1; len >>= 1; }
+    return len + r;
+  }
+  const MIN_RUN = minRunLength(n);
+
+  function binaryInsert(lo: number, hi: number, start: number): void {
+    for (let i = Math.max(start, lo + 1); i <= hi; i++) {
+      const pivot = arr[i];
+      let left = lo, right = i;
+      while (left < right) { const mid = (left + right) >>> 1; if (arr[mid] > pivot) right = mid; else left = mid + 1; }
+      for (let j = i; j > left; j--) arr[j] = arr[j - 1];
+      arr[left] = pivot;
+    }
+  }
+
+  // Natural run detection; reverse descending runs so all runs are ascending.
+  function countRunAndMakeAscending(lo: number, hi: number): number {
+    let runHi = lo + 1;
+    if (runHi > hi) return runHi;
+    if (arr[runHi++] < arr[lo]) {
+      while (runHi <= hi && arr[runHi] < arr[runHi - 1]) runHi++;
+      for (let l = lo, r = runHi - 1; l < r; l++, r--) { const t = arr[l]; arr[l] = arr[r]; arr[r] = t; }
+    } else {
+      while (runHi <= hi && arr[runHi] >= arr[runHi - 1]) runHi++;
+    }
+    return runHi;
+  }
+
+  // Stable merge of arr[lo..mid] with arr[mid+1..hi] via a temp buffer.
+  function merge(lo: number, mid: number, hi: number): void {
+    const leftLen = mid - lo + 1, rightLen = hi - mid;
+    if (leftLen <= rightLen) {
+      const tmp = arr.slice(lo, mid + 1);
+      let i = 0, j = mid + 1, k = lo;
+      while (i < leftLen && j <= hi) arr[k++] = tmp[i] <= arr[j] ? tmp[i++] : arr[j++];
+      while (i < leftLen) arr[k++] = tmp[i++];
+    } else {
+      const tmp = arr.slice(mid + 1, hi + 1);
+      let i = mid, j = rightLen - 1, k = hi;
+      while (i >= lo && j >= 0) arr[k--] = arr[i] > tmp[j] ? arr[i--] : tmp[j--];
+      while (j >= 0) arr[k--] = tmp[j--];
+    }
+  }
+
+  // Node power: expected depth of the boundary in the balanced merge tree.
+  // Doubled with multiplication (not <<) so it stays exact past 2^31 for large n.
+  function nodePower(s1: number, n1: number, n2: number, total: number): number {
+    let a = 2 * s1 + n1 - 2;
+    let b = a + n1 + n2 + 2;
+    let power = 0;
+    while (Math.floor(a / total) === Math.floor(b / total)) { power++; a *= 2; b *= 2; }
+    return power + 1;
+  }
+
+  const runBase: number[] = [], runLen: number[] = [], runPow: number[] = [];
+
+  let s1 = 0;
+  let n1 = countRunAndMakeAscending(0, n - 1) - s1;
+  if (n1 < MIN_RUN) { const force = Math.min(n, MIN_RUN); binaryInsert(s1, s1 + force - 1, s1 + n1); n1 = force; }
+
+  while (s1 + n1 < n) {
+    const s2 = s1 + n1;
+    let n2 = countRunAndMakeAscending(s2, n - 1) - s2;
+    if (n2 < MIN_RUN) { const force = Math.min(n - s2, MIN_RUN); binaryInsert(s2, s2 + force - 1, s2 + n2); n2 = force; }
+
+    const power = nodePower(s1, n1, n2, n);
+    // Merge stacked runs deeper than this boundary first.
+    while (runBase.length > 0 && runPow[runPow.length - 1] > power) {
+      const bs = runBase.pop()!, bl = runLen.pop()!; runPow.pop();
+      merge(bs, bs + bl - 1, s1 + n1 - 1); s1 = bs; n1 += bl;
+    }
+    runBase.push(s1); runLen.push(n1); runPow.push(power);
+    s1 = s2; n1 = n2;
+  }
+
+  while (runBase.length > 0) {
+    const bs = runBase.pop()!, bl = runLen.pop()!; runPow.pop();
+    merge(bs, bs + bl - 1, s1 + n1 - 1); s1 = bs; n1 += bl;
+  }
+  return arr;
+}`,
+
   adaptive: `function adaptiveSort(input: number[]): number[] {
   // Adaptive Sort — profiles the input first, then picks the cheapest strategy.
   //   1. Counting sort: integers with small value range (O(n + span), O(span) space)
@@ -930,6 +1024,7 @@ export const BENCHMARK_SOURCE_LABEL: Record<string, string> = {
   logos:     "TypeScript (benchmark.ts)",
   timsort:      "TypeScript (native .sort())",
   "timsort-js": "TypeScript (benchmark.ts)",
+  powersort: "TypeScript (benchmark.ts)",
   adaptive:  "TypeScript (benchmark.ts)",
   pdqsort:   "TypeScript (benchmark.ts)",
   introsort: "TypeScript (benchmark.ts)",

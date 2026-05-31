@@ -2,20 +2,11 @@
 
 import { useMemo, useState } from "react";
 import { Trophy, Hash, Sigma, Type } from "lucide-react";
+import type { SessionLog, GhostRuns } from "@/lib/benchmark-store";
 
-/*
- * Running log of who wins which size, broken out by data type. A measurement
- * is recorded at the END of each benchmark run — every successful (algo, size)
- * point contributes one sample to a rolling average keyed by data type. The
- * "winner" at a size is the algorithm with the lowest mean ms there.
- *
- * Shape: dataType → algoId → size(as string) → { meanMs, runs }.
- *
- * This component is purely presentational. The parent owns the state and
- * passes it in, along with helpers to look up algorithm names + colors.
- */
+/** @deprecated Use SessionLog — kept for import compatibility. */
 export type WinnerLogEntry = { meanMs: number; runs: number };
-export type WinnerLog = Record<string, Record<string, Record<string, WinnerLogEntry>>>;
+export type WinnerLog = SessionLog;
 
 const DATA_TYPES: { id: string; label: string; icon: React.ReactNode; hint: string }[] = [
   { id: "integer", label: "Integers", icon: <Hash size={12} />, hint: "uniform int / int32 / counting-friendly" },
@@ -23,27 +14,19 @@ const DATA_TYPES: { id: string; label: string; icon: React.ReactNode; hint: stri
   { id: "string",  label: "Strings",  icon: <Type size={12} />, hint: "lex compare · multikey QS territory" },
 ];
 
-/** Lightweight shape of the per-algo ghost-run history exposed by the parent.
- *  Each entry is one completed benchmark run; entries with the same `ts` were
- *  recorded in the same run (the parent stamps them all with one Date.now()). */
-export type GhostRunsForRank = Record<string, Array<{
-  ts: number;
-  points: Array<{ n: number; timeMs: number; meanMs?: number }>;
-}>>;
+/** @deprecated Use GhostRuns from benchmark-store */
+export type GhostRunsForRank = GhostRuns;
 
 interface Props {
-  log: WinnerLog;
+  log: SessionLog;
   algoNames: Record<string, string>;
   algoColors: Record<string, string>;
   onClear: () => void;
-  /** Optional per-(dataType, algo, n) mean aux-byte map (from SessionLog),
-   *  used to compute the "in-place ✓ %" column on each leaderboard row. */
-  spaceMap?: Record<string, Record<string, Record<string, { meanSpaceBytes: number }>>>;
   /** Optional ghost-run history; powers the rank-over-time sparkline. */
-  ghostRuns?: GhostRunsForRank;
+  ghostRuns?: GhostRuns;
 }
 
-export default function WinnersLog({ log, algoNames, algoColors, onClear, spaceMap, ghostRuns }: Props) {
+export default function WinnersLog({ log, algoNames, algoColors, onClear, ghostRuns }: Props) {
   // Local UI: which algorithm row is the user hovering / focusing on? Shared
   // across the three panels so you can spot the same sort everywhere at once.
   const [focusAlgo, setFocusAlgo] = useState<string | null>(null);
@@ -123,7 +106,6 @@ export default function WinnersLog({ log, algoNames, algoColors, onClear, spaceM
               key={dt.id}
               dataType={dt}
               algoMap={log[dt.id] ?? {}}
-              spaceMapForDt={spaceMap?.[dt.id]}
               rankHistoryById={rankHistoryById}
               algoNames={algoNames}
               algoColors={algoColors}
@@ -139,11 +121,10 @@ export default function WinnersLog({ log, algoNames, algoColors, onClear, spaceM
 }
 
 function DataTypePanel({
-  dataType, algoMap, spaceMapForDt, rankHistoryById, algoNames, algoColors, focusAlgo, setFocusAlgo, borderLeft,
+  dataType, algoMap, rankHistoryById, algoNames, algoColors, focusAlgo, setFocusAlgo, borderLeft,
 }: {
   dataType: { id: string; label: string; icon: React.ReactNode; hint: string };
-  algoMap: Record<string, Record<string, WinnerLogEntry>>;
-  spaceMapForDt?: Record<string, Record<string, { meanSpaceBytes: number }>>;
+  algoMap: SessionLog[string];
   rankHistoryById?: Record<string, number[]>;
   algoNames: Record<string, string>;
   algoColors: Record<string, string>;
@@ -165,12 +146,12 @@ function DataTypePanel({
     // Per-algo aggregate: total runs, mean across all sizes (weighted by runs).
     const perAlgo = algos.map(id => {
       let weightedSum = 0, totalRuns = 0;
-      const byN: Record<number, WinnerLogEntry | undefined> = {};
+      const byN: Record<number, import("@/lib/benchmark-store").SessionPoint | undefined> = {};
       for (const sz of sizes) {
         const e = algoMap[id][String(sz)];
         byN[sz] = e;
         if (e) {
-          weightedSum += e.meanMs * e.runs;
+          weightedSum += e.meanTimeMs * e.runs;
           totalRuns += e.runs;
         }
       }
@@ -183,7 +164,7 @@ function DataTypePanel({
     const thirds    = new Map<string, number>();
     for (const sz of sizes) {
       const ranked = perAlgo
-        .map(a => ({ id: a.id, ms: a.byN[sz]?.meanMs ?? Infinity }))
+        .map(a => ({ id: a.id, ms: a.byN[sz]?.meanTimeMs ?? Infinity }))
         .filter(r => Number.isFinite(r.ms))
         .sort((a, b) => a.ms - b.ms);
       if (ranked[0]) winsByAlgo.set(ranked[0].id, (winsByAlgo.get(ranked[0].id) ?? 0) + 1);
@@ -196,7 +177,7 @@ function DataTypePanel({
       let bestId: string | null = null, bestMs = Infinity;
       for (const a of perAlgo) {
         const e = a.byN[sz];
-        if (e && e.meanMs < bestMs) { bestMs = e.meanMs; bestId = a.id; }
+        if (e && e.meanTimeMs < bestMs) { bestMs = e.meanTimeMs; bestId = a.id; }
       }
       return { n: sz, winnerId: bestId, winnerMs: bestMs === Infinity ? null : bestMs };
     });
@@ -214,26 +195,18 @@ function DataTypePanel({
       let largest = 0, lastMs = 0;
       for (const sz of sizes) {
         const e = a.byN[sz];
-        if (e && sz > largest) { largest = sz; lastMs = e.meanMs; }
+        if (e && sz > largest) { largest = sz; lastMs = e.meanTimeMs; }
       }
       const throughput = largest > 0 && lastMs > 0 ? (largest / lastMs) * 1000 : null;
-      // In-place %: count buckets with meanSpaceBytes / n < 1.
       let total = 0, inplace = 0;
-      const spaceForAlgo = spaceMapForDt?.[a.id];
-      if (spaceForAlgo) {
-        for (const [k, v] of Object.entries(spaceForAlgo)) {
-          const n = Number(k);
-          if (n <= 0) continue;
-          total++;
-          if (v.meanSpaceBytes / n < 1) inplace++;
-        }
+      for (const sz of sizes) {
+        const e = a.byN[sz];
+        if (!e || sz <= 0) continue;
+        total++;
+        if (e.meanSpaceBytes / sz < 1) inplace++;
       }
       const inplacePct = total > 0 ? (inplace / total) * 100 : null;
-      // Pulse-circle inputs: mean memory at the largest recorded n so each row
-      // can show its memory "mass" (diameter) relative to the heaviest sort in
-      // the panel. lastMs becomes the pulse period — the row literally blinks
-      // at the sort's rate.
-      const spaceAtLargest = largest > 0 ? (spaceMapForDt?.[a.id]?.[String(largest)]?.meanSpaceBytes ?? 0) : 0;
+      const spaceAtLargest = largest > 0 ? (a.byN[largest]?.meanSpaceBytes ?? 0) : 0;
       extras.set(a.id, {
         throughput, inplacePct,
         largestN: largest, timeAtLargest: lastMs, spaceAtLargest,
@@ -252,7 +225,7 @@ function DataTypePanel({
     });
     const slowest = Math.max(...perAlgo.map(a => Number.isFinite(a.avgMs) ? a.avgMs : 0), 1);
     return { sizes, perAlgo, winsByAlgo, seconds, thirds, extras, maxSpaceInPanel, sizeWinners, ranked, slowest };
-  }, [algoMap, spaceMapForDt]);
+  }, [algoMap]);
 
   const fmtMs = (v: number) => v < 1 ? `${v.toFixed(2)}ms` : v < 1000 ? `${v.toFixed(1)}ms` : `${(v/1000).toFixed(2)}s`;
   const fmtN = (n: number) => n >= 1e6 ? `${(n/1e6).toFixed(n%1e6 ? 1 : 0)}M` : n >= 1e3 ? `${(n/1e3).toFixed(n%1e3 ? 1 : 0)}k` : String(n);

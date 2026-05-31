@@ -49,6 +49,7 @@ const ALL_ALGORITHMS: { id: SortAlgorithm; label: string; complexity: string; fa
   { id: "logos",     label: "Logos Sort",    complexity: "O(n log n)", fast: true  },
   { id: "introsort", label: "Introsort",     complexity: "O(n log n)", fast: true  },
   { id: "timsort",   label: "Tim Sort",      complexity: "O(n log n)", fast: true  },
+  { id: "powersort", label: "Power Sort",    complexity: "O(n log n)", fast: true  },
   { id: "merge",     label: "Merge Sort",    complexity: "O(n log n)", fast: true  },
   { id: "quick",     label: "Quick Sort",    complexity: "O(n log n)", fast: true  },
   { id: "heap",      label: "Heap Sort",     complexity: "O(n log n)", fast: true  },

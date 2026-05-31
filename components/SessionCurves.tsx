@@ -2,23 +2,11 @@
 
 import { useMemo, useState } from "react";
 import { LineChart } from "lucide-react";
-import { CurveChart, type CurveData, type CurvePoint } from "./BenchmarkVisualizer";
+import CurveChart from "@/components/benchmark/CurveChart";
+import type { CurveData, CurvePoint } from "@/lib/benchmark-store";
+import type { SessionLog } from "@/lib/benchmark-store";
 
-/*
- * Session-wide aggregate curves: a literal clone of the per-run performance /
- * memory chart, fed with data accumulated across every benchmark in the
- * session. Same expand-to-fullscreen, brush, zoom, log-scale, Big-O fit, and
- * hover crosshair you get on the live chart — just sourced from the persistent
- * SessionLog instead of the current-run CurveData.
- *
- * Layout: two segmented tab bars sit above the chart — one picks the data type
- * (Integer / Float / String, only types with data appear), the other picks the
- * mode (Time / Memory). The CurveChart underneath then renders the chosen
- * (dataType, mode) slice with full interactivity.
- */
-export type SessionPoint = { meanTimeMs: number; meanSpaceBytes: number; runs: number };
-// dataType → algoId → n(as string) → point
-export type SessionLog = Record<string, Record<string, Record<string, SessionPoint>>>;
+export type { SessionLog, SessionPoint } from "@/lib/benchmark-store";
 
 const DT_META: { id: string; label: string }[] = [
   { id: "integer", label: "Integer" },
@@ -33,7 +21,7 @@ interface Props {
   onClear: () => void;
 }
 
-export default function SessionCurves({ log, onClear }: Props) {
+export default function SessionCurves({ log, onClear, algoNames, algoColors }: Props) {
   const [mode, setMode] = useState<"time" | "space">("time");
 
   // Which data types actually have data? Drives the tab list (and default).
@@ -63,6 +51,12 @@ export default function SessionCurves({ log, onClear }: Props) {
           n: Number(k),
           timeMs: v.meanTimeMs,
           meanMs: v.meanTimeMs,
+          medianMs: v.medianMs,
+          minMs: v.minMs,
+          p95Ms: v.p95Ms,
+          stdDev: v.stdDevMs,
+          noiseCv: v.noiseCv,
+          roundTimes: v.roundTimes,
           spaceBytes: v.meanSpaceBytes,
           allocBytes: v.meanSpaceBytes,
         }))
@@ -129,6 +123,8 @@ export default function SessionCurves({ log, onClear }: Props) {
             data={data}
             sizes={sizes}
             algos={algos}
+            algoNames={algoNames}
+            algoColors={algoColors}
             mode={mode}
             advanced={true}
           />

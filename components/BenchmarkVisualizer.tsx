@@ -1,12 +1,14 @@
 "use client";
 
 import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
-import { Play, Square, RotateCcw, Trophy, LineChart, ChevronRight, Lock, Unlock, Volume2, Settings, Code, X, Copy, Check, Activity } from "lucide-react";
+import { Play, Square, RotateCcw, Trophy, LineChart, ChevronRight, Lock, Unlock, Settings, Code, X, Copy, Check, Activity } from "lucide-react";
 import { generateBenchmarkInput, generateFloatInput, generateStringInput, SORT_FNS, ALGO_INCOMPATIBLE, makeQuickSort, makeShellSort, sortSteps, makeAdversarialInput, measureAllocBytes, type DataType, type BenchmarkScenario, type CustomDistribution, type ValueDistribution, type QuickPivot, type ShellGaps, type SortStep } from "@/lib/benchmark";
+import { buildPrerunSample } from "@/lib/preview-labels";
 import { BENCHMARK_SOURCE } from "@/lib/benchmark-source";
 import { getLogosSortSteps } from "@/lib/algorithms";
 import { useLevel } from "@/hooks/useLevel";
 import RunningDashboard from "@/components/RunningDashboard";
+import RunningSortPreview from "@/components/benchmark/RunningSortPreview";
 import { AdvGroup, AdvSection, AdvToggle } from "@/components/BenchmarkAdvanced";
 import WinnersLog, { type WinnerLog } from "@/components/WinnersLog";
 import SessionCurves, { type SessionLog } from "@/components/SessionCurves";
@@ -48,7 +50,7 @@ const SLOW_THRESHOLD = 5_000;
 // `+Infinity` sentinels which only sort cleanly for numeric data, not for
 // the string leg of the polymorphic sweep. The string incompatibility is
 // declared in ALGO_INCOMPATIBLE for the same reason.
-const POLY_SAFE = new Set(["logos", "merge", "quick", "heap", "insertion", "shell", "selection", "bubble", "cocktail", "comb", "gnome"]);
+const POLY_SAFE = new Set(["logos", "merge", "quick", "heap", "insertion", "shell", "selection", "bubble", "cocktail", "comb", "gnome", "powersort"]);
 
 // Verdict on whether an algorithm sorted in place, derived from its measured
 // auxiliary bytes ÷ n. Two signals, two thresholds:
@@ -135,7 +137,7 @@ function makePolymorphicFn(
   };
 }
 // All O(n log n) algorithms are allowed above 5 M elements
-const UNLIMITED_IDS = new Set(["logos", "timsort", "timsort-js", "introsort", "adaptive", "pdqsort", "merge", "quick", "heap"]);
+const UNLIMITED_IDS = new Set(["logos", "timsort", "timsort-js", "powersort", "introsort", "adaptive", "pdqsort", "merge", "quick", "heap"]);
 
 /*
  * Re-instantiate a sort function from its own source so it gets a *fresh* set of
@@ -1067,6 +1069,7 @@ const ALGO_GROUPS = [
       { id: "introsort",   name: "Introsort",       href: "/sorting/introsort" },
       { id: "timsort",     name: "Tim Sort (V8)",   href: "/sorting/timsort" },
       { id: "timsort-js",  name: "Tim Sort (JS)" },
+      { id: "powersort",   name: "Power Sort",      href: "/sorting/powersort" },
       { id: "merge",   name: "Merge Sort",      href: "/sorting/merge" },
       { id: "quick",   name: "Quick Sort",      href: "/sorting/quick" },
       { id: "heap",    name: "Heap Sort",       href: "/sorting/heap" },
@@ -1110,7 +1113,8 @@ const ALGO_NAMES: Record<string, string> = {
   insertion: "Insertion Sort", selection: "Selection Sort", bubble: "Bubble Sort",
   cocktail: "Cocktail Sort", comb: "Comb Sort", gnome: "Gnome Sort",
   pancake: "Pancake Sort", cycle: "Cycle Sort", oddeven: "Odd-Even Sort",
-  "timsort-js": "TimSort (JS)",
+  "timsort-js": "Tim Sort (JS)",
+  powersort: "Power Sort",
   bitonic: "Bitonic Sort",
   custom: "Custom Sort",
 };
@@ -1123,6 +1127,8 @@ const ALGO_COLORS: Record<string, string> = {
   introsort:      "#e67e22",
   timsort:        "#5b9bd5",
   "timsort-js":   "#a8c9ed",  // lighter blue — same family, clearly related
+  // Indigo — merge/TimSort cousin (CPython's post-3.11 policy), off the blue hues.
+  powersort:      "#5e60ce",
   merge:     "#70ad47",
   quick:     "#ffc000",
   heap:      "#b263c8",
@@ -1151,6 +1157,7 @@ const ALGO_SPACE: Record<string, string> = {
   introsort:      "O(log n)",
   timsort:        "O(n)",
   "timsort-js":   "O(n)",
+  powersort:      "O(n)",
   merge:     "O(n)",
   quick:     "O(log n) avg / O(n) worst",
   heap:      "O(1)",
@@ -1178,6 +1185,7 @@ const ALGO_TIME: Record<string, string> = {
   introsort:      "O(n log n)",
   timsort:        "O(n log n)",
   "timsort-js":   "O(n log n)",
+  powersort:      "O(n log n)",
   merge:     "O(n log n)",
   quick:     "O(n log n) avg",
   heap:      "O(n log n)",
@@ -1207,6 +1215,7 @@ const ALGO_STABLE: Record<string, boolean> = {
   introsort:      false,
   timsort:        true,
   "timsort-js":   true,
+  powersort:      true,
   merge:     true,
   quick:     false,
   heap:      false,
@@ -1234,6 +1243,7 @@ const ALGO_ONLINE: Record<string, boolean> = {
   introsort:      false,
   timsort:        false,
   "timsort-js":   false,
+  powersort:      false,
   merge:     false,
   quick:     false,
   heap:      false,
@@ -1422,6 +1432,7 @@ const ALGO_INFO: Record<string, AlgoInfo> = {
   introsort: { best: "O(n log n)", avg: "O(n log n)", worst: "O(n log n)", space: "O(log n)", inPlace: true,  useCase: "Default sort in C++ std::sort; whenever stability isn't required", intuition: "Quicksort that switches to heapsort if recursion depth exceeds 2·log₂n — quicksort speed with worst-case guarantee" },
   timsort:      { best: "O(n)",       avg: "O(n log n)", worst: "O(n log n)", space: "O(n)",     inPlace: false, useCase: "Data that already has partial order: DB results, log files, nearly-sorted arrays", intuition: "Detects natural sorted runs in the input and merges them; exploits real-world order that pure quicksort ignores" },
   "timsort-js": { best: "O(n)",       avg: "O(n log n)", worst: "O(n log n)", space: "O(n)",     inPlace: false, useCase: "Same as Tim Sort — direct comparison of pure-JavaScript overhead vs V8's native C++ implementation", intuition: "Pure-JS implementation of the same TimSort algorithm: natural run detection, binary insertion sort, and merge with temporary buffer. The gap vs native .sort() reflects the JS⟷C++ comparator callback cost per comparison." },
+  powersort: { best: "O(n)",       avg: "O(n log n)", worst: "O(n log n)", space: "O(n)",     inPlace: false, useCase: "Run-adaptive stable sort; CPython's list.sort() merge policy since 3.11 — best when the input already contains natural runs", intuition: "TimSort's machinery (natural-run detection, binary-insertion minrun, buffered merge) with a near-optimal merge ORDER. Each boundary between adjacent runs gets a 'node power' = its depth in the perfectly balanced merge tree, computed from the run midpoints. Keeping the run stack so powers increase toward the top reproduces the optimal bisection tree — provably within a constant factor of the entropy-optimal number of merges, and typically fewer/cheaper merges than TimSort's run-length invariant." },
   merge:     { best: "O(n log n)", avg: "O(n log n)", worst: "O(n log n)", space: "O(n)",     inPlace: false, useCase: "When stability is required and extra memory is available; external sort, linked lists", intuition: "Recursively splits the array in half, sorts each half, merges — guaranteed O(n log n) with no pivot pitfalls" },
   quick:     { best: "O(n log n)", avg: "O(n log n)", worst: "O(n²)",      space: "O(log n) avg / O(n) worst", inPlace: true,  useCase: "Fastest in practice on random data; avoid first/last pivot on sorted input", intuition: "Partitions around a pivot and recurses on both sides — cache-friendly but pivot choice determines whether you get n log n or n². Recursion stack is O(log n) average but O(n) on degenerate inputs without tail-call optimization." },
   heap:      { best: "O(n log n)", avg: "O(n log n)", worst: "O(n log n)", space: "O(1)",     inPlace: true,  useCase: "When both O(n log n) worst-case and O(1) extra space are required simultaneously", intuition: "Builds a max-heap then extracts elements one by one — theoretically optimal but cache-unfriendly; rarely beats quicksort in practice" },
@@ -6397,362 +6408,6 @@ function ProofSlider({
   );
 }
 
-// ── Algorithm mini-card ────────────────────────────────────────────────────────
-// Compact per-algorithm card shown below the performance curve.
-// Shows properties + an animated 10-item bar-chart from the silent pre-run,
-// or "No benchmark data." before any run has happened.
-
-const MINI_BAR_COLORS = {
-  swap:    "#ef5350",
-  pivot:   "#64b5f6",
-  compare: "#ffc000",
-  sorted:  "#66bb6a",
-};
-
-const PLACE_EMOJI: Record<number, string> = { 1: "🥇", 2: "🥈", 3: "🥉" };
-
-/** Play 5 calm sine-wave beeps, each lasting exactly `timeMs` ms, then stop.
- *  Pitch maps sort speed: faster → higher frequency. */
-function playBeep(timeMs: number) {
-  try {
-    const ctx = new AudioContext();
-    // Log-scale map: 1 ms → ~2000 Hz, 100 ms → ~440 Hz, 10 000 ms → ~150 Hz
-    const logMs = Math.log10(Math.max(1, timeMs));
-    const t     = Math.max(0, Math.min(1, logMs / 4));
-    const freq  = 2000 * Math.pow(150 / 2000, t);
-
-    const dur     = Math.max(0.08, timeMs / 1000);  // seconds, floor 80 ms
-    const gap     = 0.05;                            // 50 ms silence between beeps
-    const attack  = Math.min(0.04, dur * 0.10);
-    const release = Math.min(0.10, dur * 0.20);
-    const hold    = Math.max(0, dur - attack - release);
-
-    for (let i = 0; i < 5; i++) {
-      const t0  = ctx.currentTime + i * (dur + gap);
-      const osc  = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(freq, t0);
-      gain.gain.setValueAtTime(0, t0);
-      gain.gain.linearRampToValueAtTime(0.18, t0 + attack);
-      gain.gain.setValueAtTime(0.18, t0 + attack + hold);
-      gain.gain.linearRampToValueAtTime(0, t0 + attack + hold + release);
-      osc.start(t0);
-      osc.stop(t0 + dur + 0.01);
-      if (i === 4) osc.onended = () => ctx.close();
-    }
-  } catch { /* AudioContext not available */ }
-}
-
-function AlgoMiniCard({
-  id, steps, benchData, isActive, rank, spaceRank, showBoth, loop, maxSpaceBytes, maxTotalSteps, onStop, pulseEnabled, onTogglePulse, failed, wasmExecuted, webgpuExecuted,
-}: {
-  id: string;
-  steps: SortStep[] | null;
-  benchData: { n: number; timeMs: number; meanMs?: number; stdDev?: number; spaceBytes?: number; timedOut?: boolean }[] | null;
-  isActive: boolean;
-  rank: number | null;
-  spaceRank?: number | null;
-  showBoth?: boolean;
-  loop?: boolean;
-  maxSpaceBytes?: number;
-  maxTotalSteps?: number;
-  onStop?: () => void;
-  pulseEnabled?: boolean;
-  onTogglePulse?: () => void;
-  /** Sort produced out-of-order output — annotate the card as unreliable. */
-  failed?: boolean;
-  /** This algorithm ran via the Wasm engine — stamp a "Wasm" badge on the card. */
-  wasmExecuted?: boolean;
-  /** This algorithm ran via a WebGPU compute pipeline — stamp a "GPU" badge on the card. */
-  webgpuExecuted?: boolean;
-}) {
-  const [stepIdx, setStepIdx] = useState(0);
-  const [playing, setPlaying] = useState(false);
-  const prevLoopRef = useRef(loop);
-
-  useEffect(() => {
-    if (!steps || steps.length === 0) return;
-    setStepIdx(0);
-    setPlaying(true);
-  }, [steps]);
-
-  // Restart loop while benchmark is running; snap to final frame when it finishes
-  useEffect(() => {
-    if (loop && steps && steps.length > 0) {
-      setStepIdx(0);
-      setPlaying(true);
-    } else if (!loop && prevLoopRef.current && steps && steps.length > 0) {
-      // Benchmark just finished — jump straight to the fully-sorted final frame
-      setStepIdx(steps.length - 1);
-      setPlaying(false);
-    }
-    prevLoopRef.current = loop;
-  }, [loop, steps]);
-
-  useEffect(() => {
-    if (!playing || !steps || steps.length === 0) return;
-    const timer = setInterval(() => {
-      setStepIdx(prev => {
-        if (prev >= steps.length - 1) {
-          if (loop) return 0; // restart
-          setPlaying(false);
-          return prev;
-        }
-        return prev + 1;
-      });
-    }, 90);
-    return () => clearInterval(timer);
-  }, [playing, steps, loop]);
-
-  const color = ALGO_COLORS[id] ?? "#888";
-  const step = steps?.[stepIdx] ?? steps?.[steps.length - 1] ?? null;
-  const maxVal = step ? Math.max(...step.arr, 1) : 1;
-  const N = step?.arr.length ?? 10;
-  const BAR_W = 100 / N;
-
-  const bestPoint = benchData?.filter(p => !p.timedOut).sort((a, b) => b.n - a.n)[0] ?? null;
-
-  return (
-    <div style={{
-      background: "var(--color-surface-1)",
-      // Failed sorts get a red border that overrides active state — the user
-      // needs to see the failure regardless of selection.
-      border: `1px solid ${failed ? "rgba(239,83,80,0.65)" : (isActive ? color : "var(--color-border)")}`,
-      borderRadius: 7,
-      padding: "8px 10px",
-      transition: "border-color 0.2s",
-    }}>
-      {/* Name row */}
-      <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 5 }}>
-        <span style={{ width: 7, height: 7, borderRadius: "50%", background: color, display: "inline-block", flexShrink: 0 }} />
-        <WithAlgoTooltip id={id}>
-          <span style={{
-            fontSize: 11, fontWeight: 700,
-            color: failed ? "#ef5350" : "var(--color-text)",
-            flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-            textDecoration: failed ? "line-through" : "none",
-            textDecorationColor: "rgba(239,83,80,0.55)",
-          }}>
-            {ALGO_NAMES[id] ?? id}
-          </span>
-        </WithAlgoTooltip>
-        {failed && (
-          <span title="Sort produced out-of-order output. Results unreliable." style={{
-            fontSize: 7, fontWeight: 700, fontFamily: "monospace",
-            padding: "1px 5px", borderRadius: 3, whiteSpace: "nowrap",
-            background: "rgba(239,83,80,0.18)",
-            border: "1px solid rgba(239,83,80,0.55)",
-            color: "#ef5350", flexShrink: 0,
-          }}>
-            ✗ BROKEN
-          </span>
-        )}
-        {wasmExecuted && (
-          <span title="This algorithm ran via the AssemblyScript-compiled Wasm module (int32 port). Marshalling cost is included in the timing." style={{
-            fontSize: 7, fontWeight: 700, fontFamily: "monospace",
-            padding: "1px 5px", borderRadius: 3, whiteSpace: "nowrap",
-            background: "rgba(124,106,247,0.18)",
-            border: "1px solid rgba(124,106,247,0.55)",
-            color: "var(--color-accent)", flexShrink: 0,
-          }}>
-            Wasm
-          </span>
-        )}
-        {webgpuExecuted && (
-          <span title="This algorithm ran via a WebGPU compute pipeline (int32). Buffer copy-in / copy-out cost is included in the timing." style={{
-            fontSize: 7, fontWeight: 700, fontFamily: "monospace",
-            padding: "1px 5px", borderRadius: 3, whiteSpace: "nowrap",
-            background: "rgba(34,197,194,0.18)",
-            border: "1px solid rgba(34,197,194,0.55)",
-            color: "#0e9b96", flexShrink: 0,
-          }}>
-            GPU
-          </span>
-        )}
-        {rank !== null && rank <= 3 && (
-          <span style={{ fontSize: 13, lineHeight: 1, flexShrink: 0 }} title={showBoth ? `Time #${rank}` : `#${rank}`}>
-            {PLACE_EMOJI[rank]}
-          </span>
-        )}
-        {showBoth && spaceRank != null && spaceRank <= 3 && (
-          <span style={{ fontSize: 10, lineHeight: 1, flexShrink: 0, opacity: 0.75 }} title={`Space #${spaceRank}`}>
-            {PLACE_EMOJI[spaceRank]}
-          </span>
-        )}
-        {loop && onStop && (
-          <button
-            onClick={onStop}
-            title="Stop this algorithm"
-            style={{ background: "none", border: "none", cursor: "pointer", padding: "1px 3px", color: "var(--color-muted)", lineHeight: 1, flexShrink: 0, fontSize: 9, borderRadius: 3 }}
-          >
-            ✕
-          </button>
-        )}
-        {bestPoint && (() => {
-          const spaceBytes = bestPoint.spaceBytes ?? 0;
-          const maxSB = maxSpaceBytes ?? spaceBytes;
-          if (!spaceBytes || !maxSB) return null;
-          const fillDiameter = Math.max(1, (spaceBytes / maxSB) * 20);
-          const totalBytes = spaceBytes + bestPoint.n * 8;
-          const label = totalBytes >= 1_048_576 ? `${(totalBytes / 1_048_576).toFixed(1)} MB` : totalBytes >= 1024 ? `${(totalBytes / 1024).toFixed(1)} KB` : `${totalBytes} B`;
-          const beepMs = bestPoint.meanMs ?? bestPoint.timeMs;
-          const pulseDuration = Math.max(150, Math.min(5000, beepMs));
-          return (
-            <span
-              title={`Total memory: ${label} (input + aux). ${pulseEnabled ? "Click circle to pause pulse" : "Click circle to resume pulse"}`}
-              onClick={onTogglePulse}
-              style={{ position: "relative", width: 20, height: 20, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0, cursor: "pointer" }}
-            >
-              <span style={{ position: "absolute", inset: 0, borderRadius: "50%", background: "var(--color-surface-3)", border: "1px solid var(--color-border)" }} />
-              <span style={{ position: "relative", width: fillDiameter, height: fillDiameter, borderRadius: "50%", background: color, display: "block", ...(pulseEnabled ? { animationName: "cc-pulse", animationDuration: `${pulseDuration}ms`, animationTimingFunction: "steps(1, end)", animationIterationCount: "infinite" } : {}) }} />
-              <button
-                title={`Hear sort speed (avg ${fmtTime(beepMs)} @ n=${fmtN(bestPoint.n)})`}
-                onClick={e => { e.stopPropagation(); playBeep(beepMs); }}
-                style={{
-                  position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
-                  background: "none", border: "none", cursor: "pointer", padding: 0,
-                  color: "#fff", display: "inline-flex", alignItems: "center", justifyContent: "center",
-                  mixBlendMode: "difference",
-                }}
-              >
-                <Volume2 size={10} strokeWidth={1.75} />
-              </button>
-            </span>
-          );
-        })()}
-      </div>
-
-      {/* μ readout — time/space at largest n */}
-      {bestPoint && (() => {
-        const spaceBytes = bestPoint.spaceBytes ?? 0;
-        const totalBytes = spaceBytes + bestPoint.n * 8;
-        const spaceLabel = totalBytes >= 1_048_576 ? `${(totalBytes / 1_048_576).toFixed(1)} MB` : totalBytes >= 1024 ? `${(totalBytes / 1024).toFixed(1)} KB` : `${totalBytes} B`;
-        const timeStr = `${fmtTime(bestPoint.meanMs ?? bestPoint.timeMs)}${bestPoint.stdDev != null ? ` ± ${fmtTime(bestPoint.stdDev)}` : ""}`;
-        return (
-          <table
-            style={{ fontSize: 8, fontFamily: "monospace", borderCollapse: "collapse", width: "100%", marginBottom: 5 }}
-            title="μ = average run time ± variation (std dev) | total memory (input + aux) at n"
-          >
-            <thead>
-              <tr style={{ color: "var(--color-muted)" }}>
-                <th style={{ textAlign: "left",  fontWeight: 400, padding: "0 4px 0 0", width: "50%" }}>time</th>
-                <th style={{ textAlign: "right", fontWeight: 400, padding: "0 0 0 4px" }}>space</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td style={{ color, padding: "0 4px 0 0", whiteSpace: "nowrap" }}>μ = {timeStr}</td>
-                <td style={{ color, textAlign: "right", padding: "0 0 0 4px", whiteSpace: "nowrap" }}>{spaceLabel}</td>
-              </tr>
-              <tr>
-                <td style={{ color: "var(--color-muted)", padding: "0 4px 0 0" }}>n = {fmtN(bestPoint.n)}</td>
-                <td style={{ color: "var(--color-muted)", textAlign: "right", padding: "0 0 0 4px" }}>aux {fmtBytes(spaceBytes)}</td>
-              </tr>
-            </tbody>
-          </table>
-        );
-      })()}
-
-      {/* Property table */}
-      <table style={{
-        fontSize: 7, fontFamily: "monospace", borderCollapse: "collapse",
-        width: "100%", marginBottom: 6,
-        background: "var(--color-surface-3)", border: "1px solid var(--color-border)", borderRadius: 3,
-      }}>
-        <tbody>
-          {ALGO_TIME[id] && (
-            <tr>
-              <td style={{ padding: "1px 4px", color: "var(--color-muted)", width: "32%" }}>time</td>
-              <td style={{ padding: "1px 4px", color, textAlign: "right" }}>{ALGO_TIME[id]}</td>
-            </tr>
-          )}
-          {ALGO_SPACE[id] && (
-            <tr title="Auxiliary space: extra memory beyond the input array">
-              <td style={{ padding: "1px 4px", color: "var(--color-muted)", borderTop: "1px solid var(--color-border)" }}>aux</td>
-              <td style={{ padding: "1px 4px", color: "var(--color-text)", textAlign: "right", borderTop: "1px solid var(--color-border)" }}>{ALGO_SPACE[id]}</td>
-            </tr>
-          )}
-          {ALGO_STABLE[id] !== undefined && (
-            <tr>
-              <td style={{ padding: "1px 4px", color: "var(--color-muted)", borderTop: "1px solid var(--color-border)" }}>order</td>
-              <td style={{ padding: "1px 4px", color: "var(--color-text)", textAlign: "right", borderTop: "1px solid var(--color-border)" }}>{ALGO_STABLE[id] ? "stable" : "unstable"}</td>
-            </tr>
-          )}
-          {ALGO_ONLINE[id] !== undefined && (
-            <tr>
-              <td style={{ padding: "1px 4px", color: "var(--color-muted)", borderTop: "1px solid var(--color-border)" }}>input</td>
-              <td style={{ padding: "1px 4px", color: "var(--color-text)", textAlign: "right", borderTop: "1px solid var(--color-border)" }}>{ALGO_ONLINE[id] ? "online" : "offline"}</td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-
-      {/* Bar chart or placeholder */}
-      {step ? (
-        <div style={{ position: "relative", overflow: "hidden", borderRadius: 3 }}>
-          <svg
-            viewBox={`0 0 100 32`}
-            preserveAspectRatio="none"
-            style={{ width: "100%", height: 32, display: "block", borderRadius: 3, cursor: "pointer" }}
-            onClick={() => {
-              if (!steps) return;
-              if (stepIdx >= steps.length - 1) { setStepIdx(0); setPlaying(true); }
-              else setPlaying(p => !p);
-            }}
-          >
-            {step.arr.map((val, i) => {
-              const h = Math.max(2, (val / maxVal) * 30);
-              const swpSet = new Set(step.swapping);
-              const cmpSet = new Set(step.comparing);
-              const sortedSet = new Set(step.sorted);
-              const fill = swpSet.has(i) ? MINI_BAR_COLORS.swap
-                : step.pivot === i ? MINI_BAR_COLORS.pivot
-                : cmpSet.has(i) ? MINI_BAR_COLORS.compare
-                : sortedSet.has(i) ? MINI_BAR_COLORS.sorted
-                : color;
-              return (
-                <rect key={i}
-                  x={i * BAR_W + 0.3} y={32 - h}
-                  width={Math.max(0.5, BAR_W - 0.6)} height={h}
-                  fill={fill}
-                />
-              );
-            })}
-          </svg>
-          {/* Progress bar */}
-          <div style={{ height: 2, background: "var(--color-surface-3)", marginTop: 3, borderRadius: 1, overflow: "hidden" }}>
-            <div style={{
-              height: "100%",
-              width: `${steps && steps.length > 1 ? (stepIdx / (steps.length - 1)) * 100 : 0}%`,
-              background: color,
-              borderRadius: 1,
-              transition: "width 0.08s linear",
-            }} />
-          </div>
-          {/* Time remaining bar */}
-          <div style={{ height: 2, background: "var(--color-surface-3)", marginTop: 1, borderRadius: 1, overflow: "hidden" }}>
-            <div style={{
-              height: "100%",
-              width: `${steps && steps.length > 1 && maxTotalSteps ? ((steps.length - 1 - stepIdx) / maxTotalSteps) * 100 : 0}%`,
-              background: color,
-              opacity: 0.35,
-              borderRadius: 1,
-              transition: "width 0.08s linear",
-            }} />
-          </div>
-        </div>
-      ) : (
-        <div style={{ fontSize: 9, color: "var(--color-muted)", fontStyle: "italic", fontFamily: "monospace" }}>
-          No benchmark data.
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── Playback strip ─────────────────────────────────────────────────────────────
 
 // ── Shared button style helper ────────────────────────────────────────────────
@@ -6781,7 +6436,7 @@ function btn(
 // Thresholds: L1=32 KB → 4096 elems, L2=256 KB → 32768, L3=8 MB → 1048576.
 function cacheLevel(id: string, n: number): { label: string; color: string } {
   // Algorithms that access the whole array (merge, counting) use ~2× the data
-  const factor = ["merge", "counting", "radix", "bucket", "timsort", "timsort-js"].includes(id) ? 2 : 1;
+  const factor = ["merge", "counting", "radix", "bucket", "timsort", "timsort-js", "powersort"].includes(id) ? 2 : 1;
   const bytes = n * 8 * factor;
   if (bytes <= 32 * 1024)        return { label: "L1",  color: "#66bb6a" };
   if (bytes <= 256 * 1024)       return { label: "L2",  color: "#ffc107" };
@@ -7651,7 +7306,6 @@ export default function BenchmarkVisualizer() {
       if (a) setSessionStartedAt(Number(a) || null);
     } catch { /* ignore */ }
   }, []);
-  const [miniCardSort, setMiniCardSort] = useState<"time" | "space" | "both">("time");
   const [customInput, setCustomInput] = useState("");
   const [pendingCustomN, setPendingCustomN] = useState<number | null>(null);
   const [customPreSorted, setCustomPreSorted] = useState(0);
@@ -7672,6 +7326,7 @@ export default function BenchmarkVisualizer() {
   const [mdCopied, setMdCopied] = useState(false);
   const resultsRef = useRef<HTMLDivElement>(null);
   const [prerunSteps, setPrerunSteps] = useState<Record<string, SortStep[]>>({});
+  const [prerunSampleLabels, setPrerunSampleLabels] = useState<string[]>([]);
   const [progressLocked, setProgressLocked] = useState(true);
   const [resultsMaximized, setResultsMaximized] = useState(false);
   const stopRef = useRef(false);
@@ -8721,9 +8376,10 @@ export default function BenchmarkVisualizer() {
     const timedOutAlgos = new Set<string>();
     const capturedAlgos = new Set<string>();
 
-    // ── Silent 10-item pre-run: populate chart + mini-cards immediately ────────
+    // ── Silent 10-item pre-run: seed chart + live sort preview immediately ───
     const PRERUN_N = 10;
-    const prerunArr = generateBenchmarkInput(PRERUN_N, "random");
+    const { numeric: prerunArr, labels: prerunLabels } = buildPrerunSample(PRERUN_N, dataType);
+    setPrerunSampleLabels(prerunLabels);
     const prerunStepsAcc: Record<string, SortStep[]> = {};
     for (const id of algos) {
       const savedCustomPre = id.startsWith("custom-") ? savedSorts.find(s => `custom-${s.id}` === id) : null;
@@ -9330,6 +8986,7 @@ export default function BenchmarkVisualizer() {
     setCurveData({});
     setSampleProofs({});
     setPrerunSteps({});
+    setPrerunSampleLabels([]);
     setActiveProofAlgo(null);
     setHoverN(null);
     setCurrentN(null);
@@ -11465,6 +11122,19 @@ export default function BenchmarkVisualizer() {
                   </>
                 )}
 
+                {/* Live sample sort — 10-element step animation for the active algorithm */}
+                {status === "running" && currentAlgo && (
+                  <RunningSortPreview
+                    algoId={currentAlgo}
+                    algoName={ALGO_NAMES[currentAlgo] ?? currentAlgo}
+                    color={ALGO_COLORS[currentAlgo] ?? "#888"}
+                    steps={prerunSteps[currentAlgo] ?? null}
+                    dataType={dataType}
+                    initialLabels={prerunSampleLabels}
+                    loop
+                  />
+                )}
+
                 {/* Placeholder while first result loads */}
                 {!hasCurveData && status === "running" && (
                   <div className="flex items-center justify-center"
@@ -11958,94 +11628,6 @@ export default function BenchmarkVisualizer() {
         </div>
       )}
 
-      {/* ── All Algorithms section ──
-          Lives at the bottom of the right pane: once a user has scanned the
-          chart + rankings + complexity analysis, this is the catch-all
-          per-algorithm grid (mini cards with sparklines + memory mass). */}
-      {chartAlgosBase.length > 0 && (
-        <div
-          className="px-5 py-6"
-          style={{ borderTop: "1px solid var(--color-border)" }}
-        >
-          <div className="flex items-center justify-between mb-4">
-            <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
-              All Algorithms
-            </p>
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs" style={{ color: "var(--color-muted)" }}>Sort by:</span>
-              <div className="flex rounded overflow-hidden" style={{ border: "1px solid var(--color-border)" }}>
-                {(["time", "space", "both"] as const).map(mode => (
-                  <button
-                    key={mode}
-                    onClick={() => setMiniCardSort(mode)}
-                    className="text-xs px-2 py-0.5"
-                    style={{
-                      background: miniCardSort === mode ? "var(--color-accent)" : "var(--color-surface-1)",
-                      color: miniCardSort === mode ? "#fff" : "var(--color-muted)",
-                      border: "none", cursor: "pointer", fontWeight: miniCardSort === mode ? 600 : 400,
-                    }}
-                  >
-                    {mode === "time" ? "Time" : mode === "space" ? "Space" : "Both"}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-          {(() => {
-            const sortedCards = [...chartAlgosBase].sort((a, b) => {
-              const rankOf = (id: string): number | null => {
-                const rt = summaryResults.find(r => r.id === id)?.rank ?? null;
-                const rs = summarySpaceResults.find(r => r.id === id)?.rank ?? null;
-                if (miniCardSort === "time")  return rt;
-                if (miniCardSort === "space") return rs;
-                if (rt != null && rs != null) return (rt + rs) / 2;
-                return rt ?? rs ?? null;
-              };
-              const ra = rankOf(a), rb = rankOf(b);
-              if (ra != null && rb != null) return ra - rb;
-              if (ra != null) return -1;
-              if (rb != null) return 1;
-              const bgoA = BIG_O_RANK[miniCardSort === "space" ? (ALGO_SPACE[a] ?? "") : (ALGO_TIME[a] ?? "")] ?? 99;
-              const bgoB = BIG_O_RANK[miniCardSort === "space" ? (ALGO_SPACE[b] ?? "") : (ALGO_TIME[b] ?? "")] ?? 99;
-              return bgoA - bgoB;
-            });
-            const maxSpaceBytes = Math.max(
-              ...chartAlgosBase.map(id => {
-                const pts = (curveDataExt[id] ?? []).filter(p => !p.timedOut);
-                return pts.sort((a, b) => b.n - a.n)[0]?.spaceBytes ?? 0;
-              }), 1
-            );
-            const maxTotalSteps = Math.max(
-              ...chartAlgosBase.map(id => prerunSteps[id]?.length ?? 0), 1
-            );
-            return (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-2">
-                {sortedCards.map(id => (
-                  <AlgoMiniCard
-                    key={id}
-                    id={id}
-                    steps={prerunSteps[id] ?? null}
-                    benchData={curveDataExt[id] ?? null}
-                    isActive={status === "running" && currentAlgo === id}
-                    rank={summaryResults.find(r => r.id === id)?.rank ?? null}
-                    spaceRank={miniCardSort !== "time" ? (summarySpaceResults.find(r => r.id === id)?.rank ?? null) : null}
-                    showBoth={miniCardSort === "both"}
-                    loop={status === "running"}
-                    maxSpaceBytes={maxSpaceBytes}
-                    maxTotalSteps={maxTotalSteps}
-                    onStop={status === "running" ? () => stopAlgo(id) : undefined}
-                    failed={sampleProofs[id]?.failed}
-                    wasmExecuted={wasmExecutedAlgos.has(id)}
-                    webgpuExecuted={webgpuExecutedAlgos.has(id)}
-                    pulseEnabled={pulseEnabled}
-                    onTogglePulse={togglePulse}
-                  />
-                ))}
-              </div>
-            );
-          })()}
-        </div>
-      )}
         </div>
 
       </div>
@@ -12061,6 +11643,9 @@ export default function BenchmarkVisualizer() {
           progress={progress}
           curveData={curveData}
           memSamples={memSamples}
+          sortPreviewSteps={currentAlgo ? (prerunSteps[currentAlgo] ?? null) : null}
+          sortPreviewLabels={prerunSampleLabels}
+          dataType={dataType}
           configLine={`${[...scenarios].join(", ")} · ${rounds} round${rounds !== 1 ? "s" : ""} · ${warmup} warm-up${polymorphicMode ? " · polymorphic (int+float+string)" : (useWorkerIsolation ? " · worker isolation" : "")}${adversarialEnabled ? " · adversarial" : ""}${engine === "wasm" && wasmBundle != null ? " · engine: Wasm" : ""}${engine === "webgpu" && webgpuBundle?.ready ? " · engine: WebGPU" : ""}`}
           algoNames={ALGO_NAMES}
           algoColors={ALGO_COLORS}

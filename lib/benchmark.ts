@@ -1,4 +1,16 @@
-export type BenchmarkScenario = "random" | "nearlySorted" | "reversed" | "duplicates" | "sorted";
+export type BenchmarkScenario =
+  | "random"
+  | "nearlySorted"
+  | "reversed"
+  | "duplicates"
+  | "sorted"
+  | "sawtooth"
+  | "organPipe"
+  | "zipfian"
+  | "dictionary"
+  | "timestamps";
+
+export type ArrayBacking = "array" | "int32" | "float64";
 export type DataType = "integer" | "float" | "string";
 
 /** Algorithms that cannot sort this data type correctly. */
@@ -34,18 +46,19 @@ export const DEFAULT_LOGOS_PARAMS: LogosParams = {
   countingMult: 4,
 };
 
-export type ValueDistribution = "uniform" | "normal" | "exponential" | "bimodal";
+export type ValueDistribution = "uniform" | "normal" | "exponential" | "bimodal" | "zipf";
 
 export interface CustomDistribution {
   preSortedPct: number;  // 0–100: % of elements already in sorted position (prefix sorted)
   duplicatePct: number;  // 0–100: % of elements replaced with duplicates
+  /** 0–100: fraction of elements to swap when building nearlySorted (default 5). */
+  sortednessPct?: number;
   // Optional integer-specific knobs:
   uniqueOnly?: boolean;  // if true, guarantee no duplicate values (overrides duplicatePct)
   fullInt32?: boolean;   // if true, draw from the full signed 32-bit range [INT32_MIN, INT32_MAX]
-  // Value distribution for the "random" scenario (other scenarios have fixed
-  // semantics — sorted/reversed/nearlySorted/duplicates — and ignore this).
-  // Defaults to "uniform" (the existing behavior).
   distribution?: ValueDistribution;
+  /** When set, materialize inputs as Int32Array or Float64Array (converted at sort boundary). */
+  arrayBacking?: ArrayBacking;
 }
 
 // 32-bit signed integer bounds — used by the `fullInt32` integer option.
@@ -112,6 +125,68 @@ function sampleDist(dist: ValueDistribution, fullInt32: boolean): number {
   return clamp(peak + stdNormal() * sigmaB);
 }
 
+/** Zipf sample: rank r with P ∝ 1/r^s over [lo, hi]. */
+function sampleZipf(fullInt32: boolean, n: number, s = 1.07): number {
+  const lo = fullInt32 ? INT32_MIN : 0;
+  const hi = fullInt32 ? INT32_MAX : 9999;
+  const ranks = Math.min(n, 10_000);
+  let sum = 0;
+  const weights: number[] = [];
+  for (let r = 1; r <= ranks; r++) {
+    const w = 1 / Math.pow(r, s);
+    weights.push(w);
+    sum += w;
+  }
+  let u = Math.random() * sum;
+  for (let i = 0; i < weights.length; i++) {
+    u -= weights[i];
+    if (u <= 0) {
+      const span = hi - lo + 1;
+      return lo + Math.floor((i / ranks) * span);
+    }
+  }
+  return hi;
+}
+
+/** Compact dictionary for the `dictionary` scenario (real English tokens). */
+const DICTIONARY_WORDS = [
+  "algorithm", "array", "benchmark", "binary", "buffer", "cache", "compare", "complexity",
+  "data", "element", "engine", "float", "graph", "hash", "heap", "index", "integer", "key",
+  "list", "merge", "node", "object", "partition", "pivot", "queue", "radix", "recursion",
+  "search", "sort", "stack", "string", "table", "tree", "value", "vector", "window",
+  "alpha", "beta", "gamma", "delta", "epsilon", "lambda", "omega", "sigma", "theta",
+  "apple", "banana", "cherry", "date", "elderberry", "fig", "grape", "honeydew",
+  "red", "green", "blue", "yellow", "orange", "purple", "black", "white", "gray",
+  "run", "walk", "jump", "sorting", "network", "memory", "thread", "process", "kernel",
+];
+
+function applySortednessSwaps(arr: number[], sortednessPct: number): void {
+  const swaps = Math.max(1, Math.floor(arr.length * Math.max(0, Math.min(100, sortednessPct)) / 100));
+  for (let i = 0; i < swaps; i++) {
+    const a = Math.floor(Math.random() * arr.length);
+    const b = Math.floor(Math.random() * arr.length);
+    [arr[a], arr[b]] = [arr[b], arr[a]];
+  }
+}
+
+/** Wrap a numeric array in the requested backing store. */
+export function materializeNumericInput(
+  values: number[],
+  backing: ArrayBacking = "array",
+): number[] | Int32Array | Float64Array {
+  switch (backing) {
+    case "int32": return Int32Array.from(values, v => v | 0);
+    case "float64": return Float64Array.from(values, v => v);
+    default: return values;
+  }
+}
+
+/** Copy a backed array into a mutable number[] for legacy sort functions. */
+export function toSortableNumberArray(input: number[] | Int32Array | Float64Array): number[] {
+  if (Array.isArray(input)) return input;
+  return Array.from(input);
+}
+
 /**
  * Generate n unique integers using rejection sampling over the chosen range.
  *
@@ -172,23 +247,16 @@ export function generateBenchmarkInput(
         ? uniqueIntegers(n, fullInt32)
         : dist === "uniform"
           ? Array.from({ length: n }, () => randInt(fullInt32))
-          : Array.from({ length: n }, () => sampleDist(dist, fullInt32));
+          : dist === "zipf"
+            ? Array.from({ length: n }, () => sampleZipf(fullInt32, n))
+            : Array.from({ length: n }, () => sampleDist(dist, fullInt32));
       break;
     }
     case "nearlySorted": {
-      // "Nearly sorted" needs increasing values regardless of mode. If
-      // fullInt32 is requested, stretch the increment to cover the range so
-      // values land across the full int32 span instead of clustering at the
-      // bottom — preserves the "nearly sorted" property of monotone order.
       const stride = fullInt32 ? Math.max(1, Math.floor(INT32_RANGE / Math.max(n, 1))) : 1;
       const base   = fullInt32 ? INT32_MIN : 1;
       arr = Array.from({ length: n }, (_, i) => base + i * stride);
-      const swaps = Math.max(1, Math.floor(n * 0.05));
-      for (let i = 0; i < swaps; i++) {
-        const indexA = Math.floor(Math.random() * n);
-        const indexB = Math.floor(Math.random() * n);
-        [arr[indexA], arr[indexB]] = [arr[indexB], arr[indexA]];
-      }
+      applySortednessSwaps(arr, custom?.sortednessPct ?? 5);
       break;
     }
     case "reversed":
@@ -213,6 +281,30 @@ export function generateBenchmarkInput(
         ? Array.from({ length: n }, (_, i) => INT32_MIN + i * Math.max(1, Math.floor(INT32_RANGE / Math.max(n, 1))))
         : Array.from({ length: n }, (_, i) => i + 1);
       break;
+    case "sawtooth": {
+      const period = Math.max(2, Math.floor(Math.sqrt(n)));
+      arr = Array.from({ length: n }, (_, i) => (i % period));
+      break;
+    }
+    case "organPipe": {
+      const mid = Math.ceil(n / 2);
+      arr = Array.from({ length: n }, (_, i) => (i < mid ? i : n - 1 - i));
+      break;
+    }
+    case "zipfian":
+      arr = Array.from({ length: n }, () => sampleZipf(fullInt32, n));
+      break;
+    case "dictionary":
+      arr = Array.from({ length: n }, () => {
+        const w = DICTIONARY_WORDS[Math.floor(Math.random() * DICTIONARY_WORDS.length)];
+        return w.charCodeAt(0) * 1000 + w.length * 17 + Math.floor(Math.random() * 100);
+      });
+      break;
+    case "timestamps": {
+      const base = Date.UTC(2020, 0, 1);
+      arr = Array.from({ length: n }, (_, i) => base + i * 86_400_000 + Math.floor(Math.random() * 1000));
+      break;
+    }
     default: {
       const dist = custom?.distribution ?? "uniform";
       arr = uniqueOnly
@@ -1606,6 +1698,150 @@ function timSortJS(input: number[]): number[] {
   return arr;
 }
 
+function powerSortJS(input: number[]): number[] {
+  /*
+   * Powersort — Munro & Wild (2018), "Nearly-Optimal Mergesorts: Fast,
+   * Practical Sorting Methods That Optimally Adapt to Existing Runs".
+   *
+   * Same skeleton as TimSort — detect natural runs, extend short ones with
+   * binary insertion sort, then merge adjacent runs with a temporary buffer —
+   * but it swaps TimSort's run-length stack invariant for a provably
+   * near-optimal merge ORDER. Each boundary between two adjacent runs is
+   * assigned a "node power": the depth at which that boundary would sit in the
+   * perfectly balanced merge tree, derived from the midpoints of the two runs
+   * as fractions of n. Lower power = closer to the root = merge later; higher
+   * power = deeper = merge sooner. Maintaining the stack so powers increase
+   * toward the top reproduces the optimal bisection merge tree, which makes
+   * Powersort the merge policy adopted by CPython's list.sort() since 3.11.
+   *
+   * The only behavioral difference from `timSortJS` above is the merge policy
+   * (node power vs. the run-length invariant) — run detection, minrun, binary
+   * insertion, and the merge routine are deliberately identical so a
+   * head-to-head benchmark isolates exactly that difference.
+   *
+   * Worst case: O(n log n). Best case: O(n) on already-sorted input.
+   * Space: O(n) temporary merge buffer. Stable.
+   */
+  const arr = [...input];
+  const n = arr.length;
+  if (n < 2) return arr;
+
+  // minrun like TimSort: largest r with n/2^k landing in [32, 64).
+  function minRunLength(len: number): number {
+    let r = 0;
+    while (len >= 64) { r |= len & 1; len >>= 1; }
+    return len + r;
+  }
+  const MIN_RUN = minRunLength(n);
+
+  // Binary insertion sort for arr[lo..hi] given arr[lo..start-1] is sorted.
+  function binaryInsert(lo: number, hi: number, start: number): void {
+    for (let i = Math.max(start, lo + 1); i <= hi; i++) {
+      const pivot = arr[i];
+      let left = lo, right = i;
+      while (left < right) {
+        const mid = (left + right) >>> 1;
+        if (arr[mid] > pivot) right = mid; else left = mid + 1;
+      }
+      for (let j = i; j > left; j--) arr[j] = arr[j - 1];
+      arr[left] = pivot;
+    }
+  }
+
+  // Detect the natural run starting at lo; reverse descending runs in place.
+  // Returns the index just past the end of the run.
+  function countRunAndMakeAscending(lo: number, hi: number): number {
+    let runHi = lo + 1;
+    if (runHi > hi) return runHi;
+    if (arr[runHi++] < arr[lo]) {
+      // Strictly descending — extend, then reverse to make ascending.
+      while (runHi <= hi && arr[runHi] < arr[runHi - 1]) runHi++;
+      for (let l = lo, r = runHi - 1; l < r; l++, r--) { const t = arr[l]; arr[l] = arr[r]; arr[r] = t; }
+    } else {
+      // Weakly ascending.
+      while (runHi <= hi && arr[runHi] >= arr[runHi - 1]) runHi++;
+    }
+    return runHi;
+  }
+
+  // Stable merge of arr[lo..mid] (left run) and arr[mid+1..hi] (right run).
+  function merge(lo: number, mid: number, hi: number): void {
+    const leftLen = mid - lo + 1, rightLen = hi - mid;
+    if (leftLen <= rightLen) {
+      const tmp = arr.slice(lo, mid + 1);
+      let i = 0, j = mid + 1, k = lo;
+      while (i < leftLen && j <= hi) arr[k++] = tmp[i] <= arr[j] ? tmp[i++] : arr[j++];
+      while (i < leftLen) arr[k++] = tmp[i++];
+    } else {
+      const tmp = arr.slice(mid + 1, hi + 1);
+      let i = mid, j = rightLen - 1, k = hi;
+      while (i >= lo && j >= 0) arr[k--] = arr[i] > tmp[j] ? arr[i--] : tmp[j--];
+      while (j >= 0) arr[k--] = tmp[j--];
+    }
+  }
+
+  // Expected merge-tree depth of the boundary between two adjacent runs.
+  // s1 = start of left run, n1/n2 = run lengths, total = n. Integer math from
+  // the paper; we double with multiplication (not `<<`) so it stays exact past
+  // 2^31 — `a` can grow to ~n·2^log₂n which overflows a 32-bit shift.
+  function nodePower(s1: number, n1: number, n2: number, total: number): number {
+    let a = 2 * s1 + n1 - 2;
+    let b = a + n1 + n2 + 2;
+    let power = 0;
+    while (Math.floor(a / total) === Math.floor(b / total)) {
+      power++;
+      a *= 2;
+      b *= 2;
+    }
+    return power + 1;
+  }
+
+  // Run stack — parallel arrays of base index, length, and node power.
+  const runBase: number[] = [];
+  const runLen: number[] = [];
+  const runPow: number[] = [];
+
+  let s1 = 0;
+  let n1 = countRunAndMakeAscending(0, n - 1) - s1;
+  if (n1 < MIN_RUN) {
+    const force = Math.min(n, MIN_RUN);
+    binaryInsert(s1, s1 + force - 1, s1 + n1);
+    n1 = force;
+  }
+
+  while (s1 + n1 < n) {
+    const s2 = s1 + n1;
+    let n2 = countRunAndMakeAscending(s2, n - 1) - s2;
+    if (n2 < MIN_RUN) {
+      const force = Math.min(n - s2, MIN_RUN);
+      binaryInsert(s2, s2 + force - 1, s2 + n2);
+      n2 = force;
+    }
+
+    const power = nodePower(s1, n1, n2, n);
+
+    // Merge any stacked runs deeper than this boundary (higher power) first —
+    // that's what enforces the near-optimal bisection merge order.
+    while (runBase.length > 0 && runPow[runPow.length - 1] > power) {
+      const bs = runBase.pop()!, bl = runLen.pop()!; runPow.pop();
+      merge(bs, bs + bl - 1, s1 + n1 - 1);
+      s1 = bs; n1 += bl;
+    }
+
+    runBase.push(s1); runLen.push(n1); runPow.push(power);
+    s1 = s2; n1 = n2;
+  }
+
+  // Collapse whatever runs are left on the stack into the final run.
+  while (runBase.length > 0) {
+    const bs = runBase.pop()!, bl = runLen.pop()!; runPow.pop();
+    merge(bs, bs + bl - 1, s1 + n1 - 1);
+    s1 = bs; n1 += bl;
+  }
+
+  return arr;
+}
+
 /* ── Bitonic Sort ───────────────────────────────────────────────────────────
  * The canonical GPU-friendly sort: a fixed network of (k, j) compare-swap
  * passes whose comparisons depend only on indices, never on data values. That
@@ -1659,6 +1895,7 @@ export const SORT_FNS: Record<string, (arr: number[]) => number[]> = {
   introsort: introSort,
   timsort:   (arr) => [...arr].sort((a, b) => a - b),
   "timsort-js": timSortJS,
+  powersort: powerSortJS,
   merge:     mergeSort,
   quick:     quickSort,
   heap:      heapSort,

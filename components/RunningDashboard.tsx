@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { Square, ChevronDown, ChevronRight, Activity, AlertTriangle, Bell, BellOff } from "lucide-react";
+import RunningSortPreview from "@/components/benchmark/RunningSortPreview";
+import type { DataType, SortStep } from "@/lib/benchmark";
 
 // Minimal shapes — mirror the relevant fields of BenchmarkVisualizer's types.
 type CurvePoint = { n: number; timeMs: number; meanMs?: number; timedOut?: boolean };
@@ -28,6 +30,10 @@ interface Props {
   notifyOnDone: boolean;
   /** Toggle handler — the parent owns permission requesting + firing. */
   onToggleNotify: () => void;
+  /** Step-by-step sample sort for the active algorithm (n≈10). */
+  sortPreviewSteps?: SortStep[] | null;
+  sortPreviewLabels?: string[];
+  dataType?: DataType;
 }
 
 /*
@@ -42,7 +48,7 @@ interface Props {
 export default function RunningDashboard({
   algos, currentAlgo, currentN, progress, curveData, memSamples,
   configLine, algoNames, algoColors, onStop, stopPending, tabHidden, workerIsolation,
-  runStartedAt, notifyOnDone, onToggleNotify,
+  runStartedAt, notifyOnDone, onToggleNotify, sortPreviewSteps, sortPreviewLabels, dataType = "integer",
 }: Props) {
   const [collapsed, setCollapsed] = useState(false);
   const pct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
@@ -228,6 +234,19 @@ export default function RunningDashboard({
           )}
           {stopPending && !workerIsolation && (
             <Warn>Stop is delayed — JS can&apos;t interrupt a main-thread sort. Will bail at the next boundary.</Warn>
+          )}
+
+          {currentAlgo && (
+            <RunningSortPreview
+              algoId={currentAlgo}
+              algoName={nameOf(currentAlgo)}
+              color={colorOf(currentAlgo)}
+              steps={sortPreviewSteps ?? null}
+              dataType={dataType}
+              initialLabels={sortPreviewLabels}
+              loop
+              compact
+            />
           )}
 
           {/* Per-algorithm rows */}

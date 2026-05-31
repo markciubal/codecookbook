@@ -118,6 +118,7 @@ const BASE: Record<string, string> = {
   radix:     "radix",
   bucket:    "bucket",
   timsort:   "tim",
+  powersort: "power",
   logos:     "logos",
   adaptive:  "adaptive",
   pdqsort:   "pdq",

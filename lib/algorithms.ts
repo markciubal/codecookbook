@@ -417,6 +417,27 @@ export const ALGORITHM_META: Record<SortAlgorithm, AlgorithmMeta> = {
       "mergeForceCollapse(stack)",
     ],
   },
+  powersort: {
+    name: "Power Sort",
+    slug: "powersort",
+    timeComplexity: "O(n log n)",
+    spaceComplexity: "O(n)",
+    stable: true,
+    description:
+      "TimSort's machinery (natural-run detection, binary-insertion to a minimum run length, buffered stable merge) paired with a provably near-optimal merge ORDER. Every boundary between two adjacent runs is assigned a \"node power\" — the depth at which that boundary sits in the perfectly balanced merge tree, derived from the run midpoints as fractions of n. Keeping the run stack so powers increase toward the top reproduces the optimal bisection tree, giving within a constant factor of the entropy-optimal number of merges. Introduced by Munro & Wild (2018) and adopted as CPython's list.sort() merge policy in 3.11.",
+    comparisonNote: "Made {comparisons} comparisons — Powersort orders its merges by node power (merge-tree depth), so adjacent runs are combined in a near-optimal, near-balanced order. The win over TimSort's run-length rule shows most on inputs with many runs of uneven length.",
+    pseudocode: [
+      "minRun = minRunLength(n)            // 32–64",
+      "scan first run; extend to minRun",
+      "while a next run exists:",
+      "  run = countRunAndMakeAscending(lo)  // reverse if descending",
+      "  power = nodePower(prevStart, prevLen, runLen, n)",
+      "  while stack.top.power > power: merge(pop, current)",
+      "  push(current run, power); current = run",
+      "merge all remaining runs bottom-to-top",
+    ],
+    quote: { text: "Optimal merge order, computed one boundary at a time.", attribution: "Munro & Wild (2018)" },
+  },
 };
 
 function makeStates(
@@ -1416,6 +1437,167 @@ export function getTimSortSteps(arr: number[]): SortStep[] {
 }
 
 /*
+ * Powersort — Munro & Wild (2018), CPython's list.sort() policy since 3.11.
+ *
+ * Same skeleton as TimSort (natural runs → extend to minRun → buffered stable
+ * merge) but the merge ORDER is chosen by "node power": each boundary between
+ * two adjacent runs is assigned the depth it would occupy in the perfectly
+ * balanced merge tree, computed from the run midpoints as fractions of n. The
+ * run stack is kept so powers increase toward the top; when a new boundary has
+ * a lower power than the stack top, the deeper (higher-power) runs are merged
+ * first. That reproduces the near-optimal bisection merge tree.
+ *
+ * Visualization note: the canonical minRun is 32–64, which would swallow any
+ * teaching-sized array into a single run (no merges to show). We shrink minRun
+ * to ~n/4 here so several runs form and the node-power merge order is visible —
+ * exactly the same teaching adjustment getLogosSortSteps makes with `base`.
+ */
+export function getPowerSortSteps(arr: number[]): SortStep[] {
+  const steps: SortStep[] = [];
+  const arr2 = [...arr];
+  const size = arr2.length;
+  let comparisons = 0;
+  let swaps = 0;
+  const sortedSet = new Set<number>();
+
+  function snap(desc: string, line: number, ov: Partial<Record<number, BarState>> = {}) {
+    steps.push({ array: [...arr2], states: makeStates(size, sortedSet, ov), description: desc, comparisons, swaps, pseudocodeLine: line });
+  }
+
+  if (size <= 1) {
+    steps.push({ array: [...arr2], states: Array(size).fill("sorted"), description: "Array is already sorted!", comparisons, swaps, pseudocodeLine: -1 });
+    return steps;
+  }
+
+  // Teaching minRun: ~n/4 so several runs form (see note above). Real Powersort
+  // uses the canonical 32–64 formula.
+  const minRun = Math.max(2, Math.min(size, Math.floor(size / 4) || 2));
+  snap(`minRun = ${minRun} (reduced from the canonical 32–64 so the merge tree is visible)`, 0);
+
+  // Detect a natural run at lo; reverse descending runs. Returns exclusive end.
+  function countRunAndMakeAscending(lo: number, line: number): number {
+    if (lo + 1 >= size) return lo + 1;
+    let hi = lo + 1;
+    comparisons++;
+    const isDesc = arr2[hi] < arr2[lo];
+    snap(`Run at [${lo}]: ${arr2[lo]}→${arr2[hi]} is ${isDesc ? "descending" : "ascending"}`, line, { [lo]: "comparing", [hi]: "comparing" });
+    hi++;
+    if (isDesc) {
+      while (hi < size) { comparisons++; if (arr2[hi] >= arr2[hi - 1]) break; hi++; }
+      snap(`Reverse descending run [${lo}..${hi - 1}]`, line, Object.fromEntries(Array.from({ length: hi - lo }, (_, k) => [lo + k, "swapping" as BarState])));
+      let l = lo, r = hi - 1;
+      while (l < r) { [arr2[l], arr2[r]] = [arr2[r], arr2[l]]; swaps++; l++; r--; }
+    } else {
+      while (hi < size) { comparisons++; if (arr2[hi] < arr2[hi - 1]) break; hi++; }
+    }
+    return hi;
+  }
+
+  // Binary insertion sort arr2[lo..hi) with arr2[lo..start) already sorted.
+  function binaryInsertionSort(lo: number, hi: number, start: number, line: number) {
+    if (start <= lo) start = lo + 1;
+    for (let i = start; i < hi; i++) {
+      const key = arr2[i];
+      snap(`Extend run: binary-insert ${key}`, line, { [i]: "current" });
+      let left = lo, right = i;
+      while (left < right) { const m = (left + right) >> 1; comparisons++; if (arr2[m] <= key) left = m + 1; else right = m; }
+      for (let j = i; j > left; j--) { arr2[j] = arr2[j - 1]; swaps++; }
+      arr2[left] = key;
+    }
+  }
+
+  // Stable merge of arr2[lo..mid) (left) with arr2[mid..hi) (right).
+  function merge(lo: number, mid: number, hi: number) {
+    if (lo >= mid || mid >= hi) return;
+    const L = arr2.slice(lo, mid);
+    const R = arr2.slice(mid, hi);
+    for (let x = lo; x < hi; x++) sortedSet.delete(x);
+    snap(`Merge runs [${lo}..${mid - 1}] + [${mid}..${hi - 1}]`, 5, Object.fromEntries([
+      ...Array.from({ length: mid - lo }, (_, x) => [lo + x, "comparing" as BarState]),
+      ...Array.from({ length: hi - mid }, (_, x) => [mid + x, "swapping" as BarState]),
+    ]));
+    let i = 0, j = 0, k = lo;
+    while (i < L.length && j < R.length) {
+      comparisons++;
+      if (L[i] <= R[j]) { arr2[k] = L[i++]; snap(`Take L=${arr2[k]}`, 5, { [k]: "comparing" }); k++; }
+      else { arr2[k] = R[j++]; swaps++; snap(`Take R=${arr2[k]}`, 5, { [k]: "swapping" }); k++; }
+    }
+    while (i < L.length) { arr2[k++] = L[i++]; }
+    while (j < R.length) { arr2[k++] = R[j++]; swaps++; }
+    for (let x = lo; x < hi; x++) sortedSet.add(x);
+    snap(`Merged into sorted run [${lo}..${hi - 1}]`, 5, Object.fromEntries(Array.from({ length: hi - lo }, (_, x) => [lo + x, "sorted" as BarState])));
+  }
+
+  // Node power: depth of this boundary in the perfectly balanced merge tree.
+  // Doubled with multiplication (not <<) so it stays exact for large n.
+  function nodePower(s1: number, n1: number, n2: number, total: number): number {
+    let a = 2 * s1 + n1 - 2;
+    let b = a + n1 + n2 + 2;
+    let power = 0;
+    while (Math.floor(a / total) === Math.floor(b / total)) { power++; a *= 2; b *= 2; }
+    return power + 1;
+  }
+
+  // Run stack — each entry carries its node power.
+  const stack: { lo: number; len: number; power: number }[] = [];
+
+  // First run.
+  let s1 = 0;
+  let e1 = countRunAndMakeAscending(0, 1);
+  let len1 = e1 - s1;
+  if (len1 < minRun) {
+    const end = Math.min(s1 + minRun, size);
+    snap(`First run len ${len1} < minRun ${minRun}; extend to ${end - s1}`, 1,
+      Object.fromEntries(Array.from({ length: len1 }, (_, k) => [s1 + k, "comparing" as BarState])));
+    binaryInsertionSort(s1, end, e1, 1);
+    len1 = end - s1;
+  }
+  for (let x = s1; x < s1 + len1; x++) sortedSet.add(x);
+  snap(`First run [${s1}..${s1 + len1 - 1}] ready (current run)`, 1,
+    Object.fromEntries(Array.from({ length: len1 }, (_, k) => [s1 + k, "sorted" as BarState])));
+
+  while (s1 + len1 < size) {
+    snap(`Scan for the next run after index ${s1 + len1 - 1}`, 2, { [s1 + len1]: "current" });
+    const s2 = s1 + len1;
+    let e2 = countRunAndMakeAscending(s2, 3);
+    let len2 = e2 - s2;
+    if (len2 < minRun) {
+      const end = Math.min(s2 + minRun, size);
+      binaryInsertionSort(s2, end, e2, 3);
+      len2 = end - s2;
+    }
+    for (let x = s2; x < s2 + len2; x++) sortedSet.add(x);
+
+    const power = nodePower(s1, len1, len2, size);
+    snap(`nodePower(start=${s1}, len₁=${len1}, len₂=${len2}, n=${size}) = ${power} — merge-tree depth of this boundary`, 4,
+      { [s2 - 1]: "comparing", [s2]: "swapping" });
+
+    // Merge stacked runs deeper (higher power) than this boundary first.
+    while (stack.length > 0 && stack[stack.length - 1].power > power) {
+      const top = stack.pop()!;
+      snap(`Stack top power ${top.power} > ${power} → merge it before continuing`, 5);
+      merge(top.lo, top.lo + top.len, s1 + len1);
+      s1 = top.lo; len1 += top.len;
+    }
+
+    stack.push({ lo: s1, len: len1, power });
+    snap(`Push run [${s1}..${s1 + len1 - 1}] with power ${power} (stack depth ${stack.length}); advance to next run`, 6,
+      Object.fromEntries(Array.from({ length: len1 }, (_, k) => [s1 + k, "sorted" as BarState])));
+    s1 = s2; len1 = len2;
+  }
+
+  snap(`No runs left — collapse the ${stack.length} stacked run(s) into the final run`, 7, {});
+  while (stack.length > 0) {
+    const top = stack.pop()!;
+    merge(top.lo, top.lo + top.len, s1 + len1);
+    s1 = top.lo; len1 += top.len;
+  }
+
+  steps.push({ array: [...arr2], states: Array(size).fill("sorted"), description: "Array is fully sorted!", comparisons, swaps, pseudocodeLine: -1 });
+  return steps;
+}
+
+/*
  * "In the beginning was the Word, and the Word was with God, and the Word was God." — John 1:1
  *
  * Logos: the ordering principle beneath all apparent chaos.
@@ -2364,6 +2546,8 @@ export function getSteps(algorithm: SortAlgorithm, arr: number[]): SortStep[] {
       return getBucketSortSteps(arr);
     case "timsort":
       return getTimSortSteps(arr);
+    case "powersort":
+      return getPowerSortSteps(arr);
     case "logos":
       // Use visualizer-friendly params: lower BASE so recursive partitioning is visible
       // (default BASE=48 would skip straight to insertion sort for typical small arrays),

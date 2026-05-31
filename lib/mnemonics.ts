@@ -198,4 +198,19 @@ export const MNEMONICS: Record<string, Mnemonic[]> = {
       body: "After partitioning, the three regions are sorted by size and the two smallest are processed recursively while the largest becomes the next loop iteration (tail-call). Stack depth is bounded to O(log n) regardless of partition quality. A depth counter catches the rare worst case and falls back to the standard library sort — the introsort guarantee that prevents O(n²) no matter what.",
     },
   ],
+
+  powersort: [
+    {
+      headline: "Same runs as TimSort, smarter merge order",
+      body: "Powersort reuses everything TimSort does — find natural ascending/descending runs, reverse descending ones, extend short runs to minRun with binary insertion sort, and merge with a temporary buffer. The ONLY thing it changes is the ORDER in which adjacent runs get merged. So if you know TimSort, you already know 90% of Powersort.",
+    },
+    {
+      headline: "\"Power\" = depth in the balanced merge tree",
+      body: "Picture the perfectly balanced binary tree of merges over the runs. Each boundary between two runs sits at some depth in that tree — that depth is its node power, computed from the two runs' midpoints as fractions of n. Low power = near the root = merge last; high power = deep in the tree = merge soon. Powersort keeps the run stack so powers only increase toward the top.",
+    },
+    {
+      headline: "Merge the deep ones first",
+      body: "When a new run boundary is found, compare its power to the power of the run on top of the stack. While the top's power is greater (deeper), pop and merge it — those merges belong lower in the tree. Then push the current run. This one rule, applied boundary by boundary, reconstructs the optimal bisection merge tree and keeps total merge cost within a constant factor of optimal. It's why CPython adopted it for list.sort() in 3.11.",
+    },
+  ],
 };
