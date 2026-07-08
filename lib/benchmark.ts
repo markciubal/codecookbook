@@ -1503,12 +1503,11 @@ export type QuickPivot = "first" | "last" | "median3" | "random";
 export type ShellGaps  = "shell" | "hibbard" | "sedgewick" | "ciura";
 
 // ── logos-sort npm package wrapper ──
-// The in-house logosSort (above) is the embedded reference implementation we
-// kept around for offline / no-network demos. When you actually want the
-// canonical Logos Sort you want the npm package, which has been profiled
-// against many more workloads and has the in-place mode the in-house one
-// doesn't. We import lazily so SSR doesn't try to load the native binding.
-import * as logosNpm from "logos-sort";
+// We import from a shim that pulls in ONLY the pure-JS engine modules
+// (sort.js / sort-inplace.js), skipping the package's index.js barrel — the
+// barrel unconditionally requires native.js, which webpack/Turbopack can't
+// bundle because it references a compiled .node addon. See lib/logos-sort-safe.ts.
+import * as logosNpm from "./logos-sort-safe";
 
 /**
  * Returns a Logos Sort wrapper backed by `logos-sort@0.3.1`. Two modes:
