@@ -3,20 +3,45 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { Play, Square, RotateCcw, Trophy, LineChart, ChevronRight, Lock, Unlock, Settings, Code, X, Copy, Check, Activity } from "lucide-react";
 import { generateBenchmarkInput, generateFloatInput, generateStringInput, SORT_FNS, ALGO_INCOMPATIBLE, makeQuickSort, makeShellSort, sortSteps, makeAdversarialInput, measureAllocBytes, type DataType, type BenchmarkScenario, type CustomDistribution, type ValueDistribution, type QuickPivot, type ShellGaps, type SortStep } from "@/lib/benchmark";
+import { ALGO_CATALOG_IN_PLACE, catalogInPlace, effectiveAuxBytes, inPlaceVerdict } from "@/lib/in-place-verdict";
 import { buildPrerunSample } from "@/lib/preview-labels";
 import { BENCHMARK_SOURCE } from "@/lib/benchmark-source";
 import { getLogosSortSteps } from "@/lib/algorithms";
+import { buildEulerLogYTicks } from "@/components/benchmark/fit-log-log";
+import { CoverageHeatmap } from "@/components/benchmark";
 import { useLevel } from "@/hooks/useLevel";
 import RunningDashboard from "@/components/RunningDashboard";
-import RunningSortPreview from "@/components/benchmark/RunningSortPreview";
 import { AdvGroup, AdvSection, AdvToggle } from "@/components/BenchmarkAdvanced";
 import WinnersLog, { type WinnerLog } from "@/components/WinnersLog";
-import SessionCurves, { type SessionLog } from "@/components/SessionCurves";
-import SessionSummary from "@/components/SessionSummary";
-import SessionBigO from "@/components/SessionBigO";
-import SessionMatrix from "@/components/SessionMatrix";
+import SessionCurves, { type SessionLog, type SessionPoint } from "@/components/SessionCurves";
+import SessionCommandCenter from "@/components/SessionCommandCenter";
 import SortNetworkGraph from "@/components/SortNetworkGraph";
+import {
+  buildChurnProbeDeck,
+  pickChurnContextForLevel,
+  generateChurnInput,
+  churnLogDataType,
+  churnLogScenario,
+  churnStateKey,
+  parseChurnStateKey,
+  contextsForAlgo,
+  requiredChurnDtypesForAlgo,
+  markChurnDtypesTested,
+  allChurnDtypesTestedAtLevel,
+  countChurnDtypesTestedAtLevel,
+  type ChurnProbeContext,
+} from "@/lib/churn-coverage";
+import { logRunProbe, approxInputBytes } from "@/lib/run-log";
+import {
+  appendDetailedSamples,
+  loadDetailedSessionLog,
+  migrateFlatSessionLog,
+  persistDetailedSessionLog,
+  SCENARIO_MIXED,
+  type DetailedSessionLog,
+} from "@/lib/detailed-session-log";
 import { cyLineStyle, DT_LABEL } from "@/lib/dataTypeStyle";
+import * as PermStrategy from "@/lib/permutation-strategies";
 import { getWasmSorts, WASM_SUPPORTED, type WasmSortBundle } from "@/lib/wasmSorts";
 import { getWebgpuSorts, WEBGPU_SUPPORTED, type WebGpuSortBundle } from "@/lib/webgpuSorts";
 
@@ -51,71 +76,6 @@ const SLOW_THRESHOLD = 5_000;
 // the string leg of the polymorphic sweep. The string incompatibility is
 // declared in ALGO_INCOMPATIBLE for the same reason.
 const POLY_SAFE = new Set(["logos", "merge", "quick", "heap", "insertion", "shell", "selection", "bubble", "cocktail", "comb", "gnome", "powersort"]);
-
-// Verdict on whether an algorithm sorted in place, derived from its measured
-// auxiliary bytes ÷ n. Two signals, two thresholds:
-//
-//   • `allocBytes` — instrumented Array / typed-array / Set / Map / map /
-//     filter / splice / etc. allocations. Authoritative when present: a
-//     non-zero reading proves an allocation happened, a zero reading proves
-//     no PATCHED allocators fired (spread / engine-internal scratch can
-//     still slip past). Threshold: ≥ 1 byte/element ⇒ O(n).
-//   • `heapDeltaBytes` — REAL `performance.memory.usedJSHeapSize` delta only
-//     (no theoretical fallback). Catches the instrumentation blind spots
-//     (spread copies, V8-internal scratch), but it's noisy — GC scheduling
-//     produces a few bytes/element of "growth" even on truly in-place sorts.
-//     Threshold: ≥ 4 bytes/element ⇒ O(n) (with "?" because it's the noisy
-//     source).
-//
-// The two sources are checked in order — instrumented first (no "?"), then
-// heap delta (with "?"). When both signals point clean, the verdict is
-// "in-place ✓" if we had instrumentation, "in-place ✓?" if only heap delta.
-function inPlaceVerdict(
-  allocBytes: number | null | undefined,
-  heapDeltaBytes: number | null | undefined,
-  n: number,
-): { label: string; color: string; bg: string; title: string } | null {
-  if (n <= 0) return null;
-  const a = allocBytes ?? null;
-  const h = heapDeltaBytes ?? null;
-  if (a == null && h == null) return null;
-  const aPer = a != null ? a / n : 0;
-  const hPer = h != null ? h / n : 0;
-
-  // Instrumented allocators caught a real O(n) allocation.
-  if (a != null && aPer >= 1) {
-    return {
-      label: "O(n) aux ✗",
-      color: "#ef5350", bg: "rgba(239,83,80,0.15)",
-      title: `${aPer.toFixed(2)} aux bytes/element · instrumented allocators caught O(n) growth`,
-    };
-  }
-  // Heap delta picked up growth the instrumentation missed (spread, internal
-  // scratch). 4 byte/el floor sits above GC noise and just below the smallest
-  // realistic O(n) allocator (a packed Int32Array buffer is 4 byte/el).
-  if (h != null && hPer >= 4) {
-    return {
-      label: "O(n) aux ✗?",
-      color: "#ef5350", bg: "rgba(239,83,80,0.15)",
-      title: `${hPer.toFixed(2)} aux bytes/element · instrumentation missed it; heap delta caught O(n) growth (noisy source)`,
-    };
-  }
-  // Both signals are clean — instrumented verdict is high-confidence.
-  if (a != null) {
-    return {
-      label: "in-place ✓",
-      color: "#22c55e", bg: "rgba(34,197,94,0.15)",
-      title: `${aPer.toFixed(3)} aux bytes/element instrumented · O(1)/O(log n) auxiliary memory`,
-    };
-  }
-  // Only heap delta available — confident enough to call in-place, but mark
-  // it "?" because the signal is the noisy one.
-  return {
-    label: "in-place ✓?",
-    color: "#22c55e", bg: "rgba(34,197,94,0.15)",
-    title: `${hPer.toFixed(3)} aux bytes/element from heap delta · likely in-place but no instrumented data`,
-  };
-}
 
 // Wrap a sort fn so a single measured call sorts an integer array (the one
 // passed in) plus a fresh float and string array of the same size — the
@@ -1063,7 +1023,8 @@ const ALGO_GROUPS = [
   {
     label: "O(n log n)",
     items: [
-      { id: "logos",     name: "Logos Sort",  href: "/sorting/logos" },
+      { id: "logos",           name: "Logos Sort",            href: "/sorting/logos" },
+      { id: "logos-inplace",   name: "Logos Sort (in-place)" },
       { id: "adaptive",    name: "Adaptive Sort",   href: "/sorting/adaptive" },
       { id: "pdqsort",     name: "PDQ Sort",        href: "/sorting/pdqsort" },
       { id: "introsort",   name: "Introsort",       href: "/sorting/introsort" },
@@ -1104,6 +1065,7 @@ const ALGO_GROUPS = [
 
 const ALGO_NAMES: Record<string, string> = {
   logos: "Logos Sort",
+  "logos-inplace": "Logos Sort (in-place)",
   adaptive: "Adaptive Sort",
   pdqsort:  "PDQ Sort",
   introsort: "Introsort",
@@ -1122,6 +1084,7 @@ const ALGO_NAMES: Record<string, string> = {
 
 const ALGO_COLORS: Record<string, string> = {
   logos:            "#808080",
+  "logos-inplace":  "#4a4a4a",
   adaptive:       "#26a69a",
   pdqsort:        "#7e57c2",
   introsort:      "#e67e22",
@@ -1152,6 +1115,7 @@ const ALGO_COLORS: Record<string, string> = {
 
 const ALGO_SPACE: Record<string, string> = {
   logos:            "O(log n) / O(n)",
+  "logos-inplace":  "O(1)",
   adaptive:       "O(log n) / O(span)",
   pdqsort:        "O(log n)",
   introsort:      "O(log n)",
@@ -1180,6 +1144,7 @@ const ALGO_SPACE: Record<string, string> = {
 
 const ALGO_TIME: Record<string, string> = {
   logos:            "O(n log n)",
+  "logos-inplace":  "O(n log n)",
   adaptive:       "O(n log n)",
   pdqsort:        "O(n log n)",
   introsort:      "O(n log n)",
@@ -1210,6 +1175,7 @@ const ALGO_TIME: Record<string, string> = {
 // true = stable, false = unstable, null = not applicable
 const ALGO_STABLE: Record<string, boolean> = {
   logos:            false,
+  "logos-inplace":  false,
   adaptive:       false,
   pdqsort:        false,
   introsort:      false,
@@ -1238,6 +1204,7 @@ const ALGO_STABLE: Record<string, boolean> = {
 // true = can sort a stream, false = needs full input
 const ALGO_ONLINE: Record<string, boolean> = {
   logos:            false,
+  "logos-inplace":  false,
   adaptive:       false,
   pdqsort:        false,
   introsort:      false,
@@ -1339,15 +1306,21 @@ function fitLogLog(points: { n: number; val: number }[]): FitResult | null {
 }
 
 const SIZE_BUTTONS: { n: number; word: string }[] = [
-  { n: 1,           word: "One" },
-  { n: 10,          word: "Ten" },
-  { n: 100,         word: "One Hundred" },
-  { n: 1_000,       word: "One Thousand" },
-  { n: 10_000,      word: "Ten Thousand" },
-  { n: 100_000,     word: "One Hundred Thousand" },
-  { n: 1_000_000,   word: "One Million" },
-  { n: 10_000_000,  word: "Ten Million" },
-  { n: 100_000_000, word: "One Hundred Million" },
+  { n: 1,            word: "One" },
+  { n: 10,           word: "Ten" },
+  { n: 100,          word: "One Hundred" },
+  { n: 1_000,        word: "One Thousand" },
+  { n: 10_000,       word: "Ten Thousand" },
+  { n: 100_000,      word: "One Hundred Thousand" },
+  { n: 1_000_000,    word: "One Million" },
+  { n: 10_000_000,   word: "Ten Million" },
+  { n: 15_000_000,   word: "Fifteen Million" },
+  { n: 20_000_000,   word: "Twenty Million" },
+  { n: 30_000_000,   word: "Thirty Million" },
+  { n: 40_000_000,   word: "Forty Million" },
+  { n: 50_000_000,   word: "Fifty Million" },
+  { n: 75_000_000,   word: "Seventy-Five Million" },
+  { n: 100_000_000,  word: "One Hundred Million" },
 ];
 
 const SCENARIO_OPTIONS: { id: BenchmarkScenario; label: string; desc: string; rare?: boolean }[] = [
@@ -1356,6 +1329,11 @@ const SCENARIO_OPTIONS: { id: BenchmarkScenario; label: string; desc: string; ra
   { id: "reversed",     label: "Reversed",        desc: "worst case for naive quicksort" },
   { id: "duplicates",   label: "Many duplicates", desc: "stress-tests three-way partition" },
   { id: "sorted",       label: "Already sorted",  desc: "best case — rare in mix", rare: true },
+  { id: "sawtooth",     label: "Sawtooth",        desc: "alternating ascending runs", rare: true },
+  { id: "organPipe",    label: "Organ pipe",      desc: "ascending then descending", rare: true },
+  { id: "zipfian",      label: "Zipfian",         desc: "heavy-tail value frequency", rare: true },
+  { id: "dictionary",   label: "Dictionary",      desc: "real English tokens", rare: true },
+  { id: "timestamps",   label: "Timestamps",      desc: "Unix-ms style values", rare: true },
 ];
 
 // ── Per-algorithm variant descriptors ─────────────────────────────────────────
@@ -1427,7 +1405,7 @@ interface AlgoInfo {
 
 const ALGO_INFO: Record<string, AlgoInfo> = {
   logos:     { best: "O(n)",       avg: "O(n log n)", worst: "O(n log n)", space: "O(log n) / O(n)", inPlace: false, useCase: "General-purpose sort for any data; adaptive across all input patterns", intuition: "Dual-pivot introsort hybrid. Auxiliary space has three distinct paths: (1) pure recursion — O(log n) call stack via tail-call elimination on the largest partition; (2) counting sort shortcut — O(k) where k = value range, fires when valueRange < 4·n, often O(1) relative to n in practice; (3) introsort fallback — O(n) slice + TimSort merge buffer when depth 2·log₂n + 4 is exhausted (adversarial input only). Worst-case auxiliary is O(n)." },
-  adaptive:  { best: "O(n)",       avg: "O(n log n)", worst: "O(n log n)", space: "O(log n) / O(span)", inPlace: true, useCase: "General-purpose sort that profiles the input first and picks the cheapest strategy", intuition: "Scans for min/max, integer range, and inversion rate before choosing a strategy: counting sort for small integer spans, insertion sort for tiny or nearly-sorted arrays, introsort with heapsort fallback otherwise" },
+  adaptive:  { best: "O(n)",       avg: "O(n log n)", worst: "O(n log n)", space: "O(log n) / O(span)", inPlace: ALGO_CATALOG_IN_PLACE.adaptive, useCase: "General-purpose sort that profiles the input first and picks the cheapest strategy", intuition: "Scans for min/max, integer range, and inversion rate before choosing a strategy: counting sort for small integer spans (O(span) aux), insertion sort for tiny or nearly-sorted arrays, introsort with heapsort fallback otherwise" },
   pdqsort:   { best: "O(n)",       avg: "O(n log n)", worst: "O(n log n)", space: "O(log n)",            inPlace: true, useCase: "General-purpose default in Rust's std and Boost.Sort — robust against adversarial input", intuition: "Pattern-defeating quicksort by Orson Peters: median-of-3 / pseudomedian-of-9 pivot, partial-insertion-sort early-out detects already-sorted regions in O(n), equal-elements fast path handles many duplicates in O(n), heapsort fallback after log₂(n) bad partitions guarantees O(n log n)" },
   introsort: { best: "O(n log n)", avg: "O(n log n)", worst: "O(n log n)", space: "O(log n)", inPlace: true,  useCase: "Default sort in C++ std::sort; whenever stability isn't required", intuition: "Quicksort that switches to heapsort if recursion depth exceeds 2·log₂n — quicksort speed with worst-case guarantee" },
   timsort:      { best: "O(n)",       avg: "O(n log n)", worst: "O(n log n)", space: "O(n)",     inPlace: false, useCase: "Data that already has partial order: DB results, log files, nearly-sorted arrays", intuition: "Detects natural sorted runs in the input and merges them; exploits real-world order that pure quicksort ignores" },
@@ -1614,20 +1592,6 @@ function Spinner({ value, onChange, min, max, label }: {
     </div>
   );
 }
-
-// ── Scenario presets ──────────────────────────────────────────────────────────
-const SCENARIO_PRESETS = [
-  { label: "Logos vs Tim Sort", desc: "Head-to-head · random · 10K → 1M", algos: ["logos","timsort"], scenarios: ["random"] as BenchmarkScenario[], sizes: [10_000,100_000,1_000_000], pivot: undefined, gaps: undefined },
-  { label: "O(n log n) shootout", desc: "All fast sorts · random · up to 1 M", algos: ["logos","timsort","merge","quick","heap"], scenarios: ["random"] as BenchmarkScenario[], sizes: [1000,10000,100000,500000,1000000], pivot: undefined, gaps: undefined },
-  { label: "QuickSort worst case", desc: "First-pivot on sorted input", algos: ["quick","merge","logos"], scenarios: ["nearlySorted"] as BenchmarkScenario[], sizes: [500,1000,5000,10000,50000], pivot: "first" as QuickPivot, gaps: undefined },
-  { label: "TimSort advantage", desc: "Nearly-sorted · merge vs insertion vs logos", algos: ["logos","timsort","merge","quick","insertion"], scenarios: ["nearlySorted"] as BenchmarkScenario[], sizes: [1000,10000,100000,500000], pivot: undefined, gaps: undefined },
-  { label: "Linear sorts", desc: "Counting / radix vs comparison sorts", algos: ["counting","radix","logos","merge","quick"], scenarios: ["random"] as BenchmarkScenario[], sizes: [10000,100000,500000,1000000], pivot: undefined, gaps: undefined },
-  { label: "O(n²) gallery", desc: "Quadratic sorts on small n", algos: ["insertion","selection","bubble","shell"], scenarios: ["random"] as BenchmarkScenario[], sizes: [100,500,1000,2000,5000], pivot: undefined, gaps: undefined },
-  { label: "Space hogs", desc: "Memory usage across all complexities", algos: ["merge","timsort","logos","heap","quick","counting"], scenarios: ["random"] as BenchmarkScenario[], sizes: [1000,10000,100000,1000000], pivot: undefined, gaps: undefined },
-  { label: "Duplicates stress", desc: "High-duplicate data — TimSort & counting shine", algos: ["logos","timsort","merge","quick","counting","radix"], scenarios: ["duplicates"] as BenchmarkScenario[], sizes: [10000,100000,1000000], pivot: undefined, gaps: undefined },
-  { label: "Polymorphic sweep", desc: "Each sort = one integer + float + string array, summed as one measurement (type-safe sorts only)", algos: ["logos","merge","quick","heap","insertion","shell"], scenarios: ["random"] as BenchmarkScenario[], sizes: [1000,10000,100000,500000], pivot: undefined, gaps: undefined, poly: true },
-] as const;
-
 
 // ── 3-D scatter chart ─────────────────────────────────────────────────────────
 // Orthographic projection with interactive orbit + zoom. Axes: X=log(n), Y=log(time), Z=log(space).
@@ -3051,13 +3015,6 @@ function Chart3DHistory({
 // ── Mathematical properties panel ──────────────────────────────────────────────
 // Shows fitted equation, derivative (marginal cost), and cumulative work integral per algorithm.
 
-// Skeleton preview of the right-pane sections that will appear after the benchmark runs.
-// Each row is a labeled placeholder block showing the user what's coming:
-//   - performance curve chart
-//   - winner / rankings table
-//   - per-algorithm mini cards
-//   - mathematical / space complexity analysis
-// The shimmer animation lives in globals.css (.cc-skeleton).
 /*
  * LiveMemoryChart — time-series of V8 heap usage during a benchmark run.
  *
@@ -3561,7 +3518,7 @@ function LiveMemoryChart({
         // delta was observed, never theoretical fallback) backstops the
         // instrumentation's blind spots (spread, engine-internal scratch).
         const verdictPt = algoCurvePts.find(p => p.n === maxN);
-        const verdict = inPlaceVerdict(verdictPt?.allocBytes, verdictPt?.heapDeltaBytes, maxN);
+        const verdict = inPlaceVerdict(verdictPt?.allocBytes, verdictPt?.heapDeltaBytes, maxN, focusAlgo);
 
         // Isolated chart for just this algo
         const localT0 = aStart.ts;
@@ -4033,105 +3990,6 @@ function ColorPicker({ value, onChange }: { value: string; onChange: (c: string)
           </div>
         </>
       )}
-    </div>
-  );
-}
-
-function ResultsSkeleton({ algoCount }: { algoCount: number }) {
-  const cards = Math.min(6, Math.max(2, algoCount));
-  const bar = (h: number, w: string = "100%") => (
-    <div className="cc-skeleton" style={{ height: h, width: w, borderRadius: 4 }} />
-  );
-  const sectionLabel = (text: string) => (
-    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-      <span style={{ width: 4, height: 4, borderRadius: "50%", background: "var(--color-muted)", opacity: 0.6 }} />
-      <span style={{ fontSize: 8, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--color-muted)" }}>
-        {text}
-      </span>
-      <span style={{ fontSize: 8, color: "var(--color-muted)", opacity: 0.5, fontFamily: "monospace" }}>
-        — appears after the run
-      </span>
-    </div>
-  );
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      {/* Performance curve placeholder */}
-      <div style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)", borderRadius: 10, padding: 14 }}>
-        {sectionLabel("Performance curve")}
-        <div style={{ position: "relative", height: 180, marginTop: 4 }}>
-          {/* y-axis ticks */}
-          <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 28, display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
-            {[0, 1, 2, 3, 4].map(i => bar(6, "70%").key ?? <div key={i} className="cc-skeleton" style={{ height: 6, width: "70%", borderRadius: 3 }} />)}
-          </div>
-          {/* fake curve lines as diagonal bars */}
-          <div style={{ position: "absolute", left: 34, right: 0, top: 0, bottom: 18, display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 4 }}>
-            <div className="cc-skeleton" style={{ height: 2, width: "85%", borderRadius: 2 }} />
-            <div className="cc-skeleton" style={{ height: 2, width: "70%", borderRadius: 2 }} />
-            <div className="cc-skeleton" style={{ height: 2, width: "55%", borderRadius: 2 }} />
-            <div className="cc-skeleton" style={{ height: 2, width: "40%", borderRadius: 2 }} />
-          </div>
-          {/* x-axis ticks */}
-          <div style={{ position: "absolute", left: 34, right: 0, bottom: 0, display: "flex", justifyContent: "space-between" }}>
-            {Array.from({ length: 5 }).map((_, i) => (
-              <div key={i} className="cc-skeleton" style={{ height: 6, width: 28, borderRadius: 3 }} />
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Winner / rankings placeholder */}
-      <div style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)", borderRadius: 10, padding: 14 }}>
-        {sectionLabel("Rankings")}
-        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-          {Array.from({ length: cards }).map((_, i) => (
-            <div key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <div className="cc-skeleton" style={{ width: 10, height: 10, borderRadius: "50%" }} />
-              <div className="cc-skeleton" style={{ height: 9, width: `${30 + (i * 7) % 40}%`, borderRadius: 3 }} />
-              <div style={{ flex: 1 }} />
-              <div className="cc-skeleton" style={{ height: 9, width: 50, borderRadius: 3 }} />
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Algorithm mini-card grid placeholder */}
-      <div>
-        {sectionLabel("Per-algorithm cards")}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 8 }}>
-          {Array.from({ length: cards }).map((_, i) => (
-            <div key={i} style={{ background: "var(--color-surface-1)", border: "1px solid var(--color-border)", borderRadius: 7, padding: "8px 10px" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 6 }}>
-                <div className="cc-skeleton" style={{ width: 7, height: 7, borderRadius: "50%" }} />
-                <div className="cc-skeleton" style={{ height: 8, flex: 1, borderRadius: 3 }} />
-                <div className="cc-skeleton" style={{ width: 18, height: 18, borderRadius: "50%" }} />
-              </div>
-              <div className="cc-skeleton" style={{ height: 6, width: "70%", borderRadius: 3, marginBottom: 6 }} />
-              <div className="cc-skeleton" style={{ height: 32, width: "100%", borderRadius: 3 }} />
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Math / space complexity analysis placeholder */}
-      <div style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)", borderRadius: 10, padding: 14 }}>
-        {sectionLabel("Time & space complexity analysis")}
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {Array.from({ length: Math.min(3, cards) }).map((_, i) => (
-            <div key={i} style={{ background: "var(--color-surface-1)", border: "1px solid var(--color-border)", borderRadius: 6, padding: "6px 9px", display: "flex", alignItems: "center", gap: 6 }}>
-              <div className="cc-skeleton" style={{ width: 6, height: 6, borderRadius: "50%" }} />
-              <div className="cc-skeleton" style={{ height: 8, width: 90, borderRadius: 3 }} />
-              <div style={{ flex: 1 }} />
-              <div className="cc-skeleton" style={{ height: 8, width: 36, borderRadius: 3 }} />
-              <div className="cc-skeleton" style={{ height: 8, width: 24, borderRadius: 3 }} />
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <p style={{ fontSize: 10, fontFamily: "monospace", color: "var(--color-muted)", textAlign: "center", margin: "4px 0 8px" }}>
-        Click <strong style={{ color: "var(--color-accent)" }}>Run</strong> to populate these sections.
-      </p>
     </div>
   );
 }
@@ -4690,163 +4548,32 @@ interface SummaryResult {
   timeMs: number;
   meanMs?: number;
   stdDev?: number;
+  /** 95% CI half-width on the mean. ± this value around `meanMs` is the CI.
+   *  Undefined for refs and for algos with <2 samples. */
+  ciHalfWidth?: number;
+  /** ciHalfWidth / meanMs — relative precision. Used to flag "tied" pairs
+   *  (overlapping CIs at adjacent ranks). */
+  ciRatio?: number;
+  /** Number of samples backing the CI. Surfaced in the table tooltip. */
+  sampleCount?: number;
+  /** Raw round times — kept so the bootstrap tie test can resample without
+   *  re-walking curveData. */
+  samples?: number[];
+  /** True when the algo timed out at the largest measured n. `timeMs` for
+   *  these rows is an extrapolation from fitLogLog on safe (non-timed-out)
+   *  points, so they sort into the ascending order at their predicted
+   *  position rather than being shunted into a separate block. */
+  timedOut?: boolean;
+  /** The n at which the algo first timed out. Surfaced in the row badge. */
+  timedAtN?: number;
+  /** True when there were no safe points to fit, so `timeMs` is just a
+   *  ceiling sentinel (CHURN_BUDGET_MS or similar). These rows go to the
+   *  bottom of the ranking with a "> budget" marker instead of "~N ms". */
+  unfittable?: boolean;
   rank: number;
 }
 
 // ── Curve chart ───────────────────────────────────────────────────────────────
-
-// ── Pair matrix ───────────────────────────────────────────────────────────────
-// For each pair of algos, shows which is faster at the largest measured n and by
-// how much. Rows/cols sorted fastest→slowest so the top-left is always the winner.
-
-function PairMatrixTable({
-  sorted,
-  title,
-  accent,
-  getVal,
-  fmtTitle,
-}: {
-  sorted: { id: string; timeMs: number }[];
-  title: string;
-  accent: string;
-  getVal: (row: { id: string; timeMs: number }) => number;
-  fmtTitle: (winner: string, loser: string, ratio: number) => string;
-}) {
-  return (
-    <div style={{
-      borderRadius: 8,
-      border: "1px solid var(--color-border)",
-      overflow: "hidden",
-      background: "var(--color-surface-0, var(--color-surface-1))",
-    }}>
-      {/* Header bar */}
-      <div style={{
-        padding: "6px 10px",
-        borderBottom: "1px solid var(--color-border)",
-        display: "flex", alignItems: "center", gap: 7,
-        background: "var(--color-surface-1)",
-      }}>
-        <span style={{
-          width: 7, height: 7, borderRadius: "50%",
-          background: accent, flexShrink: 0, opacity: 0.85,
-        }} />
-        <span style={{
-          fontSize: 9, fontWeight: 700, letterSpacing: "0.06em",
-          textTransform: "uppercase", color: "var(--color-text)",
-        }}>
-          {title}
-        </span>
-        <span style={{ marginLeft: "auto", fontSize: 8, color: "var(--color-text)", opacity: 0.5, fontFamily: "monospace" }}>
-          n = largest · green wins · ratio
-        </span>
-      </div>
-
-      {/* Scrollable table */}
-      <div style={{ overflowX: "auto", padding: "8px 10px 10px" }}>
-        <table style={{ borderCollapse: "separate", borderSpacing: 2, fontFamily: "monospace", fontSize: 9 }}>
-          <thead>
-            <tr>
-              <th style={{ width: 88, padding: "0 6px 4px 0", textAlign: "right", color: "var(--color-muted)", fontWeight: 400 }} />
-              {sorted.map(col => (
-                <th key={col.id} style={{
-                  padding: "0 6px 4px", textAlign: "center", minWidth: 52,
-                  color: ALGO_COLORS[col.id] ?? "var(--color-muted)",
-                  fontWeight: 700, fontSize: 8,
-                }}>
-                  {(ALGO_NAMES[col.id] ?? col.id).replace(" Sort", "")}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {sorted.map((row) => (
-              <tr key={row.id}>
-                <td style={{
-                  padding: "0 8px 0 0", textAlign: "right",
-                  color: ALGO_COLORS[row.id] ?? "var(--color-muted)",
-                  fontWeight: 700, fontSize: 8, whiteSpace: "nowrap",
-                }}>
-                  {(ALGO_NAMES[row.id] ?? row.id).replace(" Sort", "")}
-                </td>
-                {sorted.map((col) => {
-                  if (row.id === col.id) {
-                    return (
-                      <td key={col.id} style={{
-                        padding: "3px 6px", textAlign: "center",
-                        background: "var(--color-surface-1)",
-                        borderRadius: 4,
-                        color: "var(--color-border)",
-                        fontSize: 10,
-                      }}>◆</td>
-                    );
-                  }
-                  const rv = getVal(row), cv = getVal(col);
-                  const rowWins = rv < cv;
-                  const ratio = rowWins ? cv / rv : rv / cv;
-                  const intensity = Math.min(0.75, 0.35 + (ratio - 1) * 0.12);
-                  const bg = rowWins
-                    ? `rgba(78,160,90,${intensity})`
-                    : `rgba(200,70,70,${intensity})`;
-                  return (
-                    <td key={col.id} style={{
-                      padding: "3px 7px", textAlign: "center",
-                      background: bg,
-                      borderRadius: 4,
-                      color: rowWins ? "#0d2e12" : "#2e0a0a",
-                      fontWeight: 700,
-                      letterSpacing: "0.02em",
-                    }}
-                      title={fmtTitle(
-                        rowWins ? ALGO_NAMES[row.id] : ALGO_NAMES[col.id],
-                        rowWins ? ALGO_NAMES[col.id] : ALGO_NAMES[row.id],
-                        ratio,
-                      )}
-                    >
-                      {rowWins ? `${ratio.toFixed(1)}×` : `÷${ratio.toFixed(1)}`}
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function PairMatrix({ results, spaceResults }: {
-  results: { id: string; timeMs: number }[];
-  spaceResults: { id: string; timeMs: number }[];
-}) {
-  if (results.length < 2) return null;
-
-  const timeSorted  = [...results].sort((a, b) => a.timeMs - b.timeMs);
-  const spaceSorted = spaceResults.length >= 2
-    ? [...spaceResults].sort((a, b) => a.timeMs - b.timeMs)
-    : null;
-
-  return (
-    <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
-      <PairMatrixTable
-        sorted={timeSorted}
-        title="Time — head-to-head"
-        accent="#ef5350"
-        getVal={r => r.timeMs}
-        fmtTitle={(w, l, ratio) => `${w} is ${ratio.toFixed(2)}× faster than ${l}`}
-      />
-      {spaceSorted && (
-        <PairMatrixTable
-          sorted={spaceSorted}
-          title="Space — head-to-head"
-          accent="#64b5f6"
-          getVal={r => r.timeMs}
-          fmtTitle={(w, l, ratio) => `${w} uses ${ratio.toFixed(2)}× less memory than ${l}`}
-        />
-      )}
-    </div>
-  );
-}
 
 // ── Live rank panel ──────────────────────────────────────────────────────────
 // Shows a compact ranked list of algos at the current hover/pin N, updating live.
@@ -5158,6 +4885,10 @@ export function CurveChart({
       })()
     : [0.25, 0.5, 0.75, 1].map(f => ({ v: maxY * f, y: yAt(maxY * f) }));
 
+  const eulerYTicks = yLogScale
+    ? buildEulerLogYTicks(minPosY * 0.5, maxY, yAt, pT, pT + iH)
+    : [];
+
   const getSvgX = (e: React.MouseEvent<SVGSVGElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     return ((e.clientX - rect.left) / rect.width) * VW;
@@ -5373,7 +5104,7 @@ const overlayBtnBase: React.CSSProperties = btn("secondary", {
         <button
           onClick={() => setYLogScale(v => !v)}
           style={{ ...overlayBtnBase, color: yLogScale ? "var(--color-accent)" : "var(--color-muted)", border: `1px solid ${yLogScale ? "var(--color-accent)" : "var(--color-border)"}` }}
-          title={yLogScale ? "Switch to linear Y scale" : "Switch to log Y scale"}
+          title={yLogScale ? "Switch to linear Y scale (hides e, e²… grid)" : "Switch to log Y scale — adds Euler e^k reference lines"}
         >
           {yLogScale ? "log" : "lin"}
         </button>
@@ -5406,11 +5137,28 @@ const overlayBtnBase: React.CSSProperties = btn("secondary", {
       </defs>
       {/* horizontal grid + y labels */}
       {yTicks.map(({ v, y }) => (
-        <g key={v}>
+        <g key={`y10-${v}`}>
           <line x1={pL} y1={y} x2={VW - pR} y2={y}
             stroke="var(--color-border)" strokeWidth={0.6} strokeDasharray="3 3" />
           <text x={pL - 5} y={y + 4} textAnchor="end" fontSize={9}
             fill="var(--color-muted)">{fmtY(v)}</text>
+        </g>
+      ))}
+
+      {/* Euler's number grid — e, e², e³… when log-y is active (natural-log decades). */}
+      {eulerYTicks.map(({ v, y, label }) => (
+        <g key={`ye-${label}-${v}`} style={{ pointerEvents: "none" }}>
+          <line x1={pL} y1={y} x2={VW - pR} y2={y}
+            stroke="#4db6ac" strokeWidth={0.5} strokeDasharray="2 4" opacity={0.45}
+            clipPath="url(#inner-plot-clip)" />
+          <text x={VW - pR + 3} y={y + 3} textAnchor="start" fontSize={7}
+            fontFamily="monospace" fill="#4db6ac" opacity={0.85}>
+            {label}
+          </text>
+          <text x={pL - 5} y={y + 3} textAnchor="end" fontSize={7}
+            fontFamily="monospace" fill="#4db6ac" opacity={0.7}>
+            {fmtY(v)}
+          </text>
         </g>
       ))}
 
@@ -6444,102 +6192,250 @@ function cacheLevel(id: string, n: number): { label: string; color: string } {
   return { label: "RAM", color: "#ef5350" };
 }
 
-// ── Churn Mode UI ─────────────────────────────────────────────────────────
+// ── Permutation Run UI ────────────────────────────────────────────────────
 // The pulsing-sphere indicator + the live telemetry panel that fills in below
-// it while churn is active. Pure presentational: the parent owns all state.
+// it while a permutation run is active. Pure presentational: the parent owns all state.
 
-/** The toggle button itself: pulsating + blinking sphere in a transparent red
- *  box. Inactive state is a dim outline that still reads as "Churn Mode" so
- *  the affordance is obvious without ambient animation distracting the user. */
-function ChurnIndicator({
-  active, complete, onToggle, disabled, probeCount, probesPerSec,
-}: {
-  active: boolean;
-  /** True once every selected algo has saturated. The sphere quiets, the
-   *  red box softens, and the badge flips to "sweep complete" — but the
-   *  toggle stays enabled so the user can stop / re-arm at will. */
-  complete: boolean;
-  onToggle: () => void;
+/** Start control — matches the default Run benchmark button with a subtle glow. */
+function ChurnStartButton({ onStart, disabled }: {
+  onStart: () => void;
   disabled: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onStart}
+      disabled={disabled}
+      className="cc-churn-start"
+      title={disabled
+        ? "Select at least one algorithm to start a Permutation Run"
+        : "Start Permutation Run: probes selected algos across your chosen scenarios and input sizes, adapting n on timeouts"}
+      style={btn("primary", {
+        padding: "6px 16px",
+        fontSize: 12,
+        opacity: disabled ? 0.5 : 1,
+        cursor: disabled ? "not-allowed" : "pointer",
+      })}
+    >
+      <Play size={12} strokeWidth={2} />
+      Start Permutation Run
+    </button>
+  );
+}
+
+/** Live status readout while a run is active — not clickable; use Stop beside it. */
+/**
+ * Faceted-octahedron pulse indicator. Replaces the previous CSS radial-gradient
+ * sphere with a canvas-rendered solid that:
+ *   - blinks in and out of existence on each probe (alpha sine driven by
+ *     `probesPerSec` — fast sorts visually beat fast, slow sorts breathe slowly)
+ *   - rotates continuously around the vertical axis for the 3D feel
+ *   - draws all 8 triangular faces with simple z-shaded flat colors so each
+ *     face reads as a distinct facet even at 18px
+ *
+ * When the run completes, blinking stops and the solid settles into a teal
+ * static state (matches the "complete" badge color).
+ *
+ * Why canvas not SVG: 8 faces × 60fps × continuous rotation is cheaper as a
+ * single ctx.fill loop than swapping SVG path data on every frame, and the
+ * pixel-level flat shading is more honest about the facets than CSS gradients.
+ */
+function PermutationPulse({
+  probesPerSec,
+  complete,
+}: {
+  probesPerSec: number;
+  complete: boolean;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Live-ref the probe rate so the rAF loop can pick up the latest value
+  // without re-subscribing every render.
+  const probesPerSecRef = useRef(probesPerSec);
+  probesPerSecRef.current = probesPerSec;
+  const completeRef = useRef(complete);
+  completeRef.current = complete;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const cssSize = 18;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    canvas.width = Math.round(cssSize * dpr);
+    canvas.height = Math.round(cssSize * dpr);
+    ctx.scale(dpr, dpr);
+
+    let raf = 0;
+    const startedAt = performance.now();
+
+    const draw = (now: number): void => {
+      raf = requestAnimationFrame(draw);
+      const t = (now - startedAt) / 1000;
+      const isDone = completeRef.current;
+
+      // Pulse phase. We clamp probesPerSec so a slow start still breathes
+      // (~0.5Hz min) and a runaway fast run caps at ~6Hz so it doesn't
+      // visually strobe in a way that fights the eye.
+      const rate = Math.min(6, Math.max(0.5, probesPerSecRef.current || 0.5));
+      const phase = (t * rate) % 1; // 0..1 each beat
+      // Beat envelope: rises fast to peak at phase 0.45, falls to ~zero by
+      // 0.95 so there's a visible "absent" moment between probes — the
+      // user-requested "blinking in and out of existence."
+      const wave = Math.sin(phase * Math.PI);
+      const beat = wave * wave; // square it for a sharper attack/decay
+      const scale = isDone ? 1 : 0.65 + beat * 0.45;
+      const alpha = isDone ? 1 : 0.08 + beat * 0.92;
+
+      // Continuous rotation around the vertical axis — slow enough that
+      // each facet is readable as it sweeps. Rate-coupled so when the sort
+      // beats fast the solid also spins a touch faster.
+      const spin = t * (0.45 + rate * 0.05);
+
+      ctx.clearRect(0, 0, cssSize, cssSize);
+      ctx.globalAlpha = alpha;
+
+      const cx = cssSize / 2;
+      const cy = cssSize / 2;
+      const r = (cssSize * 0.42) * scale;
+
+      // Octahedron: 4 equator vertices (rotated around Y), one top, one
+      // bottom. Each equator point carries a z-coord that drives both
+      // depth-sort and face brightness.
+      const eq = [0, Math.PI / 2, Math.PI, 3 * Math.PI / 2].map(a => {
+        const ang = a + spin;
+        return { x: cx + Math.cos(ang) * r, y: cy, z: Math.sin(ang) };
+      });
+      const top = { x: cx, y: cy - r, z: 0 };
+      const bot = { x: cx, y: cy + r, z: 0 };
+
+      // 8 faces: 4 around the top tip, 4 around the bottom. Sort back-to-
+      // front by average z so painter's algorithm produces a clean solid.
+      const faces: Array<{
+        a: { x: number; y: number };
+        b: { x: number; y: number };
+        c: { x: number; y: number };
+        z: number;
+      }> = [];
+      for (let i = 0; i < 4; i++) {
+        const p1 = eq[i];
+        const p2 = eq[(i + 1) % 4];
+        const avgZ = (p1.z + p2.z) / 2;
+        faces.push({ a: p1, b: p2, c: top, z: avgZ + 0.05 });
+        faces.push({ a: p1, b: p2, c: bot, z: avgZ - 0.05 });
+      }
+      faces.sort((a, b) => a.z - b.z);
+
+      // Palette — red while running, teal when complete. Brightness per
+      // face = (z + 1) / 2 mapped onto a 30%..70% L band.
+      const hue = isDone ? 168 : 8;
+      const sat = isDone ? 32 : 78;
+      for (const f of faces) {
+        const lit = (f.z + 1) / 2;
+        const lum = 28 + lit * 40;
+        ctx.fillStyle = `hsl(${hue}, ${sat}%, ${lum}%)`;
+        ctx.strokeStyle = `hsla(${hue}, ${sat}%, ${Math.min(90, lum + 18)}%, 0.85)`;
+        ctx.lineWidth = 0.6;
+        ctx.beginPath();
+        ctx.moveTo(f.a.x, f.a.y);
+        ctx.lineTo(f.b.x, f.b.y);
+        ctx.lineTo(f.c.x, f.c.y);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      }
+    };
+
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      style={{
+        width: 18,
+        height: 18,
+        display: "inline-block",
+        flexShrink: 0,
+        verticalAlign: "middle",
+      }}
+      aria-hidden
+    />
+  );
+}
+
+function ChurnActiveStatus({
+  complete, probeCount, probesPerSec,
+}: {
+  complete: boolean;
   probeCount: number;
   probesPerSec: number;
 }) {
   return (
-    <button
-      onClick={onToggle}
-      disabled={disabled}
-      title={disabled
-        ? "Select at least one algorithm to start Churn Mode"
-        : complete
-          ? "Sweep complete — every selected algo has saturated. Click to stop, or add more algos to your selection to resume."
-          : active
-            ? "Stop the adaptive stress test"
-            : "Start adaptive stress test: probes selected algos at randomized sizes, adapting per-algo on timeouts"}
-      // While complete, drop the red-glow box class — the panel reads as
-      // "done", not "alarming". Active+incomplete keeps the original look.
-      className={active && !complete ? "cc-churn-box" : ""}
+    <div
+      className={complete ? "" : "cc-churn-box"}
       style={{
-        display: "inline-flex", alignItems: "center", gap: 8,
-        padding: "4px 10px", borderRadius: 6, fontSize: 10,
-        fontFamily: "var(--font-mono)", cursor: disabled ? "not-allowed" : "pointer",
-        opacity: disabled ? 0.45 : 1,
-        ...(active && complete ? {
-          // Sweep-complete look: muted teal/green border, no pulse.
-          border: "1.5px solid rgba(77, 182, 172, 0.55)",
-          background: "rgba(77, 182, 172, 0.08)",
-        } : active ? {} : {
-          // Inactive: simple outline that hints at red.
-          border: "1.5px solid rgba(220, 38, 38, 0.30)",
-          background: "rgba(220, 38, 38, 0.025)",
-        }),
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "7px 12px",
+        borderRadius: 8,
+        fontSize: 11,
+        fontFamily: "var(--font-mono)",
+        fontWeight: 600,
+        letterSpacing: 0.3,
         color: "var(--color-text)",
         userSelect: "none",
-        transition: "background 200ms, border-color 200ms",
+        ...(complete ? {
+          border: "1.5px solid rgba(77, 182, 172, 0.55)",
+          background: "rgba(77, 182, 172, 0.08)",
+        } : {
+          border: "1.5px solid rgba(220, 38, 38, 0.45)",
+          background: "rgba(220, 38, 38, 0.08)",
+        }),
       }}
     >
-      <span
-        className="cc-churn-sphere"
-        style={
-          !active ? {
-            // Inactive: dim ember.
-            animation: "none",
-            background: "radial-gradient(circle at 30% 30%, #b85050 0%, #7a2020 60%, #401010 100%)",
-            opacity: 0.55,
-          } : complete ? {
-            // Sweep complete: stop the pulse, switch the sphere to teal so
-            // it reads as "settled" rather than "still working".
-            animation: "none",
-            background: "radial-gradient(circle at 30% 30%, #80cbc4 0%, #4db6ac 60%, #00695c 100%)",
-            opacity: 0.9,
-          } : undefined
-        }
-        aria-hidden
-      />
-      <span style={{ fontWeight: 600, letterSpacing: 0.3 }}>
-        Churn Mode
+      <PermutationPulse probesPerSec={probesPerSec} complete={complete} />
+      <span>
+        {complete ? "Permutation Run complete" : "Permutation Run active"}
       </span>
-      {active && complete && (
-        <span style={{ color: "#4db6ac", fontSize: 9, marginLeft: 2, fontWeight: 700 }}>
-          ✓ sweep complete
+      {complete ? (
+        <span style={{ color: "#4db6ac", fontSize: 9, fontWeight: 700 }}>
+          ✓
           <span style={{ color: "var(--color-muted)", fontWeight: 400, marginLeft: 6 }}>
             {probeCount}<span style={{ opacity: 0.55 }}> probes</span>
           </span>
         </span>
-      )}
-      {active && !complete && (
-        <span style={{ color: "var(--color-muted)", fontSize: 9, marginLeft: 2 }}>
+      ) : (
+        <span style={{ color: "var(--color-muted)", fontSize: 9, fontWeight: 400 }}>
           {probeCount}<span style={{ opacity: 0.55 }}> probes</span>
           {" · "}
           {probesPerSec.toFixed(1)}<span style={{ opacity: 0.55 }}>/s</span>
         </span>
       )}
+    </div>
+  );
+}
+
+/** Dedicated stop control — matches the default benchmark Stop button. */
+function ChurnStopButton({ onStop }: { onStop: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onStop}
+      title="Stop Permutation Run"
+      style={btn("danger", { padding: "6px 16px", fontSize: 12 })}
+    >
+      <Square size={12} strokeWidth={2} fill="currentColor" />
+      Stop
     </button>
   );
 }
 
 /** A small SVG line chart for sparkline-style displays inside the churn
  *  dashboard. Values get normalized to fill the height; an optional log scale
- *  is useful for ceiling history (which spans CHURN_N_MIN..CHURN_N_MAX over
+ *  is useful for ceiling history (which spans the selected size ladder over
  *  several decades). The last point gets a small filled dot so the "current"
  *  value is easy to find without reading the right edge. */
 function ChurnSpark({ values, w, h, color, log = false, baseline }: {
@@ -6692,11 +6588,12 @@ function ChurnRecentProbes({ history, w, h, color, budget }: {
  *      gaps mean the algorithm hasn't explored those sizes.
  */
 function ChurnTelemetry({
-  state, history, totals, algoNames, algoColors, runtimeMs, budgetMs, nMin, nMax, samplesPerLevel, complete,
+  state, history, totals, algoNames, algoColors, contextLabels, runtimeMs, budgetMs, nMin, nMax, dtypesRequired, complete,
 }: {
   state: Record<string, {
     currentLevel: number;
     samplesAtLevel: number;
+    dtypeGate?: number;
     saturated: boolean;
     maxCompletedLevel: number;
     samples: number;
@@ -6704,19 +6601,20 @@ function ChurnTelemetry({
     lastTimeMs: number | null;
     lastN: number | null;
   }>;
-  /** Rolling per-algo probe history, oldest first. */
+  /** Rolling per (algo, context) probe history, oldest first. */
   history: Record<string, { ts: number; n: number; timeMs: number; timedOut: boolean; ceiling: number }[]>;
   totals: { probes: number; timeouts: number };
   algoNames: Record<string, string>;
   algoColors: Record<string, string>;
+  /** contextId → short label for composite state keys. */
+  contextLabels: Record<string, string>;
   runtimeMs: number;
   /** Per-probe budget — drawn as a dashed line on the recent-probes scatter. */
   budgetMs: number;
   /** Bounds of the n-coverage axis (log-spaced bins). */
   nMin: number; nMax: number;
-  /** How many samples are taken at each level before doubling. Used for the
-   *  "3 / 5" progress chip in the stats line. */
-  samplesPerLevel: number;
+  /** How many dtypes must be tested at each level before n advances (max 3). */
+  dtypesRequired: number;
   /** Sweep-complete flag — drives the green completion banner at the top
    *  of the telemetry block and the "completed at" timing in the header. */
   complete: boolean;
@@ -6733,7 +6631,17 @@ function ChurnTelemetry({
   // surface "what each algo got to before timing out" without scrolling.
   const tally = complete && entries.length > 0
     ? entries
-        .map(([id, s]) => ({ id, maxN: s.maxCompletedLevel || s.currentLevel, samples: s.samples }))
+        .map(([key, s]) => {
+          const { algoId, contextId } = parseChurnStateKey(key);
+          const ctxLabel = contextLabels[contextId] ?? contextId;
+          return {
+            key,
+            algoId,
+            title: `${(algoNames[algoId] ?? algoId).replace(" Sort", "")} · ${ctxLabel}`,
+            maxN: s.maxCompletedLevel || s.currentLevel,
+            samples: s.samples,
+          };
+        })
         .sort((a, b) => b.maxN - a.maxN)
     : null;
 
@@ -6754,24 +6662,24 @@ function ChurnTelemetry({
           }}
         >
           <div style={{ fontSize: 9, fontWeight: 700, color: "#4db6ac", letterSpacing: "0.05em", marginBottom: 4 }}>
-            ✓ SWEEP COMPLETE
+            ✓ PERMUTATION RUN COMPLETE
             <span style={{ color: "var(--color-muted)", fontWeight: 400, marginLeft: 6 }}>
               all {tally.length} algo{tally.length !== 1 ? "s" : ""} saturated · {totals.probes} probes · {fmtRuntime(runtimeMs)}
             </span>
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: "2px 10px" }}>
             {tally.map(t => (
-              <span key={t.id} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                <span style={{ width: 6, height: 6, borderRadius: "50%", background: algoColors[t.id] ?? "#888" }} />
-                <span style={{ color: algoColors[t.id] ?? "#fff", fontWeight: 600 }}>
-                  {(algoNames[t.id] ?? t.id).replace(" Sort", "")}
+              <span key={t.key} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <span style={{ width: 6, height: 6, borderRadius: "50%", background: algoColors[t.algoId] ?? "#888" }} />
+                <span style={{ color: algoColors[t.algoId] ?? "#fff", fontWeight: 600 }}>
+                  {t.title}
                 </span>
                 <span style={{ color: "var(--color-muted)" }}>max n={fmtN(t.maxN)}</span>
               </span>
             ))}
           </div>
           <div style={{ fontSize: 8, color: "var(--color-muted)", marginTop: 4, opacity: 0.85 }}>
-            Add an algorithm to your selection to resume sweeping the new one.
+            Add an algorithm to your selection to resume the permutation run.
           </div>
         </div>
       )}
@@ -6799,31 +6707,34 @@ function ChurnTelemetry({
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {entries.map(([id, s]) => {
-            const color = algoColors[id] ?? "#888";
+          {entries.slice(0, 24).map(([key, s]) => {
+            const { algoId, contextId } = parseChurnStateKey(key);
+            const color = algoColors[algoId] ?? "#888";
+            const ctxLabel = contextLabels[contextId] ?? contextId;
+            const rowTitle = `${(algoNames[algoId] ?? algoId).replace(" Sort", "")} · ${ctxLabel}`;
             const lastMs = s.lastTimeMs;
             const lastN = s.lastN;
-            const hist = history[id] ?? [];
+            const hist = history[key] ?? [];
             const ceilingSeries = hist.map(r => r.ceiling);
             const timeoutRate = s.samples > 0 ? s.timeouts / s.samples : 0;
             return (
-              <div key={id} style={{ paddingBottom: 6, borderBottom: "1px dashed var(--color-border)" }}>
+              <div key={key} style={{ paddingBottom: 6, borderBottom: "1px dashed var(--color-border)" }}>
                 {/* Stats line — header reads:
                     ● Name      [saturated · max N] OR [n=64 · 3/5 samples]   N probes  ⚠T   ↳ last */}
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, fontSize: 9, flexWrap: "wrap" }}>
                   <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, display: "inline-block", flexShrink: 0 }} />
-                  <span style={{ color, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 130 }}>
-                    {algoNames[id] ?? id}
+                  <span style={{ color, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 220 }} title={rowTitle}>
+                    {rowTitle}
                   </span>
                   {s.saturated ? (
                     <span style={{ color: "#dc2626", fontWeight: 600 }} title={`Hit ${budgetMs}ms timeout; drift-sampling previously explored levels (max completed: n=${s.maxCompletedLevel || s.currentLevel})`}>
                       ⊘ saturated · max n={fmtN(s.maxCompletedLevel || s.currentLevel)}
                     </span>
                   ) : (
-                    <span style={{ color: "var(--color-text)", fontFamily: "monospace" }} title={`Currently probing at n=${s.currentLevel.toLocaleString()}; advances after ${samplesPerLevel} samples`}>
+                    <span style={{ color: "var(--color-text)", fontFamily: "monospace" }} title={`Target n from selected sizes; advances after int, float, and string each pass at this step`}>
                       probing <strong>n={fmtN(s.currentLevel)}</strong>
                       <span style={{ color: "var(--color-muted)", marginLeft: 4 }}>
-                        {s.samplesAtLevel}/{samplesPerLevel}
+                        {s.samplesAtLevel}/{s.dtypeGate ?? dtypesRequired} dtypes
                       </span>
                     </span>
                   )}
@@ -6842,7 +6753,7 @@ function ChurnTelemetry({
 
                 {/* Visualization grid: two rows of sparklines + a coverage bar. */}
                 <div style={{ display: "grid", gridTemplateColumns: "60px 1fr", gap: 4, alignItems: "center" }}>
-                  <span style={{ fontSize: 7, color: "var(--color-muted)", textAlign: "right" }} title="The probe-n level the sweep has reached, sampled after each probe. Stair-steps up by 2× whenever 5 clean samples complete; flatlines once the algo saturates.">level</span>
+                  <span style={{ fontSize: 7, color: "var(--color-muted)", textAlign: "right" }} title="Target n from the selected size ladder; steps to the next size once int, float, and string pass.">level</span>
                   <ChurnSpark values={ceilingSeries} w={SPARK_W} h={CEIL_H} color={color} log />
 
                   <span style={{ fontSize: 7, color: "var(--color-muted)", textAlign: "right" }} title="Last 30 probe times. Dashed red = budget; red dots = timeouts.">probes</span>
@@ -6867,6 +6778,262 @@ function ChurnTelemetry({
             <span style={{ opacity: 0.5 }}>{fmtN(Math.round(Math.sqrt(nMin * nMax)))}</span>
             <span>{fmtN(nMax)}</span>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Per-algo progress display for ramp mode. Each algo gets a row showing
+ *  its current n in the user's selectedSizes sweep + a saturated marker
+ *  when it's hit timeout. Cheap, no heatmap — ramp's one-cell-at-a-time
+ *  shape doesn't fit the grid view. */
+function RampTelemetry({
+  pool,
+  sizes,
+  state,
+  totals,
+  complete,
+  algoNames,
+  algoColors,
+}: {
+  pool: string[];
+  sizes: number[];
+  state: Record<string, { sizeIndex: number; saturated: boolean }>;
+  totals: { probes: number; timeouts: number; startedAt: number | null; lastProbeAt: number | null };
+  complete: boolean;
+  algoNames: Record<string, string>;
+  algoColors: Record<string, string>;
+}) {
+  const fmtN = (n: number): string => {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}k`;
+    return String(n);
+  };
+  const saturated = pool.filter(id => state[id]?.saturated).length;
+  return (
+    <div style={{ fontFamily: "monospace", fontSize: 11 }}>
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
+          Ramp · {saturated}/{pool.length} saturated · {totals.probes} probes
+        </p>
+        {complete && (
+          <p className="text-[10px]" style={{ color: "#4db6ac" }}>
+            ✓ all algos hit timeout
+          </p>
+        )}
+      </div>
+      <div className="flex flex-col gap-1">
+        {pool.map(id => {
+          const s = state[id] ?? { sizeIndex: 0, saturated: false };
+          const currentN = sizes[Math.min(s.sizeIndex, sizes.length - 1)] ?? 0;
+          const progress = sizes.length > 0
+            ? Math.min(100, ((s.sizeIndex + (s.saturated ? 1 : 0)) / sizes.length) * 100)
+            : 0;
+          return (
+            <div key={id} className="flex items-center gap-2">
+              <span style={{
+                width: 6, height: 6, borderRadius: "50%",
+                background: algoColors[id] ?? "var(--color-muted)",
+                flexShrink: 0,
+              }} />
+              <span style={{
+                width: 110, fontSize: 11, color: "var(--color-text)",
+                whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                fontWeight: s.saturated ? 600 : 400,
+              }}>
+                {algoNames[id] ?? id}
+              </span>
+              <div style={{
+                flex: 1, height: 6, borderRadius: 3,
+                background: "var(--color-surface-3)", overflow: "hidden",
+              }}>
+                <div style={{
+                  width: `${progress}%`, height: "100%",
+                  background: s.saturated ? "var(--color-state-swap)" : (algoColors[id] ?? "var(--color-accent)"),
+                  transition: "width 0.3s ease",
+                }} />
+              </div>
+              <span style={{
+                width: 70, textAlign: "right", fontSize: 10,
+                color: s.saturated ? "var(--color-state-swap)" : "var(--color-muted)",
+              }}>
+                {s.saturated ? "timeout" : `n=${fmtN(currentN)}`}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** Sampling-strategy picker for the permutation feature. Disabled while a run
+ *  is active because mid-run strategy changes would invalidate the partial
+ *  grid and confuse the rankings table. Stop, choose, restart. */
+function PermutationStrategyPicker({
+  value,
+  disabled,
+  expanded,
+  onChange,
+  onToggleExpanded,
+}: {
+  value: "ladder" | "spread" | "budget" | "ramp";
+  disabled: boolean;
+  expanded: boolean;
+  onChange: (v: "ladder" | "spread" | "budget" | "ramp") => void;
+  onToggleExpanded: () => void;
+}) {
+  // Ramp is the canonical default — its numbers match manual benchmarking.
+  // The other three are educational / exploratory: tucked behind a single
+  // "Advanced" disclosure so they don't confuse the common case.
+  const advanced: Array<{ id: "ladder" | "spread" | "budget"; label: string; hint: string }> = [
+    { id: "ladder", label: "Ladder",  hint: "Per-algo doubling sweep with single-shot probes (no warmup). Cheap, noisy." },
+    { id: "spread", label: "Spread",  hint: "Halton-ordered (algo, n) grid, fixed K samples per cell. Uniform coverage." },
+    { id: "budget", label: "Budget",  hint: "Same grid, samples allocated to cells with wider 95% CIs. Stops at ±10% of mean." },
+  ];
+  const showAdvanced = expanded || value !== "ramp";
+  return (
+    <div>
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
+          Sampling strategy
+        </p>
+        <button
+          type="button"
+          onClick={onToggleExpanded}
+          style={{
+            fontSize: 9, color: "var(--color-muted)", fontFamily: "monospace",
+            background: "none", border: "none", cursor: "pointer", padding: 0,
+          }}
+        >
+          {showAdvanced ? "− hide advanced" : "+ advanced"}
+        </button>
+      </div>
+      <div className="flex flex-wrap gap-1 mt-1.5">
+        {(() => {
+          const items: Array<{ id: "ladder" | "spread" | "budget" | "ramp"; label: string; hint: string }> = [
+            { id: "ramp", label: "Ramp", hint: "Per-algo n-sweep using your warmup+rounds settings. Numbers match manual benchmark. Saturates each algo on its first round above the 5s budget." },
+            ...(showAdvanced ? advanced : []),
+          ];
+          return items.map(opt => {
+            const active = value === opt.id;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                disabled={disabled}
+                title={opt.hint}
+                onClick={() => onChange(opt.id)}
+                className="px-3 py-1.5 rounded transition-colors"
+                style={{
+                  border: `1.5px solid ${active ? "var(--color-accent)" : "var(--color-border)"}`,
+                  background: active ? "var(--color-accent-muted)" : "var(--color-surface-1)",
+                  color: active ? "var(--color-accent)" : "var(--color-text)",
+                  fontWeight: active ? 700 : 500,
+                  cursor: disabled ? "not-allowed" : "pointer",
+                  opacity: disabled && !active ? 0.45 : 1,
+                  fontFamily: "monospace",
+                  fontSize: 12,
+                }}
+              >
+                {opt.label}
+              </button>
+            );
+          });
+        })()}
+      </div>
+    </div>
+  );
+}
+
+/** Permutation Run start/stop controls + brief description + optional live telemetry. */
+function ChurnControls({
+  active,
+  complete,
+  disabled,
+  probeCount,
+  probesPerSec,
+  onStart,
+  onStop,
+  showTelemetry,
+  state,
+  history,
+  totals,
+  runtimeMs,
+  algoNames,
+  algoColors,
+  contextLabels,
+  budgetMs,
+  nMin,
+  nMax,
+  dtypesRequired,
+}: {
+  active: boolean;
+  complete: boolean;
+  disabled: boolean;
+  probeCount: number;
+  probesPerSec: number;
+  onStart: () => void;
+  onStop: () => void;
+  showTelemetry: boolean;
+  state: Record<string, {
+    currentLevel: number;
+    samplesAtLevel: number;
+    dtypeGate?: number;
+    saturated: boolean;
+    maxCompletedLevel: number;
+    samples: number;
+    timeouts: number;
+    lastTimeMs: number | null;
+    lastN: number | null;
+  }>;
+  history: Record<string, Array<{ ts: number; n: number; timeMs: number; timedOut: boolean; ceiling: number }>>;
+  totals: { probes: number; timeouts: number; startedAt: number | null; lastProbeAt: number | null };
+  runtimeMs: number;
+  algoNames: Record<string, string>;
+  algoColors: Record<string, string>;
+  contextLabels: Record<string, string>;
+  budgetMs: number;
+  nMin: number;
+  nMax: number;
+  dtypesRequired: number;
+}) {
+  return (
+    <div className="print:hidden flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        {active ? (
+          <>
+            <ChurnActiveStatus
+              complete={complete}
+              probeCount={probeCount}
+              probesPerSec={probesPerSec}
+            />
+            <ChurnStopButton onStop={onStop} />
+          </>
+        ) : (
+          <ChurnStartButton onStart={onStart} disabled={disabled} />
+        )}
+      </div>
+      {showTelemetry && active && (
+        <div
+          className="cc-churn-box overflow-y-auto"
+          style={{ padding: "8px 10px", borderRadius: 6, maxHeight: 280 }}
+        >
+          <ChurnTelemetry
+            state={state}
+            history={history}
+            totals={totals}
+            algoNames={algoNames}
+            algoColors={algoColors}
+            contextLabels={contextLabels}
+            runtimeMs={runtimeMs}
+            budgetMs={budgetMs}
+            nMin={nMin}
+            nMax={nMax}
+            dtypesRequired={dtypesRequired}
+            complete={complete}
+          />
         </div>
       )}
     </div>
@@ -6932,6 +7099,59 @@ function buildSessionDataCsv(sessionLog: SessionLog): string {
 /** Trigger a browser download for the given text content. Same Blob/anchor
  *  pattern the SortNetworkGraph exports use — adding the anchor to DOM is
  *  required by Firefox for the click to actually trigger the download. */
+/** Streaming rolling-stats merge: take a single new probe (one timeMs value)
+ *  and roll it into an existing `SessionPoint`, returning a fresh point that
+ *  satisfies the full `TimeStats & { meanTimeMs, meanSpaceBytes }` shape.
+ *
+ *  Uses Welford's online algorithm for variance so we don't need to keep
+ *  every sample in memory — just `runs`, `meanMs`, and `stdDevMs` suffice
+ *  to update both incrementally. median/p95 are approximated (mean and
+ *  running max respectively) because true quantiles need the sorted samples.
+ *  Both approximations converge toward the truth as `runs` grows; they're
+ *  used for display, not for ranking-critical comparisons. */
+function mergeSessionSample(
+  existing: SessionPoint | undefined,
+  timeMs: number,
+  spaceBytes: number,
+): SessionPoint {
+  if (!existing || existing.runs === 0) {
+    return {
+      minMs: timeMs,
+      medianMs: timeMs,
+      meanMs: timeMs,
+      p95Ms: timeMs,
+      stdDevMs: 0,
+      noiseCv: 0,
+      runs: 1,
+      meanTimeMs: timeMs,
+      meanSpaceBytes: spaceBytes,
+    };
+  }
+  const oldRuns = existing.runs;
+  const newRuns = oldRuns + 1;
+  // Welford update for the mean.
+  const delta  = timeMs - existing.meanMs;
+  const newMean = existing.meanMs + delta / newRuns;
+  // Reconstruct the prior M2 (sum of squared deviations) from the stored
+  // stdDev so we can extend it without storing every sample. M2_prev =
+  // stdDev² · (n-1); M2_new = M2_prev + delta · (timeMs - newMean).
+  const m2Prev = oldRuns > 1 ? existing.stdDevMs * existing.stdDevMs * (oldRuns - 1) : 0;
+  const m2New  = m2Prev + delta * (timeMs - newMean);
+  const newStd = newRuns > 1 ? Math.sqrt(m2New / (newRuns - 1)) : 0;
+  const newCv  = newMean > 0 ? newStd / newMean : 0;
+  return {
+    minMs:    Math.min(existing.minMs, timeMs),
+    medianMs: newMean,                              // approx — running mean is close enough without sample storage
+    meanMs:   newMean,
+    p95Ms:    Math.max(existing.p95Ms, timeMs),     // approx — running upper bound, conservative
+    stdDevMs: newStd,
+    noiseCv:  newCv,
+    runs:     newRuns,
+    meanTimeMs:     newMean,
+    meanSpaceBytes: (existing.meanSpaceBytes * oldRuns + spaceBytes) / newRuns,
+  };
+}
+
 function downloadSessionBlob(content: string, filename: string, mimeType: string): void {
   const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
@@ -6974,28 +7194,275 @@ function parseSessionDataJson(text: string): { ok: true; data: ExportedSessionDa
   return { ok: true, data: obj as unknown as ExportedSessionData };
 }
 
+// ── FloatingTOC ───────────────────────────────────────────────────────────
+// A fixed-position table-of-contents widget that lists every major section
+// of the benchmark page. Each entry scrolls its target into view (which
+// also handles the nested left/right pane scroll containers — browsers
+// walk every scroll ancestor automatically), and an IntersectionObserver
+// highlights whichever section the viewport currently shows.
+//
+// Collapsed state: a 32×32 tab button pinned to the right edge of the
+// viewport, mid-height. Single click expands; second click collapses.
+//
+// Why right-edge / mid-height: the bottom-right slot is owned by the
+// floating Run panel and the running dashboard; the bottom-left has the
+// mobile sticky bar. Mid-right is the only fixed-position real estate
+// left, and it doesn't move when the user scrolls.
+
+interface TocSection {
+  id: string;
+  label: string;
+}
+interface TocGroup {
+  title: string;
+  sections: TocSection[];
+}
+
+const TOC_GROUPS: TocGroup[] = [
+  {
+    title: "Setup",
+    sections: [
+      { id: "toc-controls",    label: "Run controls" },
+      { id: "toc-data-type",   label: "Data type" },
+      { id: "toc-input-sizes", label: "Input sizes" },
+      { id: "toc-algorithms",  label: "Algorithms" },
+      { id: "toc-advanced",    label: "Advanced" },
+    ],
+  },
+  {
+    title: "This run",
+    sections: [
+      { id: "toc-chart",           label: "Chart" },
+      { id: "toc-rankings",        label: "Rankings" },
+      { id: "toc-time-complexity", label: "Time complexity" },
+    ],
+  },
+  {
+    title: "Session",
+    sections: [
+      { id: "toc-session-data",   label: "Export / import" },
+      { id: "toc-winners-log",    label: "Winners log" },
+      { id: "toc-session-curves", label: "Session curves" },
+      { id: "toc-sort-network",   label: "Sort network" },
+      { id: "toc-history-3d",     label: "3D history" },
+    ],
+  },
+];
+
+function FloatingTOC() {
+  const [open, setOpen] = useState(false);
+  const [activeId, setActiveId] = useState<string | null>(null);
+
+  // Track which target section is currently visible. rootMargin pulls the
+  // observation band to the upper third of the viewport so the highlight
+  // tracks "what the user is reading", not "what just scrolled into the
+  // bottom edge". Re-binds on open so we only pay the cost when needed.
+  useEffect(() => {
+    if (!open) return;
+    const allIds = TOC_GROUPS.flatMap(g => g.sections.map(s => s.id));
+    const observer = new IntersectionObserver(
+      entries => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            setActiveId(entry.target.id);
+            return;
+          }
+        }
+      },
+      { rootMargin: "-25% 0px -55% 0px", threshold: 0 },
+    );
+    for (const id of allIds) {
+      const el = document.getElementById(id);
+      if (el) observer.observe(el);
+    }
+    return () => observer.disconnect();
+  }, [open]);
+
+  // Esc closes the panel (matches the close behavior of the StaticMode /
+  // RaceMode overlays — small ergonomic detail).
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  const scrollTo = (id: string) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        title="Open table of contents"
+        aria-label="Open table of contents"
+        className="print:hidden fixed z-50"
+        style={{
+          right: 0,
+          top: "50%",
+          transform: "translateY(-50%)",
+          width: 28,
+          height: 80,
+          borderTopLeftRadius: 8,
+          borderBottomLeftRadius: 8,
+          borderTopRightRadius: 0,
+          borderBottomRightRadius: 0,
+          background: "color-mix(in srgb, var(--color-accent) 12%, var(--color-surface-1))",
+          border: "1.5px solid var(--color-accent)",
+          borderRight: "none",
+          color: "var(--color-accent)",
+          cursor: "pointer",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          // Vertical "TOC" so the tab reads cleanly without a wider footprint.
+          writingMode: "vertical-rl",
+          textOrientation: "mixed",
+          fontSize: 10,
+          fontFamily: "var(--font-mono)",
+          fontWeight: 700,
+          letterSpacing: "0.18em",
+          textTransform: "uppercase",
+          boxShadow: "-4px 0 12px -4px rgba(0,0,0,0.25)",
+        }}
+      >
+        Contents
+      </button>
+    );
+  }
+
+  return (
+    <div
+      className="print:hidden fixed z-50 flex flex-col"
+      style={{
+        right: 0,
+        top: 0,
+        bottom: 0,
+        width: 240,
+        background: "color-mix(in srgb, var(--color-surface-1) 96%, transparent)",
+        backdropFilter: "blur(10px)",
+        WebkitBackdropFilter: "blur(10px)",
+        borderLeft: "1.5px solid var(--color-accent)",
+        boxShadow: "-12px 0 32px -8px rgba(0,0,0,0.35)",
+      }}
+    >
+      {/* Header */}
+      <div
+        className="flex items-center gap-2 px-3 py-2 shrink-0"
+        style={{
+          borderBottom: "1px solid var(--color-border)",
+          background: "color-mix(in srgb, var(--color-accent) 6%, var(--color-surface-2))",
+        }}
+      >
+        <span
+          style={{
+            fontSize: 10,
+            fontFamily: "var(--font-mono)",
+            fontWeight: 700,
+            letterSpacing: "0.08em",
+            textTransform: "uppercase",
+            color: "var(--color-accent)",
+          }}
+        >
+          Contents
+        </span>
+        <span
+          style={{
+            fontSize: 9,
+            fontFamily: "var(--font-mono)",
+            color: "var(--color-muted)",
+            marginLeft: "auto",
+          }}
+        >
+          Esc to close
+        </span>
+        <button
+          onClick={() => setOpen(false)}
+          aria-label="Close table of contents"
+          title="Close (Esc)"
+          style={{
+            background: "transparent",
+            border: "none",
+            color: "var(--color-muted)",
+            cursor: "pointer",
+            padding: 2,
+            display: "inline-flex",
+            alignItems: "center",
+          }}
+        >
+          <X size={12} />
+        </button>
+      </div>
+
+      {/* Group + entry list */}
+      <div className="flex-1 overflow-y-auto py-2">
+        {TOC_GROUPS.map((g, gi) => (
+          <div key={g.title} style={{ marginTop: gi > 0 ? 8 : 0 }}>
+            <div
+              className="px-3 py-1"
+              style={{
+                fontSize: 8,
+                fontFamily: "var(--font-mono)",
+                fontWeight: 700,
+                letterSpacing: "0.1em",
+                textTransform: "uppercase",
+                color: "var(--color-muted)",
+              }}
+            >
+              {g.title}
+            </div>
+            {g.sections.map(s => {
+              const active = activeId === s.id;
+              return (
+                <button
+                  key={s.id}
+                  onClick={() => scrollTo(s.id)}
+                  className="text-left w-full"
+                  title={`Jump to ${s.label}`}
+                  style={{
+                    display: "block",
+                    padding: "4px 12px 4px 22px",
+                    fontSize: 11,
+                    fontFamily: "var(--font-mono)",
+                    background: active ? "color-mix(in srgb, var(--color-accent) 14%, transparent)" : "transparent",
+                    color: active ? "var(--color-accent)" : "var(--color-text)",
+                    fontWeight: active ? 700 : 400,
+                    border: "none",
+                    borderLeft: `3px solid ${active ? "var(--color-accent)" : "transparent"}`,
+                    cursor: "pointer",
+                    transition: "background 120ms, color 120ms",
+                  }}
+                  onMouseEnter={e => { if (!active) e.currentTarget.style.background = "color-mix(in srgb, var(--color-accent) 6%, transparent)"; }}
+                  onMouseLeave={e => { if (!active) e.currentTarget.style.background = "transparent"; }}
+                >
+                  {s.label}
+                </button>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function BenchmarkVisualizer() {
   const { has } = useLevel();
-  const [pulseEnabled, setPulseEnabled] = useState<boolean>(() => {
-    try { return localStorage.getItem("cc-pulse") !== "off"; } catch { return true; }
-  });
-  const togglePulse = useCallback(() => {
-    setPulseEnabled(prev => {
-      const next = !prev;
-      try { localStorage.setItem("cc-pulse", next ? "on" : "off"); } catch {}
-      return next;
-    });
-  }, []);
-
   const [selectedSizes, setSelectedSizes] = useState<Set<number>>(
     new Set([10_000, 100_000, 1_000_000])
   );
   const [scenarios, setScenarios] = useState<Set<BenchmarkScenario>>(
     new Set(["random"] as BenchmarkScenario[])
   );
-  const [rounds, setRounds] = useState(8);
+  // 6 rounds with 3 discarded as warm-up → 3 recorded samples per (algo, n)
+  // by default. Tight enough that a full benchmark sweep finishes briskly,
+  // wide enough that the recorded triple has room for a meaningful min/mean.
+  const [rounds, setRounds] = useState(6);
   const [warmup, setWarmup] = useState(3);
   // Per-sort timeout (seconds). When enabled, any single sort that exceeds this
   // wall-clock budget is marked `timedOut` and the algo is excluded from larger n.
@@ -7003,7 +7470,7 @@ export default function BenchmarkVisualizer() {
   const [timeoutEnabled, setTimeoutEnabled] = useState(true);
   const [timeoutSec, setTimeoutSec] = useState(3);
   const [selected, setSelected] = useState<Set<string>>(
-    new Set(["logos", "adaptive", "timsort"])
+    new Set(["logos", "powersort", "timsort"])
   );
 
   const [status, setStatus] = useState<Status>("idle");
@@ -7047,18 +7514,16 @@ export default function BenchmarkVisualizer() {
   // benchmark fills, and a periodic flush bundles probe batches into ghostRuns
   // entries — so the 2D curve overlay, 3D history surface, and rankings all
   // light up automatically without separate plumbing.
-  // Adaptive sweep state. Each algorithm starts at CHURN_N_MIN, takes
-  // CHURN_SAMPLES_PER_LEVEL probes at that n, then doubles to the next level.
-  // When any probe exceeds CHURN_BUDGET_MS the algorithm is marked saturated —
-  // no further advancement, but its already-explored levels stay in the pool
-  // for drift sampling.
+  // Adaptive sweep state. Walks selected input sizes in order; at each size
+  // tests int / float / string before advancing. On timeout, n steps down 10%.
   type ChurnAlgoState = {
-    /** The n the algo is currently being probed at. Doubles on advance. */
+    /** The n the algo is currently targeting. Shared across all contexts. */
     currentLevel: number;
-    /** How many probes have completed at currentLevel (0..CHURN_SAMPLES_PER_LEVEL). */
+    /** How many required dtypes have a clean sample at currentLevel. */
     samplesAtLevel: number;
-    /** Set true when a probe exceeds CHURN_BUDGET_MS. No more advancement;
-     *  drift sampling continues at previously-explored levels. */
+    /** Required dtype count before n advances (1–3). */
+    dtypeGate: number;
+    /** Set true when ascending hits timeout and backoff cannot find headroom. */
     saturated: boolean;
     /** Largest level that completed without timeout — the algo's empirical
      *  ceiling under the current engine/data conditions. */
@@ -7066,23 +7531,34 @@ export default function BenchmarkVisualizer() {
     /** Distinct levels we've collected at least one sample for. Used to pick
      *  a drift-sampling n for saturated algos. */
     exploredLevels: number[];
-    /** Total probes for this algo this churn session. */
+    /** Total probes for this (algo, context) this churn session. */
     samples: number;
-    /** Total timeouts for this algo this churn session. */
+    /** Total timeouts for this (algo, context) this churn session. */
     timeouts: number;
     /** Wall-time ms of the most recent probe. */
     lastTimeMs: number | null;
     /** The n of the most recent probe. */
     lastN: number | null;
   };
+  type ChurnLevelState = {
+    /** Index into the selected input-size ladder. */
+    sizeIndex: number;
+    saturated: boolean;
+    /** Highest size-index step completed with all dtypes passing. */
+    maxCompletedSizeIndex: number;
+    /** Largest n that completed under budget (after backoff if needed). */
+    maxCompletedN: number;
+    dtypesTestedAtLevel: Partial<Record<DataType, boolean>>;
+    /** When set, the next probe uses this n while backing off after a timeout. */
+    backoffTarget: number | null;
+    exploredLevels: number[];
+  };
   const CHURN_N_MIN = 64;
-  const CHURN_N_MAX = 5_000_000;
-  // Take this many probes at each level before doubling to the next.
-  // 5 gives enough samples for a sane mean while still moving up briskly.
-  const CHURN_SAMPLES_PER_LEVEL = 5;
-  // Per-probe budget — a single probe exceeding this saturates the algo.
-  // 5s is generous enough that the slowest comparison sorts at large n still
-  // have a chance to complete; anything past 5s isn't worth chasing further.
+  const CHURN_BACKOFF_RATIO = 0.9;
+  /** Max dtype lanes (int / float / string) that must be tested before the next size. */
+  const CHURN_DTYPE_GATE = 3;
+  // Per-probe budget — a single probe exceeding this triggers 10% backoff
+  // until a successful sort or n can no longer step down.
   const CHURN_BUDGET_MS = 5000;
   // After saturating, this fraction of probes for that algo sample randomly
   // from the explored-levels set for drift detection. The rest cycle to
@@ -7119,11 +7595,57 @@ export default function BenchmarkVisualizer() {
   const churnActiveRef = useRef(false);
   const churnTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const churnStateRef = useRef<Record<string, ChurnAlgoState>>({});
+  const churnLevelRef = useRef<Record<string, ChurnLevelState>>({});
+  const churnAlgoCursorRef = useRef(0);
+  const churnContextCursorRef = useRef<Record<string, number>>({});
   const churnHistoryRef = useRef<Record<string, ChurnProbeRecord[]>>({});
+
+  // ── Tier-3 strategy state ──────────────────────────────────────────────
+  // "ladder" is the legacy per-algo doubling sweep (still default for
+  // backwards compatibility). "spread" and "budget" walk an explicit
+  // (algo × n) grid; spread = fixed K samples per cell, budget = sample
+  // until a CI threshold is met. The grid + Halton ordering live in
+  // refs because the tick reads them on every probe without needing
+  // re-render.
+  type PermutationStrategy = "ladder" | "spread" | "budget" | "ramp";
+  const [permutationStrategy, setPermutationStrategy] = useState<PermutationStrategy>("ramp");
+  const [permutationStrategyExpanded, setPermutationStrategyExpanded] = useState<boolean>(false);
+  // Targets: 5 samples per cell in spread mode, ±10% CI in budget mode.
+  const SPREAD_SAMPLES_PER_CELL = 5;
+  const BUDGET_TARGET_CI        = 0.10;  // ±10%
+  const BUDGET_MIN_SAMPLES      = 3;
+  const BUDGET_MAX_SAMPLES      = 30;
+  const PERMUTATION_GRID_BINS   = 8;
+  // Live grid; rebuilt when the user changes selection / dtype / strategy.
+  // Key fingerprint detects staleness: when (pool members, dataType, strategy)
+  // changes, the grid is rebuilt and the Halton index reset.
+  const permutationGridRef = useRef<PermStrategy.GridCell[] | null>(null);
+  const permutationGridKeyRef = useRef<string>("");
+  const permutationHaltonRef = useRef<PermStrategy.Halton2D>(new PermStrategy.Halton2D());
+
+  // Ramp-mode per-algo state. Tracks where each algo is in the size sweep
+  // and whether it's hit its timeout boundary. Identity-keyed by algo id so
+  // it survives strategy toggles without re-initialization (a user pausing
+  // and resuming gets the same continuation point).
+  const rampStateRef = useRef<Record<string, { sizeIndex: number; saturated: boolean }>>({});
+  const rampCursorRef = useRef<number>(0);
+  const rampScenarioCursorRef = useRef<number>(0);
+  // State mirror of the grid so the CoverageHeatmap re-renders as cells
+  // accumulate samples. The ref drives the tick (no render-cost); the
+  // state drives the UI (replaced shallowly each flush).
+  const [permutationGrid, setPermutationGrid] = useState<PermStrategy.GridCell[]>([]);
   // Per-algo buffer of probe points waiting to be flushed to ghostRuns. We
   // batch so a typical hour of churn produces a sane number of polylines
   // rather than thousands of one-point entries.
-  const churnAccumRef = useRef<Record<string, Array<{ n: number; timeMs: number; spaceBytes: number; ts: number }>>>({});
+  const churnAccumRef = useRef<Array<{
+    algoId: string;
+    n: number;
+    timeMs: number;
+    spaceBytes: number;
+    ts: number;
+    dataType: DataType;
+    scenario: string;
+  }>>([]);
   const churnLastFlushRef = useRef<number>(0);
 
   const [curveData, setCurveData] = useState<CurveData>({});
@@ -7286,6 +7808,22 @@ export default function BenchmarkVisualizer() {
       if (raw) setSessionLog(JSON.parse(raw) as SessionLog);
     } catch { /* ignore parse / quota errors */ }
   }, []);
+  const [detailedSessionLog, setDetailedSessionLog] = useState<DetailedSessionLog>({});
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("codecookbook.sessionLog");
+      const flat = raw ? (JSON.parse(raw) as SessionLog) : undefined;
+      setDetailedSessionLog(loadDetailedSessionLog(flat));
+    } catch { /* ignore */ }
+  }, []);
+  const detailedBatchRef = useRef<Array<{
+    dt: DataType;
+    scenario: string;
+    algo: string;
+    n: number;
+    timeMs: number;
+    spaceBytes: number;
+  }>>([]);
   // Status message for the Session-data toolbar's Import button. Auto-clears
   // after ~4 s so the toolbar doesn't keep stale messaging stuck on screen.
   const [sessionImportMsg, setSessionImportMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
@@ -7308,6 +7846,7 @@ export default function BenchmarkVisualizer() {
   }, []);
   const [customInput, setCustomInput] = useState("");
   const [pendingCustomN, setPendingCustomN] = useState<number | null>(null);
+  const [sessionPurgeConfirmOpen, setSessionPurgeConfirmOpen] = useState(false);
   const [customPreSorted, setCustomPreSorted] = useState(0);
   const [customDuplicates, setCustomDuplicates] = useState(0);
   // Integer-only options: guarantee unique values, or sample from the full
@@ -7918,6 +8457,153 @@ export default function BenchmarkVisualizer() {
   const canRun = (activeAlgos.length > 0 || enabledSavedSorts.length > 0) && selectedSizes.size > 0 && scenarios.size > 0 && status !== "running";
   const canRunCustomOnly = enabledSavedSorts.length > 0 && selectedSizes.size > 0 && scenarios.size > 0 && status !== "running";
 
+  const liveRunAlgos = useMemo(
+    () => [...activeAlgos, ...enabledSavedSorts.map(s => `custom-${s.id}`)],
+    [activeAlgos, enabledSavedSorts],
+  );
+
+  const runParamsView = useMemo(() => {
+    const frozen = (status === "running" || status === "done") && runConfig != null;
+    const algos = frozen ? runConfig!.algos : liveRunAlgos;
+    const sizes = frozen ? runConfig!.sizes : sortedSizes;
+    const scenarioList = frozen ? runConfig!.scenarios : [...scenarios];
+    const runRounds = frozen ? runConfig!.rounds : rounds;
+    const runWarmup = frozen ? runConfig!.warmup : warmup;
+    const eng =
+      engine === "wasm" && wasmBundle ? "Wasm"
+        : engine === "webgpu" && webgpuBundle?.ready ? "WebGPU"
+          : "V8";
+    const extras: string[] = [];
+    if (polymorphicMode) extras.push("polymorphic (int+float+string)");
+    else if (dataType !== "integer") extras.push(`${dataType} data`);
+    if (useWorkerIsolation && !polymorphicMode) extras.push("worker isolation");
+    if (adversarialEnabled) extras.push("adversarial input");
+    if (!duplicatePerRound) extras.push("in-place input (no duplicate)");
+    if (selected.has("quick") && quickPivot !== "median3") extras.push(`quick pivot: ${quickPivot}`);
+    if (selected.has("shell") && shellGaps !== "ciura") extras.push(`shell gaps: ${shellGaps}`);
+    const configChangedSinceRun = frozen && status === "done" && (
+      JSON.stringify(runConfig!.algos) !== JSON.stringify(liveRunAlgos) ||
+      JSON.stringify(runConfig!.sizes) !== JSON.stringify(sortedSizes) ||
+      JSON.stringify(runConfig!.scenarios) !== JSON.stringify([...scenarios]) ||
+      runConfig!.rounds !== rounds ||
+      runConfig!.warmup !== warmup
+    );
+    return {
+      algos, sizes, scenarioList, rounds: runRounds, warmup: runWarmup,
+      engine: eng, extras, frozen, configChangedSinceRun,
+    };
+  }, [
+    status, runConfig, liveRunAlgos, sortedSizes, scenarios, rounds, warmup,
+    engine, wasmBundle, webgpuBundle, polymorphicMode, dataType, useWorkerIsolation,
+    adversarialEnabled, duplicatePerRound, quickPivot, shellGaps, selected,
+  ]);
+
+  const runValidationHint = useMemo(() => {
+    if (status === "running") return null;
+    if (liveRunAlgos.length === 0) return "Select at least one algorithm";
+    if (selectedSizes.size === 0) return "Select at least one input size";
+    if (scenarios.size === 0) return "Select at least one scenario";
+    return null;
+  }, [status, liveRunAlgos.length, selectedSizes.size, scenarios.size]);
+
+  const churnEligible = (
+    [...selected].filter(id => !slowDisabled(id)).length + savedSorts.filter(s => s.enabled).length
+  ) > 0 && selectedSizes.size > 0 && scenarios.size > 0;
+  const churnCoverageDeck = useMemo(
+    () => buildChurnProbeDeck([...scenarios].sort(), { polymorphic: polymorphicMode }),
+    [scenarios, polymorphicMode],
+  );
+  const churnContextLabels = useMemo(() => {
+    const labels: Record<string, string> = {};
+    for (const ctx of churnCoverageDeck) labels[ctx.id] = ctx.label;
+    return labels;
+  }, [churnCoverageDeck]);
+  const churnCoverageCount = churnCoverageDeck.length;
+  const churnNMax = sortedSizes.length > 0 ? Math.max(...sortedSizes) : CHURN_N_MIN;
+  const churnRuntimeMs = churnMode && churnTotals.startedAt != null ? Date.now() - churnTotals.startedAt : 0;
+  const churnProbesPerSec = churnRuntimeMs > 250 ? (churnTotals.probes / (churnRuntimeMs / 1000)) : 0;
+  const handleChurnStart = useCallback(() => {
+    setChurnTotals({ probes: 0, timeouts: 0, startedAt: null, lastProbeAt: null });
+    churnHistoryRef.current = {};
+    churnStateRef.current = {};
+    churnLevelRef.current = {};
+    churnAlgoCursorRef.current = 0;
+    churnContextCursorRef.current = {};
+    rampStateRef.current = {};
+    rampCursorRef.current = 0;
+    rampScenarioCursorRef.current = 0;
+    permutationGridRef.current = null;
+    permutationGridKeyRef.current = "";
+    permutationHaltonRef.current.reset();
+    setPermutationGrid([]);
+    setChurnHistory({});
+    setChurnState({});
+    churnCompleteRef.current = false;
+    setChurnComplete(false);
+    setChurnMode(true);
+  }, []);
+
+  const handleChurnStop = useCallback(() => {
+    setChurnMode(false);
+  }, []);
+
+  const hasSessionAggregateData = useMemo(() => (
+    Object.keys(sessionLog).length > 0 ||
+    Object.keys(detailedSessionLog).length > 0 ||
+    Object.keys(ghostRuns).length > 0 ||
+    Object.keys(winnerLog).length > 0 ||
+    runCount > 0 ||
+    churnTotals.probes > 0
+  ), [sessionLog, detailedSessionLog, ghostRuns, winnerLog, runCount, churnTotals.probes]);
+
+  const requestPurgeSession = useCallback(() => {
+    setSessionPurgeConfirmOpen(true);
+  }, []);
+
+  const cancelPurgeSession = useCallback(() => {
+    setSessionPurgeConfirmOpen(false);
+  }, []);
+
+  const purgeSessionAggregates = useCallback(() => {
+    churnActiveRef.current = false;
+    setChurnMode(false);
+    setSessionLog({});
+    setWinnerLog({});
+    setDetailedSessionLog({});
+    setGhostRuns({});
+    setRunCount(0);
+    setSessionStartedAt(null);
+    setChurnState({});
+    setChurnHistory({});
+    setChurnTotals({ probes: 0, timeouts: 0, startedAt: null, lastProbeAt: null });
+    setChurnComplete(false);
+    churnCompleteRef.current = false;
+    churnStateRef.current = {};
+    churnLevelRef.current = {};
+    churnHistoryRef.current = {};
+    churnAccumRef.current = [];
+    rampStateRef.current = {};
+    rampCursorRef.current = 0;
+    rampScenarioCursorRef.current = 0;
+    permutationGridRef.current = null;
+    permutationGridKeyRef.current = "";
+    permutationHaltonRef.current.reset();
+    setPermutationGrid([]);
+    detailedBatchRef.current = [];
+    churnLastFlushRef.current = 0;
+    persistDetailedSessionLog({});
+    try {
+      localStorage.removeItem("codecookbook.sessionLog");
+      localStorage.removeItem("codecookbook.winnerLog");
+      localStorage.removeItem("codecookbook.detailedSessionLog");
+      localStorage.removeItem("codecookbook.ghostRuns");
+      localStorage.removeItem("codecookbook.runCount");
+      localStorage.removeItem("codecookbook.sessionStartedAt");
+    } catch { /* quota / private mode */ }
+    setSessionPurgeConfirmOpen(false);
+    setSessionImportMsg({ kind: "ok", text: "Session aggregates purged" });
+  }, []);
+
   // ── Churn Mode loop ──────────────────────────────────────────────────────
   // The probe + driver are wrapped in a single ref-stored closure so the
   // setTimeout chain doesn't tear down on every state change. The outer
@@ -7934,74 +8620,523 @@ export default function BenchmarkVisualizer() {
     // through that engine just like a real benchmark run would, so churn
     // exercises whatever the user actually has selected. Falls back to V8
     // for unsupported (id, engine, dtype) tuples (same dispatch rule as run()).
+    const deck = churnCoverageDeck;
     const candidates = [...selected].filter(id => !slowDisabled(id));
     const enabledCustoms = savedSorts.filter(s => s.enabled).map(s => `custom-${s.id}`);
     const pool = [...candidates, ...enabledCustoms];
     if (pool.length === 0) return;
 
-    // Sweep-completion gate. If every algo in the pool has saturated, the
-    // sweep has answered its question — further probing on already-timed-out
-    // levels just adds noise. We mark `churnComplete` so the indicator can
-    // announce it, flush any straggler probes one last time, and stop. If
-    // the user adds a new algo to their selection later, that algo won't be
-    // saturated and churn auto-resumes (no manual restart needed).
-    const unsaturatedIds = pool.filter(pid => !(churnStateRef.current[pid]?.saturated));
-    if (unsaturatedIds.length === 0) {
-      if (!churnCompleteRef.current) {
-        churnCompleteRef.current = true;
-        setChurnComplete(true);
-        // Final flush so the last few probes land in the persistent stores
-        // before we go quiet.
-        const pending = churnAccumRef.current;
-        if (Object.values(pending).some(b => b.length > 0)) {
-          churnAccumRef.current = {};
-          flushChurnBuffer(pending, Date.now());
+    // ─── Ramp strategy ───────────────────────────────────────────────────
+    // Per-algo size sweep using the SAME warmup+rounds methodology as the
+    // manual benchmark, so the numbers it records are directly comparable
+    // to a hand-driven Run. Each probe at (algo, n):
+    //   1. runs `warmup` rounds untimed (JIT cold start, scratchpad warm)
+    //   2. runs `rounds` rounds timed via plain performance.now()
+    //      — no measureAllocBytes inside the timing loop; that wrapper
+    //        patches the Array constructor and inflates timings
+    //   3. records the MEAN of the timed rounds (matches manual)
+    //   4. saturates the algo if any single timed round exceeded
+    //      CHURN_BUDGET_MS — the algo can't usefully step further up
+    // The cursor rotates through non-saturated algos, so all algos make
+    // forward progress until each one hits its timeout boundary, then the
+    // mode reports complete.
+    if (permutationStrategy === "ramp") {
+      const sweepSizes = sortedSizes.length > 0 ? sortedSizes : [CHURN_N_MIN];
+
+      // Init / GC the per-algo state to match the current pool.
+      for (const id of pool) {
+        if (!rampStateRef.current[id]) {
+          rampStateRef.current[id] = { sizeIndex: 0, saturated: false };
         }
+      }
+
+      const liveAlgos = pool.filter(id => !rampStateRef.current[id]?.saturated);
+      if (liveAlgos.length === 0) {
+        if (!churnCompleteRef.current) {
+          churnCompleteRef.current = true;
+          setChurnComplete(true);
+          const pending = churnAccumRef.current;
+          if (pending.length > 0) {
+            churnAccumRef.current = [];
+            flushChurnBuffer(pending, Date.now());
+          }
+        }
+        return;
+      } else if (churnCompleteRef.current) {
+        churnCompleteRef.current = false;
+        setChurnComplete(false);
+      }
+
+      const algoId = liveAlgos[rampCursorRef.current % liveAlgos.length]!;
+      rampCursorRef.current += 1;
+      const state = rampStateRef.current[algoId]!;
+      const n = sweepSizes[Math.min(state.sizeIndex, sweepSizes.length - 1)];
+      const probeDt: DataType = dataType;
+
+      // Scenario rotation across probes — covers all selected scenarios
+      // over time, populates every (dt, scenario, n) bucket the user picked.
+      const scenarioList = scenarios.size > 0
+        ? [...scenarios] as BenchmarkScenario[]
+        : (["random"] as BenchmarkScenario[]);
+      const probeScenario = scenarioList[rampScenarioCursorRef.current % scenarioList.length];
+      rampScenarioCursorRef.current += 1;
+
+      // Resolve fn (same cascade as ladder/spread).
+      const wasmFnR = engine === "wasm" && wasmBundle && probeDt === "integer" && WASM_SUPPORTED.has(algoId)
+        ? (wasmBundle.byId[algoId] as (arr: unknown[]) => unknown[])
+        : null;
+      const gpuBundleR = (engine === "webgpu" && webgpuBundle && webgpuBundle.ready) ? webgpuBundle : null;
+      const gpuFnR = gpuBundleR && probeDt === "integer" && WEBGPU_SUPPORTED.has(algoId)
+        ? (gpuBundleR.byId[algoId] as unknown as (arr: unknown[]) => unknown[] | Promise<unknown[]>)
+        : null;
+      const savedCustomR = algoId.startsWith("custom-") ? savedSorts.find(s => `custom-${s.id}` === algoId) : null;
+      const baseFnR: ((arr: unknown[]) => unknown[] | Promise<unknown[]>) | null =
+        gpuFnR  ? gpuFnR :
+        wasmFnR ? wasmFnR :
+        algoId === "custom" ? buildCustomFn(customSortCode, setCustomSortError) :
+        savedCustomR        ? buildCustomFn(savedCustomR.code, () => { /* swallow */ }) :
+        algoId === "quick"  ? makeQuickSort(quickPivot) as never :
+        algoId === "shell"  ? makeShellSort(shellGaps) as never :
+        probeDt === "string" && algoId === "timsort" ? ((arr: unknown[]) => [...arr].sort()) :
+        SORT_FNS[algoId]    ? freshSortFn(SORT_FNS[algoId]) as never :
+        null;
+      if (!baseFnR) {
+        state.saturated = true;
+        return;
+      }
+      if (wasmFnR) setWasmExecutedAlgos(s => s.has(algoId) ? s : new Set(s).add(algoId));
+      if (gpuFnR)  setWebgpuExecutedAlgos(s => s.has(algoId) ? s : new Set(s).add(algoId));
+
+      const isAsyncR = !!gpuFnR;
+      const syntheticCtx: ChurnProbeContext = {
+        id: `ramp|${probeDt}|${probeScenario}`,
+        dataType: probeDt,
+        scenario: probeScenario,
+        label: `${probeDt} · ${probeScenario}`,
+      };
+
+      logRunProbe(`permutation-run.probe`, {
+        algo: algoId, n, dataType: probeDt, scenario: probeScenario,
+        context: syntheticCtx.label, polymorphic: false, engine,
+        approxInputBytes: approxInputBytes(n, probeDt),
+        strategy: "ramp",
+        warmup, rounds,
+      });
+
+      const W = Math.max(0, Math.min(warmup, rounds - 1));
+      const R = Math.max(1, rounds);
+      const timedRounds: number[] = [];
+      let timedOutR = false;
+      let erroredR = false;
+
+      try {
+        // Warmup rounds — fresh input each, untimed.
+        for (let i = 0; i < W; i++) {
+          const arr = generateChurnInput(n, syntheticCtx);
+          const work = (arr as unknown[]).slice();
+          if (isAsyncR) {
+            const ret = baseFnR(work) as unknown;
+            if (ret && typeof (ret as { then?: unknown }).then === "function") {
+              await (ret as Promise<unknown>);
+            }
+          } else {
+            baseFnR(work);
+          }
+        }
+        // Timed rounds — fresh input each, plain perf.now() — NO
+        // measureAllocBytes wrapper so timings match manual exactly.
+        for (let i = W; i < R; i++) {
+          const arr = generateChurnInput(n, syntheticCtx);
+          const work = (arr as unknown[]).slice();
+          const t0 = performance.now();
+          if (isAsyncR) {
+            const ret = baseFnR(work) as unknown;
+            if (ret && typeof (ret as { then?: unknown }).then === "function") {
+              await (ret as Promise<unknown>);
+            }
+          } else {
+            baseFnR(work);
+          }
+          const dt = performance.now() - t0;
+          timedRounds.push(dt);
+          if (dt > CHURN_BUDGET_MS) {
+            timedOutR = true;
+            break;
+          }
+        }
+      } catch (err) {
+        erroredR = true;
+        console.error("[codecookbook] permutation-run.ramp-probe failed", { algo: algoId, n, err });
+      }
+
+      const meanMs = timedRounds.length > 0
+        ? timedRounds.reduce((a, b) => a + b, 0) / timedRounds.length
+        : 0;
+
+      // Separate alloc-bytes pass — same approach as the manual benchmark,
+      // out of the timing loop so it doesn't inflate the recorded mean.
+      let allocBytesR = 0;
+      if (!erroredR && !isAsyncR && !wasmFnR) {
+        try {
+          const arr = generateChurnInput(n, syntheticCtx);
+          const work = (arr as unknown[]).slice();
+          allocBytesR = measureAllocBytes(() => { (baseFnR as (a: unknown[]) => unknown[])(work); });
+        } catch { /* swallow — alloc is optional */ }
+      }
+
+      if (timedOutR) {
+        // Hit timeout — algo can't usefully step further. Mark saturated.
+        // Record the over-budget sample anyway (it's real data).
+        state.saturated = true;
+      } else if (!erroredR && timedRounds.length > 0) {
+        // Probe succeeded. Advance to next size; if we're at the top
+        // of the sweep, the algo has covered the user's selection and
+        // is saturated for this pass.
+        if (state.sizeIndex < sweepSizes.length - 1) {
+          state.sizeIndex += 1;
+        } else {
+          state.saturated = true;
+        }
+      }
+
+      if (!erroredR && timedRounds.length > 0) {
+        churnAccumRef.current.push({
+          algoId,
+          n,
+          timeMs: meanMs,
+          spaceBytes: allocBytesR,
+          ts: Date.now(),
+          dataType: probeDt,
+          scenario: probeScenario,
+        });
+      }
+
+      setChurnTotals(t => ({
+        probes: t.probes + 1,
+        timeouts: t.timeouts + (timedOutR ? 1 : 0),
+        startedAt: t.startedAt ?? Date.now(),
+        lastProbeAt: Date.now(),
+      }));
+
+      const nowR = Date.now();
+      const sinceFlushR = nowR - churnLastFlushRef.current;
+      const maxBufferedR = churnAccumRef.current.length;
+      if (sinceFlushR >= CHURN_FLUSH_INTERVAL_MS || maxBufferedR >= CHURN_FLUSH_MIN_POINTS) {
+        const toFlush = churnAccumRef.current;
+        churnAccumRef.current = [];
+        churnLastFlushRef.current = nowR;
+        flushChurnBuffer(toFlush, nowR);
       }
       return;
     }
-    // We've got at least one unsaturated algo, so the sweep is still active.
-    // Make sure the complete flag is cleared in case the user just enabled a
-    // new algo that brought the pool back to "in progress".
-    if (churnCompleteRef.current) {
+
+    // ─── Tier 3 strategy dispatch ────────────────────────────────────────
+    // For "spread" and "budget" strategies we walk an explicit (algo, n) grid
+    // ordered by a Halton sequence (spread) or per-cell CI ratio (budget),
+    // bypassing the ladder/context state machine below. The grid is built
+    // lazily on the first tick after pool/dtype/strategy changes.
+    if (permutationStrategy === "spread" || permutationStrategy === "budget") {
+      // Grid n's MUST match the user's selectedSizes so probes accumulate
+      // into the SAME (dt, scenario, n) buckets as normal-run data. The
+      // earlier log-spaced derivation produced n's like 192/576/1738 which
+      // never matched a user's typical [1000, 10000, 100000] selection, so
+      // h2h pairings between run data and permutation data couldn't tally
+      // — the master grid and head-to-head matrices looked sparse.
+      const gridSizes = sortedSizes.length > 0 ? sortedSizes : [CHURN_N_MIN];
+      const gridKey = `${permutationStrategy}|${dataType}|${[...pool].sort().join(",")}|${gridSizes.join(",")}`;
+      if (!permutationGridRef.current || permutationGridKeyRef.current !== gridKey) {
+        permutationGridRef.current = PermStrategy.buildGrid({
+          algos: pool, dt: dataType,
+          sizes: gridSizes,
+        });
+        permutationGridKeyRef.current = gridKey;
+        permutationHaltonRef.current.reset();
+        setPermutationGrid(permutationGridRef.current);
+      }
+      const grid = permutationGridRef.current;
+
+      const complete = permutationStrategy === "spread"
+        ? PermStrategy.isSpreadComplete(grid, { samplesPerCell: SPREAD_SAMPLES_PER_CELL })
+        : PermStrategy.isBudgetComplete(grid, {
+            targetCI: BUDGET_TARGET_CI,
+            minSamples: BUDGET_MIN_SAMPLES,
+            maxSamples: BUDGET_MAX_SAMPLES,
+          });
+      if (complete) {
+        if (!churnCompleteRef.current) {
+          churnCompleteRef.current = true;
+          setChurnComplete(true);
+          const pending = churnAccumRef.current;
+          if (pending.length > 0) {
+            churnAccumRef.current = [];
+            flushChurnBuffer(pending, Date.now());
+          }
+        }
+        return;
+      } else if (churnCompleteRef.current) {
+        churnCompleteRef.current = false;
+        setChurnComplete(false);
+      }
+
+      const cell = permutationStrategy === "spread"
+        ? PermStrategy.pickSpreadCell(grid, { samplesPerCell: SPREAD_SAMPLES_PER_CELL }, permutationHaltonRef.current)
+        : PermStrategy.pickBudgetCell(grid, {
+            targetCI: BUDGET_TARGET_CI,
+            minSamples: BUDGET_MIN_SAMPLES,
+            maxSamples: BUDGET_MAX_SAMPLES,
+          }, permutationHaltonRef.current);
+      if (!cell) return;
+
+      // Resolve fn for (algo, dtype, engine). Same cascade as the ladder
+      // probe but without the polymorphic-context layer.
+      const algoId = cell.algo;
+      const n = cell.n;
+      const probeDt: DataType = dataType;
+      const wasmFnP = engine === "wasm" && wasmBundle && probeDt === "integer" && WASM_SUPPORTED.has(algoId)
+        ? (wasmBundle.byId[algoId] as (arr: unknown[]) => unknown[])
+        : null;
+      const gpuBundleP = (engine === "webgpu" && webgpuBundle && webgpuBundle.ready) ? webgpuBundle : null;
+      const gpuFnP = gpuBundleP && probeDt === "integer" && WEBGPU_SUPPORTED.has(algoId)
+        ? (gpuBundleP.byId[algoId] as unknown as (arr: unknown[]) => unknown[] | Promise<unknown[]>)
+        : null;
+      const savedCustomP = algoId.startsWith("custom-") ? savedSorts.find(s => `custom-${s.id}` === algoId) : null;
+      const baseFnP: ((arr: unknown[]) => unknown[] | Promise<unknown[]>) | null =
+        gpuFnP  ? gpuFnP :
+        wasmFnP ? wasmFnP :
+        algoId === "custom" ? buildCustomFn(customSortCode, setCustomSortError) :
+        savedCustomP        ? buildCustomFn(savedCustomP.code, () => { /* swallow */ }) :
+        algoId === "quick"  ? makeQuickSort(quickPivot) as never :
+        algoId === "shell"  ? makeShellSort(shellGaps) as never :
+        probeDt === "string" && algoId === "timsort" ? ((arr: unknown[]) => [...arr].sort()) :
+        SORT_FNS[algoId]    ? freshSortFn(SORT_FNS[algoId]) as never :
+        null;
+      if (!baseFnP) return;
+      if (wasmFnP) setWasmExecutedAlgos(s => s.has(algoId) ? s : new Set(s).add(algoId));
+      if (gpuFnP)  setWebgpuExecutedAlgos(s => s.has(algoId) ? s : new Set(s).add(algoId));
+
+      // Scenario rotation — pick from the user's selected scenarios per
+      // probe so the recorded samples populate every scenario bucket the
+      // user picked, not just "random". Without this, h2h and master-grid
+      // buckets keyed on (dt, scenario, n) only had data for "random" and
+      // the other scenarios looked empty even after thousands of probes.
+      const scenarioList = scenarios.size > 0
+        ? [...scenarios] as BenchmarkScenario[]
+        : (["random"] as BenchmarkScenario[]);
+      const probeScenario = scenarioList[cell.stats.n % scenarioList.length];
+
+      const syntheticCtx: ChurnProbeContext = {
+        id: `${permutationStrategy}|${probeDt}|${probeScenario}`,
+        dataType: probeDt,
+        scenario: probeScenario,
+        label: `${probeDt} · ${probeScenario}`,
+      };
+
+      logRunProbe(`permutation-run.probe`, {
+        algo: algoId, n, dataType: probeDt, scenario: probeScenario,
+        context: syntheticCtx.label, polymorphic: false, engine,
+        approxInputBytes: approxInputBytes(n, probeDt),
+        strategy: permutationStrategy,
+        sampleIdx: cell.stats.n,
+      });
+
+      let arrP: unknown[];
+      try {
+        arrP = generateChurnInput(n, syntheticCtx);
+      } catch (err) {
+        console.error("[codecookbook] permutation-run.spread-input-gen failed", { algo: algoId, n, err });
+        return;
+      }
+
+      let allocBytesP = 0, timeMsP = 0, timedOutP = false, erroredP = false;
+      const isAsyncP = !!gpuFnP;
+      try {
+        const work = (arrP as unknown[]).slice();
+        const t0 = performance.now();
+        if (isAsyncP) {
+          const ret = baseFnP(work) as unknown;
+          if (ret && typeof (ret as { then?: unknown }).then === "function") {
+            await (ret as Promise<unknown>);
+          }
+        } else if (wasmFnP) {
+          baseFnP(work);
+        } else {
+          allocBytesP = measureAllocBytes(() => { (baseFnP as (a: unknown[]) => unknown[])(work); });
+        }
+        timeMsP = performance.now() - t0;
+        if (timeMsP > CHURN_BUDGET_MS) timedOutP = true;
+      } catch (err) {
+        erroredP = true;
+        console.error("[codecookbook] permutation-run.spread-probe failed", { algo: algoId, n, err });
+      }
+
+      // Update cell — running stats on success, mark saturated on timeout.
+      const cellIdx = grid.indexOf(cell);
+      if (cellIdx >= 0) {
+        if (erroredP) {
+          // Errors don't update stats but DO consume the slot (mark saturated)
+          // so we don't infinite-loop on a broken cell.
+          grid[cellIdx] = { ...cell, saturated: true };
+        } else if (timedOutP) {
+          // Timeout: record the sample (it's data), then saturate so larger n
+          // in the same algo row don't get probed unnecessarily.
+          const updatedStats = PermStrategy.updateStats(cell.stats, timeMsP);
+          grid[cellIdx] = {
+            ...cell,
+            stats: updatedStats,
+            samples: [...cell.samples, timeMsP],
+            saturated: true,
+          };
+          // Cascade saturation to all larger-n cells for this algo — they
+          // can't possibly run faster than the timeout we just hit.
+          for (let i = 0; i < grid.length; i++) {
+            if (grid[i].algo === algoId && grid[i].n > n && !grid[i].saturated) {
+              grid[i] = { ...grid[i], saturated: true };
+            }
+          }
+        } else {
+          const updatedStats = PermStrategy.updateStats(cell.stats, timeMsP);
+          grid[cellIdx] = {
+            ...cell,
+            stats: updatedStats,
+            samples: [...cell.samples, timeMsP],
+          };
+        }
+      }
+
+      if (!erroredP) {
+        churnAccumRef.current.push({
+          algoId,
+          n,
+          timeMs: timeMsP,
+          spaceBytes: allocBytesP,
+          ts: Date.now(),
+          dataType: probeDt,
+          scenario: probeScenario,
+        });
+      }
+
+      // Surface grid + totals to React.
+      setPermutationGrid([...grid]);
+      setChurnTotals(t => ({
+        probes: t.probes + 1,
+        timeouts: t.timeouts + (timedOutP ? 1 : 0),
+        startedAt: t.startedAt ?? Date.now(),
+        lastProbeAt: Date.now(),
+      }));
+
+      const nowP = Date.now();
+      const sinceFlushP = nowP - churnLastFlushRef.current;
+      const maxBufferedP = churnAccumRef.current.length;
+      if (sinceFlushP >= CHURN_FLUSH_INTERVAL_MS || maxBufferedP >= CHURN_FLUSH_MIN_POINTS) {
+        const toFlush = churnAccumRef.current;
+        churnAccumRef.current = [];
+        churnLastFlushRef.current = nowP;
+        flushChurnBuffer(toFlush, nowP);
+      }
+      return;
+    }
+
+    const allStateKeys: string[] = [];
+    for (const pid of pool) {
+      for (const ctx of contextsForAlgo(pid, deck)) {
+        allStateKeys.push(churnStateKey(pid, ctx.id));
+      }
+    }
+    if (allStateKeys.length === 0) return;
+
+    const unsaturatedKeys = allStateKeys.filter(k => {
+      const { algoId } = parseChurnStateKey(k);
+      return !churnLevelRef.current[algoId]?.saturated;
+    });
+    const allAlgosSaturated = unsaturatedKeys.length === 0;
+    if (allAlgosSaturated) {
+      if (!churnCompleteRef.current) {
+        churnCompleteRef.current = true;
+        setChurnComplete(true);
+        const pending = churnAccumRef.current;
+        if (pending.length > 0) {
+          churnAccumRef.current = [];
+          flushChurnBuffer(pending, Date.now());
+        }
+      }
+      // Keep probing saturated algos for drift — don't stop the loop.
+    } else if (churnCompleteRef.current) {
       churnCompleteRef.current = false;
       setChurnComplete(false);
     }
 
-    // Split the pool by saturation. Saturated algos are revisited at random
-    // CHURN_DRIFT_SAMPLE_PROB of the time for drift detection; the rest of
-    // the budget goes to non-saturated algos so unfinished sweeps progress.
-    const useUnsaturated = Math.random() >= CHURN_DRIFT_SAMPLE_PROB;
-    const sourcePool = useUnsaturated ? unsaturatedIds : pool;
-    const id = sourcePool[Math.floor(Math.random() * sourcePool.length)];
+    const sizeLadder = sortedSizes.length > 0 ? sortedSizes : [CHURN_N_MIN];
 
-    // Lazy-init this algo's adaptive state on first sight.
-    const prev: ChurnAlgoState = churnStateRef.current[id] ?? {
-      currentLevel: CHURN_N_MIN,
-      samplesAtLevel: 0,
+    const saturatedKeys = allStateKeys.filter(k => {
+      const { algoId } = parseChurnStateKey(k);
+      return !!churnLevelRef.current[algoId]?.saturated;
+    });
+    const useUnsaturated = !allAlgosSaturated && Math.random() >= CHURN_DRIFT_SAMPLE_PROB;
+    const sourceKeys = useUnsaturated
+      ? unsaturatedKeys
+      : (saturatedKeys.length > 0 ? saturatedKeys : unsaturatedKeys);
+
+    const defaultChurnLevel = (): ChurnLevelState => ({
+      sizeIndex: 0,
       saturated: false,
-      maxCompletedLevel: 0,
+      maxCompletedSizeIndex: -1,
+      maxCompletedN: 0,
+      dtypesTestedAtLevel: {},
+      backoffTarget: null,
       exploredLevels: [],
+    });
+
+    const ladderTargetN = (level: ChurnLevelState) =>
+      level.backoffTarget ?? sizeLadder[level.sizeIndex] ?? CHURN_N_MIN;
+
+    let id: string;
+    let ctx: ChurnProbeContext;
+
+    if (useUnsaturated) {
+      const unsaturatedAlgos = pool.filter(a => !churnLevelRef.current[a]?.saturated);
+      if (unsaturatedAlgos.length === 0) return;
+      id = unsaturatedAlgos[churnAlgoCursorRef.current % unsaturatedAlgos.length]!;
+      churnAlgoCursorRef.current += 1;
+      const preview = churnLevelRef.current[id] ?? defaultChurnLevel();
+      const req = requiredChurnDtypesForAlgo(id, deck);
+      ctx = pickChurnContextForLevel(id, deck, preview.dtypesTestedAtLevel, req, churnContextCursorRef.current);
+    } else {
+      const driftKey = sourceKeys[Math.floor(Math.random() * sourceKeys.length)];
+      const parsed = parseChurnStateKey(driftKey);
+      id = parsed.algoId;
+      const found = deck.find(c => c.id === parsed.contextId);
+      if (!found) return;
+      ctx = found;
+    }
+
+    const stateKey = churnStateKey(id, ctx.id);
+
+    let algoLevel = churnLevelRef.current[id] ?? defaultChurnLevel();
+    if (!churnLevelRef.current[id]) churnLevelRef.current[id] = algoLevel;
+
+    const requiredDtypes = requiredChurnDtypesForAlgo(id, deck);
+
+    const prev: ChurnAlgoState = churnStateRef.current[stateKey] ?? {
+      currentLevel: ladderTargetN(algoLevel),
+      samplesAtLevel: 0,
+      dtypeGate: requiredDtypes.length,
+      saturated: algoLevel.saturated,
+      maxCompletedLevel: algoLevel.maxCompletedN,
+      exploredLevels: algoLevel.exploredLevels,
       samples: 0, timeouts: 0, lastTimeMs: null, lastN: null,
     };
 
-    // Pick the probe size. Non-saturated: stick at currentLevel until 5 samples
-    // are in. Saturated: random previously-explored level for drift sampling.
-    const n: number = prev.saturated && prev.exploredLevels.length > 0
-      ? prev.exploredLevels[Math.floor(Math.random() * prev.exploredLevels.length)]
-      : prev.currentLevel;
+    const n: number = algoLevel.saturated && algoLevel.exploredLevels.length > 0
+      ? algoLevel.exploredLevels[Math.floor(Math.random() * algoLevel.exploredLevels.length)]
+      : ladderTargetN(algoLevel);
 
-    // Resolve the function for this algo. Mirrors run() dispatch order
-    // (wasm > webgpu > custom > factory variants > SORT_FNS) so churn timings
-    // are comparable to what a full benchmark would record.
     const savedCustom = id.startsWith("custom-") ? savedSorts.find(s => `custom-${s.id}` === id) : null;
-    // Wasm dispatch — same gating rule as the run loop.
-    const wasmFn = engine === "wasm" && wasmBundle && dataType === "integer" && WASM_SUPPORTED.has(id)
+    const probeDt = ctx.polymorphic ? "integer" : ctx.dataType;
+    const wasmFn = !ctx.polymorphic && engine === "wasm" && wasmBundle && probeDt === "integer" && WASM_SUPPORTED.has(id)
       ? (wasmBundle.byId[id] as (arr: unknown[]) => unknown[])
       : null;
-    // WebGPU dispatch — returns Promise<unknown[]>; the timing path below awaits.
     const gpuBundle = (engine === "webgpu" && webgpuBundle && webgpuBundle.ready) ? webgpuBundle : null;
-    const gpuFn = gpuBundle && dataType === "integer" && WEBGPU_SUPPORTED.has(id)
+    const gpuFn = !ctx.polymorphic && gpuBundle && probeDt === "integer" && WEBGPU_SUPPORTED.has(id)
       ? (gpuBundle.byId[id] as unknown as (arr: unknown[]) => unknown[] | Promise<unknown[]>)
       : null;
     const baseFn: ((arr: unknown[]) => unknown[] | Promise<unknown[]>) | null =
@@ -8011,23 +9146,45 @@ export default function BenchmarkVisualizer() {
       savedCustom         ? buildCustomFn(savedCustom.code, () => { /* swallow */ }) :
       id === "quick"      ? makeQuickSort(quickPivot) as never :
       id === "shell"      ? makeShellSort(shellGaps) as never :
-      dataType === "string" && id === "timsort" ? ((arr: unknown[]) => [...arr].sort()) :
+      ctx.dataType === "string" && id === "timsort" ? ((arr: unknown[]) => [...arr].sort()) :
       SORT_FNS[id]        ? freshSortFn(SORT_FNS[id]) as never :
       null;
     if (!baseFn) return;
-    // Tag execution-engine badges so the indicators flip on the same moment
-    // they would during a real benchmark run.
+    const fn: (arr: unknown[]) => unknown[] | Promise<unknown[]> = ctx.polymorphic
+      ? makePolymorphicFn(baseFn as (arr: unknown[]) => unknown[], n, ctx.scenario)
+      : baseFn;
     if (wasmFn) setWasmExecutedAlgos(s => s.has(id) ? s : new Set(s).add(id));
     if (gpuFn)  setWebgpuExecutedAlgos(s => s.has(id) ? s : new Set(s).add(id));
 
-    // Generate input. Always "random" with no custom distribution — churn's
-    // drift-detection job is about run-over-run variance, not adversarial
-    // coverage. If the user wants distribution-specific data, they can toggle
-    // off churn and run a precise benchmark instead.
-    const arr: unknown[] =
-      dataType === "string" ? generateStringInput(n, "random") :
-      dataType === "float"  ? generateFloatInput(n, "random") :
-                              generateBenchmarkInput(n, "random");
+    logRunProbe("permutation-run.probe", {
+      algo: id,
+      n,
+      dataType: churnLogDataType(ctx),
+      scenario: churnLogScenario(ctx),
+      context: ctx.label,
+      polymorphic: !!ctx.polymorphic,
+      engine,
+      approxInputBytes: approxInputBytes(n, churnLogDataType(ctx)),
+      saturated: algoLevel.saturated,
+      backoff: algoLevel.backoffTarget,
+      sizeIndex: algoLevel.sizeIndex,
+    });
+
+    let arr: unknown[];
+    try {
+      arr = generateChurnInput(n, ctx);
+    } catch (err) {
+      console.error("[codecookbook] permutation-run.input-gen failed", { algo: id, n, err });
+      return;
+    }
+
+    logRunProbe("permutation-run.sort", {
+      algo: id,
+      n,
+      inputLen: (arr as unknown[]).length,
+      dataType: churnLogDataType(ctx),
+      scenario: churnLogScenario(ctx),
+    });
 
     // Time the probe. measureAllocBytes can't see Wasm/GPU off-heap memory and
     // can't capture async work (its patches unpin synchronously), so we only
@@ -8052,71 +9209,110 @@ export default function BenchmarkVisualizer() {
       }
       timeMs = performance.now() - t0;
       timedOut = timeMs > CHURN_BUDGET_MS;
-    } catch {
+    } catch (err) {
+      console.error("[codecookbook] permutation-run.sort failed", {
+        algo: id, n, dataType: churnLogDataType(ctx), scenario: churnLogScenario(ctx), err,
+      });
       errored = true;
       timedOut = true;
     }
 
-    // Sweep progression: count this sample, advance the level when we've hit
-    // CHURN_SAMPLES_PER_LEVEL clean probes, saturate on any timeout. The
-    // level doubles on advance — 64 → 128 → 256 → ... → CHURN_N_MAX.
-    let nextLevel = prev.currentLevel;
-    let nextSamplesAtLevel = prev.samplesAtLevel + 1;
-    let nextSaturated = prev.saturated;
-    let nextMaxCompleted = prev.maxCompletedLevel;
-    if (!prev.saturated) {
+    // Level progression: walk selected input sizes; at each size test int /
+    // float / string before advancing. On timeout, −10% per probe until pass.
+    const churnBackoffCandidate = (failedN: number) => Math.max(1, Math.floor(failedN * CHURN_BACKOFF_RATIO));
+    /** Backoff is exhausted only when another 10% step would not reduce n. */
+    const churnBackoffExhausted = (failedN: number, candidate: number) => candidate >= failedN;
+
+    let nextLevel = algoLevel;
+    if (!algoLevel.saturated) {
       if (timedOut || errored) {
-        nextSaturated = true;
-      } else if (nextSamplesAtLevel >= CHURN_SAMPLES_PER_LEVEL) {
-        nextMaxCompleted = Math.max(nextMaxCompleted, prev.currentLevel);
-        const doubled = prev.currentLevel * 2;
-        if (doubled > CHURN_N_MAX) {
-          // Hit the explore-space ceiling without a timeout — treat as
-          // saturated so we switch to drift sampling.
-          nextSaturated = true;
+        const failedAt = nextLevel.backoffTarget ?? n;
+        const candidate = churnBackoffCandidate(nextLevel.backoffTarget ?? n);
+        if (churnBackoffExhausted(failedAt, candidate)) {
+          nextLevel = {
+            ...nextLevel,
+            saturated: true,
+            backoffTarget: null,
+          };
         } else {
-          nextLevel = doubled;
-          nextSamplesAtLevel = 0;
+          nextLevel = { ...nextLevel, backoffTarget: candidate, dtypesTestedAtLevel: {} };
+        }
+      } else {
+        const explored = nextLevel.exploredLevels.includes(n)
+          ? nextLevel.exploredLevels
+          : [...nextLevel.exploredLevels, n];
+        nextLevel = { ...nextLevel, exploredLevels: explored, maxCompletedN: Math.max(nextLevel.maxCompletedN, n) };
+
+        if (nextLevel.backoffTarget != null && n === nextLevel.backoffTarget) {
+          nextLevel = { ...nextLevel, backoffTarget: null };
+        }
+
+        const dtypesTested = markChurnDtypesTested(nextLevel.dtypesTestedAtLevel, ctx);
+        nextLevel = { ...nextLevel, dtypesTestedAtLevel: dtypesTested };
+        if (allChurnDtypesTestedAtLevel(dtypesTested, requiredDtypes)) {
+          nextLevel.maxCompletedSizeIndex = Math.max(nextLevel.maxCompletedSizeIndex, nextLevel.sizeIndex);
+          const nextIndex = nextLevel.sizeIndex + 1;
+          if (nextIndex >= sizeLadder.length) {
+            nextLevel = { ...nextLevel, saturated: true };
+          } else {
+            nextLevel = { ...nextLevel, sizeIndex: nextIndex, dtypesTestedAtLevel: {}, backoffTarget: null };
+          }
         }
       }
     }
-    const nextExplored = prev.exploredLevels.includes(n)
-      ? prev.exploredLevels
-      : [...prev.exploredLevels, n];
+    churnLevelRef.current[id] = nextLevel;
+
+    const dtypesDone = countChurnDtypesTestedAtLevel(nextLevel.dtypesTestedAtLevel, requiredDtypes);
+    const nextExplored = nextLevel.exploredLevels;
+    const displayN = ladderTargetN(nextLevel);
     const nextState: ChurnAlgoState = {
-      currentLevel: nextLevel,
-      samplesAtLevel: nextSamplesAtLevel,
-      saturated: nextSaturated,
-      maxCompletedLevel: nextMaxCompleted,
+      currentLevel: displayN,
+      samplesAtLevel: dtypesDone,
+      dtypeGate: requiredDtypes.length,
+      saturated: nextLevel.saturated,
+      maxCompletedLevel: nextLevel.maxCompletedN,
       exploredLevels: nextExplored,
       samples: prev.samples + 1,
       timeouts: prev.timeouts + (timedOut ? 1 : 0),
       lastTimeMs: errored ? null : timeMs,
       lastN: n,
     };
-    churnStateRef.current = { ...churnStateRef.current, [id]: nextState };
-
-    // Accumulate the probe for the next ghost-runs flush. Skip errored probes —
-    // they're noise the 3D view can't render meaningfully.
-    if (!errored) {
-      const buf = churnAccumRef.current[id] ?? [];
-      buf.push({ n, timeMs, spaceBytes: allocBytes, ts: Date.now() });
-      churnAccumRef.current = { ...churnAccumRef.current, [id]: buf };
+    churnStateRef.current = { ...churnStateRef.current, [stateKey]: nextState };
+    for (const key of allStateKeys) {
+      if (parseChurnStateKey(key).algoId !== id) continue;
+      if (key === stateKey) continue;
+      const existing = churnStateRef.current[key];
+      if (!existing) continue;
+      churnStateRef.current[key] = {
+        ...existing,
+        currentLevel: displayN,
+        samplesAtLevel: dtypesDone,
+        dtypeGate: requiredDtypes.length,
+        saturated: nextLevel.saturated,
+        maxCompletedLevel: nextLevel.maxCompletedN,
+        exploredLevels: nextExplored,
+      };
     }
 
-    // Record into the rolling visualization history. Errored probes are
-    // included (with timeMs=0, timedOut=true) so the recent-probes scatter
-    // still shows them as red dots; the ghostRuns flush above filtered them
-    // out because the 3D polyline path can't render them. The `ceiling` field
-    // now carries the post-probe currentLevel — the sparkline reads it as a
-    // monotonic-up staircase showing the sweep progression.
+    if (!errored) {
+      churnAccumRef.current.push({
+        algoId: id,
+        n,
+        timeMs,
+        spaceBytes: allocBytes,
+        ts: Date.now(),
+        dataType: churnLogDataType(ctx),
+        scenario: churnLogScenario(ctx),
+      });
+    }
+
     {
-      const rec: ChurnProbeRecord = { ts: Date.now(), n, timeMs: errored ? 0 : timeMs, timedOut, ceiling: nextLevel };
-      const prevHist = churnHistoryRef.current[id] ?? [];
+      const rec: ChurnProbeRecord = { ts: Date.now(), n, timeMs: errored ? 0 : timeMs, timedOut, ceiling: displayN };
+      const prevHist = churnHistoryRef.current[stateKey] ?? [];
       const newHist = prevHist.length >= CHURN_HIST_PER_ALGO
         ? [...prevHist.slice(prevHist.length - CHURN_HIST_PER_ALGO + 1), rec]
         : [...prevHist, rec];
-      churnHistoryRef.current = { ...churnHistoryRef.current, [id]: newHist };
+      churnHistoryRef.current = { ...churnHistoryRef.current, [stateKey]: newHist };
     }
 
     // Update React state — once per probe is fine; the loop never runs faster
@@ -8136,34 +9332,44 @@ export default function BenchmarkVisualizer() {
     //   • ghostRuns — historical band, drives the 3D History + 2D ghost overlay
     //   • curveData — the main per-run chart on the right pane (so churn
     //                 points appear in the same chart Run would populate)
-    //   • sessionLog — rolling means feeding SessionCurves / SessionMatrix /
-    //                  SessionBigO / SortNetworkGraph
+    //   • sessionLog — rolling means feeding SessionCurves / SortNetworkGraph
     //   • winnerLog — rolling means feeding the WinnersLog panel
     // All four updates use the same rolling-mean shape the regular run loop
     // uses at the end of a benchmark, so a churn-driven session is
     // indistinguishable from one populated by repeated Run clicks.
     const now = Date.now();
     const sinceFlush = now - churnLastFlushRef.current;
-    const maxBuffered = Math.max(0, ...Object.values(churnAccumRef.current).map(b => b.length));
+    const maxBuffered = churnAccumRef.current.length;
     if (sinceFlush >= CHURN_FLUSH_INTERVAL_MS || maxBuffered >= CHURN_FLUSH_MIN_POINTS) {
       const toFlush = churnAccumRef.current;
-      churnAccumRef.current = {};
+      churnAccumRef.current = [];
       churnLastFlushRef.current = now;
       flushChurnBuffer(toFlush, now);
     }
   };
 
-  // Single fan-out helper — used by both the periodic in-loop flush and the
-  // final flush that fires when the user toggles churn off. Pulled into a
-  // closure so we don't duplicate the four setState bodies in two places.
   const flushChurnBuffer = (
-    toFlush: Record<string, Array<{ n: number; timeMs: number; spaceBytes: number; ts: number }>>,
+    toFlush: Array<{
+      algoId: string;
+      n: number;
+      timeMs: number;
+      spaceBytes: number;
+      ts: number;
+      dataType: DataType;
+      scenario: string;
+    }>,
     now: number,
   ): void => {
     // 1. Ghost runs — one batch entry per algo per flush.
     setGhostRuns(prevRuns => {
       const next: Record<string, GhostRun[]> = { ...prevRuns };
-      for (const [aid, pts] of Object.entries(toFlush)) {
+      const byAlgo = new Map<string, typeof toFlush>();
+      for (const p of toFlush) {
+        const arr = byAlgo.get(p.algoId) ?? [];
+        arr.push(p);
+        byAlgo.set(p.algoId, arr);
+      }
+      for (const [aid, pts] of byAlgo) {
         if (pts.length === 0) continue;
         const byN = new Map<number, typeof pts[number]>();
         for (const p of pts) byN.set(p.n, p);
@@ -8176,88 +9382,95 @@ export default function BenchmarkVisualizer() {
       return next;
     });
 
-    // 2. curveData — the right-pane chart. Per (algo, n) we keep the best
-    // (fastest) timing across all probes that have hit that bucket; that
-    // matches the "best of N rounds" convention the regular run uses.
+    // 2. curveData — per (algo, n) best timing across probes in this flush.
     setCurveData(prev => {
       const next: CurveData = { ...prev };
-      for (const [aid, pts] of Object.entries(toFlush)) {
-        if (pts.length === 0) continue;
+      for (const p of toFlush) {
+        const aid = p.algoId;
         const cur: CurvePoint[] = next[aid] ? [...next[aid]] : [];
         const byN = new Map<number, CurvePoint>();
         for (const cp of cur) byN.set(cp.n, cp);
-        for (const p of pts) {
-          const existing = byN.get(p.n);
-          if (existing) {
-            byN.set(p.n, {
-              ...existing,
-              timeMs:     Math.min(existing.timeMs, p.timeMs),
-              meanMs:     existing.meanMs != null ? Math.min(existing.meanMs, p.timeMs) : p.timeMs,
-              spaceBytes: Math.max(existing.spaceBytes ?? 0, p.spaceBytes),
-              allocBytes: Math.max(existing.allocBytes ?? 0, p.spaceBytes),
-            });
-          } else {
-            byN.set(p.n, {
-              n: p.n,
-              timeMs: p.timeMs,
-              meanMs: p.timeMs,
-              spaceBytes: p.spaceBytes,
-              allocBytes: p.spaceBytes,
-            });
-          }
+        const existing = byN.get(p.n);
+        if (existing) {
+          byN.set(p.n, {
+            ...existing,
+            timeMs:     Math.min(existing.timeMs, p.timeMs),
+            meanMs:     existing.meanMs != null ? Math.min(existing.meanMs, p.timeMs) : p.timeMs,
+            spaceBytes: Math.max(existing.spaceBytes ?? 0, p.spaceBytes),
+            allocBytes: Math.max(existing.allocBytes ?? 0, p.spaceBytes),
+          });
+        } else {
+          byN.set(p.n, {
+            n: p.n,
+            timeMs: p.timeMs,
+            meanMs: p.timeMs,
+            spaceBytes: p.spaceBytes,
+            allocBytes: p.spaceBytes,
+          });
         }
         next[aid] = [...byN.values()].sort((a, b) => a.n - b.n);
       }
       return next;
     });
 
-    // 3. sessionLog — rolling mean per (dataType, algo, n). One sample
-    // contributed per probe so the runs counter ticks up exactly as it
-    // would across many manual Run clicks.
+    // 3. sessionLog — rolling stats per (dataType, algo, n) using the
+    //    Welford-online helper so the persisted shape includes all of
+    //    TimeStats (min / median / mean / p95 / stdDev / noiseCv), not just
+    //    the legacy {meanTimeMs, meanSpaceBytes, runs} subset.
     setSessionLog(prev => {
       const next: SessionLog = { ...prev };
-      const dtKey = dataType;
-      const dtMap = { ...(next[dtKey] ?? {}) };
-      for (const [aid, pts] of Object.entries(toFlush)) {
-        if (pts.length === 0) continue;
-        const algoMap = { ...(dtMap[aid] ?? {}) };
-        for (const p of pts) {
-          const key = String(p.n);
-          const existing = algoMap[key] ?? { meanTimeMs: 0, meanSpaceBytes: 0, runs: 0 };
-          const runs = existing.runs + 1;
-          const meanTimeMs    = (existing.meanTimeMs    * existing.runs + p.timeMs)    / runs;
-          const meanSpaceBytes = (existing.meanSpaceBytes * existing.runs + p.spaceBytes) / runs;
-          algoMap[key] = { meanTimeMs, meanSpaceBytes, runs };
-        }
-        dtMap[aid] = algoMap;
+      for (const p of toFlush) {
+        const dtKey = p.dataType;
+        const dtMap = { ...(next[dtKey] ?? {}) };
+        const algoMap = { ...(dtMap[p.algoId] ?? {}) };
+        const key = String(p.n);
+        algoMap[key] = mergeSessionSample(algoMap[key], p.timeMs, p.spaceBytes);
+        dtMap[p.algoId] = algoMap;
+        next[dtKey] = dtMap;
       }
-      next[dtKey] = dtMap;
       try { localStorage.setItem("codecookbook.sessionLog", JSON.stringify(next)); } catch { /* quota */ }
       return next;
     });
 
-    // 4. winnerLog — same rolling-mean shape, but time-only (winners log
-    // doesn't track space).
+    // 4. winnerLog — shares the SessionLog shape now; same helper applies.
+    //    winnerLog doesn't care about space, so we pass 0 for it.
     setWinnerLog(prev => {
       const next: WinnerLog = { ...prev };
-      const dtKey = dataType;
-      const dtMap = { ...(next[dtKey] ?? {}) };
-      for (const [aid, pts] of Object.entries(toFlush)) {
-        if (pts.length === 0) continue;
-        const algoMap = { ...(dtMap[aid] ?? {}) };
-        for (const p of pts) {
-          const key = String(p.n);
-          const existing = algoMap[key] ?? { meanMs: 0, runs: 0 };
-          const runs = existing.runs + 1;
-          const meanMs = (existing.meanMs * existing.runs + p.timeMs) / runs;
-          algoMap[key] = { meanMs, runs };
-        }
-        dtMap[aid] = algoMap;
+      for (const p of toFlush) {
+        const dtKey = p.dataType;
+        const dtMap = { ...(next[dtKey] ?? {}) };
+        const algoMap = { ...(dtMap[p.algoId] ?? {}) };
+        const key = String(p.n);
+        algoMap[key] = mergeSessionSample(algoMap[key], p.timeMs, 0);
+        dtMap[p.algoId] = algoMap;
+        next[dtKey] = dtMap;
       }
-      next[dtKey] = dtMap;
       try { localStorage.setItem("codecookbook.winnerLog", JSON.stringify(next)); } catch { /* quota */ }
       return next;
     });
+
+    // 5. detailedSessionLog — per-probe dtype + scenario.
+    const detailedSamples: Array<{
+      dt: DataType; scenario: string; algo: string; n: number; timeMs: number; spaceBytes: number;
+    }> = [];
+    for (const p of toFlush) {
+      if (p.timeMs <= 0) continue;
+      detailedSamples.push({
+        dt: p.dataType,
+        scenario: p.scenario,
+        algo: p.algoId,
+        n: p.n,
+        timeMs: p.timeMs,
+        spaceBytes: p.spaceBytes,
+      });
+    }
+    if (detailedSamples.length > 0) {
+      setDetailedSessionLog(prev => {
+        const next = appendDetailedSamples(prev, detailedSamples);
+        persistDetailedSessionLog(next);
+        return next;
+      });
+    }
   };
 
   useEffect(() => {
@@ -8267,13 +9480,10 @@ export default function BenchmarkVisualizer() {
       // Final flush of any pending probes so partial data isn't lost when the
       // user toggles off mid-cycle.
       const pending = churnAccumRef.current;
-      const pendingHasData = Object.values(pending).some(b => b.length > 0);
-      if (pendingHasData) {
+      if (pending.length > 0) {
         const flushNow = Date.now();
-        churnAccumRef.current = {};
+        churnAccumRef.current = [];
         churnLastFlushRef.current = flushNow;
-        // Same four-store fan-out the in-loop flush does. Toggling off
-        // mid-cycle shouldn't strand a partial batch in the buffer.
         flushChurnBuffer(pending, flushNow);
       }
       return;
@@ -8320,10 +9530,10 @@ export default function BenchmarkVisualizer() {
     const wasmActive   = engine === "wasm"   && wasmBundle != null;
     const webgpuActive = engine === "webgpu" && webgpuBundle != null && webgpuBundle.ready === true;
     const workerIso = useWorkerIsolation && !polyActive && duplicatePerRound && !wasmActive && !webgpuActive;
-    let algos = algoOverride ?? [
+    let algos = (algoOverride ?? [
       ...selected,
       ...enabledCustomIds,
-    ].filter(id =>
+    ]).filter(id =>
       id.startsWith("custom-") || (
         !(SLOW_IDS.has(id) && maxSz > SLOW_THRESHOLD) &&
         !(MEDIUM_LIMITS[id] !== undefined && maxSz > MEDIUM_LIMITS[id].threshold) &&
@@ -8344,10 +9554,10 @@ export default function BenchmarkVisualizer() {
     setWasmExecutedAlgos(new Set());
     setWebgpuExecutedAlgos(new Set());
     setStatus("running");
+    detailedBatchRef.current = [];
     // Reset the visibility-warning flag for the new run, then seed it correctly
     // if the tab is already hidden when Run is clicked (e.g., from a script).
     setTabHiddenDuringRun(typeof document !== "undefined" && document.visibilityState === "hidden");
-    // Reset the live memory timeline for the new run.
     setMemSamples([]);
     setCurveData({});
     setSampleProofs({});
@@ -8441,12 +9651,34 @@ export default function BenchmarkVisualizer() {
           : undefined;
       // Build weighted pool: "sorted" appears once, all others three times — so it's rare in the mix.
       const weightedScenarios = scenarioList.flatMap(sc => sc === "sorted" ? [sc] : [sc, sc, sc]);
-      const roundInputs = Array.from({ length: rounds }, () => {
-        const sc = weightedScenarios[Math.floor(Math.random() * weightedScenarios.length)];
-        return dataType === "string" ? generateStringInput(sz, sc)
-             : dataType === "float"  ? generateFloatInput(sz, sc, customDist)
-             : generateBenchmarkInput(sz, sc, customDist);
+      let roundInputs: unknown[][];
+      let roundScenarios: BenchmarkScenario[];
+      try {
+        roundInputs = Array.from({ length: rounds }, () => {
+          const sc = weightedScenarios[Math.floor(Math.random() * weightedScenarios.length)];
+          return dataType === "string" ? generateStringInput(sz, sc)
+               : dataType === "float"  ? generateFloatInput(sz, sc, customDist)
+               : generateBenchmarkInput(sz, sc, customDist);
+        });
+        roundScenarios = Array.from({ length: rounds }, () =>
+          weightedScenarios[Math.floor(Math.random() * weightedScenarios.length)],
+        );
+      } catch (err) {
+        console.error("[codecookbook] benchmark.input-gen failed", { n: sz, dataType, rounds, err });
+        break;
+      }
+      logRunProbe("benchmark.input-gen", {
+        n: sz,
+        dataType,
+        rounds,
+        scenarios: scenarioList,
+        approxInputBytes: approxInputBytes(sz, dataType),
+        polyActive,
+        engine,
       });
+      const algoRoundScenarios = adversarialEnabled
+        ? [...roundScenarios, "adversarial"]
+        : roundScenarios;
 
       for (const id of algos) {
         if (stopRef.current) break;
@@ -8532,6 +9764,18 @@ export default function BenchmarkVisualizer() {
             capturedAlgos.add(id);
           }
           const workerInputs = roundInputs.slice(0, algoRounds);
+          logRunProbe("benchmark.worker", {
+            algo: id,
+            n: sz,
+            dataType,
+            rounds: algoRounds,
+            warmup,
+            engine: "worker",
+            timeoutMs: timeoutEnabled ? timeoutSec * 1000 : 0,
+            approxInputBytes: approxInputBytes(sz, dataType),
+            scenarios: scenarioList,
+            polyActive,
+          });
           const result = await new Promise<{ timeMs: number; meanMs: number; stdDev: number; roundTimes?: number[]; timedOut: boolean; stopped?: boolean; error?: string }>((resolve) => {
             const w = new Worker(new URL("../lib/benchmarkWorker", import.meta.url));
             currentWorkerRef.current = w;
@@ -8607,6 +9851,7 @@ export default function BenchmarkVisualizer() {
                              : dataType === "float"  ? generateFloatInput(sz, scenarioList[0], customDist)
                              : generateBenchmarkInput(sz, scenarioList[0], customDist);
             const spaceCopy = [...spaceInput];
+            logRunProbe("benchmark.space", { algo: id, n: sz, dataType, pass: "alloc", engine: "worker-followup" });
             try { allocBytesW = measureAllocBytes(() => (fn as (a: unknown[]) => unknown[])(spaceCopy)); }
             catch { allocBytesW = undefined; }
 
@@ -8635,6 +9880,31 @@ export default function BenchmarkVisualizer() {
             timedOut: result.timedOut || undefined,
           });
           if (result.timedOut) timedOutAlgos.add(id);
+          if (!result.timedOut && result.timeMs > 0) {
+            const sSample = allocBytesW != null ? allocBytesW : (heapDeltaW > 0 ? heapDeltaW : theoreticalSpaceBytes(id, sz));
+            if (result.roundTimes && result.roundTimes.length > 0) {
+              const scenarioTimesW = new Map<string, number[]>();
+              result.roundTimes.forEach((t, idx) => {
+                const sc = algoRoundScenarios[idx] ?? scenarioList[0];
+                const arr = scenarioTimesW.get(sc) ?? [];
+                arr.push(t);
+                scenarioTimesW.set(sc, arr);
+              });
+              for (const [sc, times] of scenarioTimesW) {
+                if (times.length === 0) continue;
+                const meanT = times.reduce((a, b) => a + b, 0) / times.length;
+                detailedBatchRef.current.push({
+                  dt: dataType, scenario: sc, algo: id, n: sz, timeMs: meanT, spaceBytes: sSample,
+                });
+              }
+            } else {
+              const sc = scenarioList.length === 1 ? scenarioList[0] : SCENARIO_MIXED;
+              detailedBatchRef.current.push({
+                dt: dataType, scenario: sc, algo: id, n: sz,
+                timeMs: result.meanMs ?? result.timeMs, spaceBytes: sSample,
+              });
+            }
+          }
           done++;
           setProgress({ done, total });
           setCurveData(Object.fromEntries(Object.entries(acc).map(([k, v]) => [k, [...v]])));
@@ -8648,6 +9918,7 @@ export default function BenchmarkVisualizer() {
         let didTimeout = false;
         let lastElapsed = 0;
         const postWarmupTimes: number[] = [];
+        const scenarioTimes = new Map<string, number[]>();
         // Adaptive warmup: `warmup` is the MAX number of warmup rounds. We may
         // exit warmup earlier if the last 3 warmup timings have stabilized
         // (coefficient of variation < 5%). Saved warmups become extra timed
@@ -8668,6 +9939,20 @@ export default function BenchmarkVisualizer() {
         const scratch: unknown[] = duplicatePerRound
           ? new Array((algoRoundInputs[0] as unknown[]).length)
           : [];
+
+        logRunProbe("benchmark.algo", {
+          algo: id,
+          n: sz,
+          dataType,
+          rounds: algoRounds,
+          warmup,
+          engine: wasmFn ? "wasm" : gpuFn ? "webgpu" : "v8",
+          workerIso: false,
+          duplicatePerRound,
+          polyActive,
+          timeoutMs: timeoutEnabled ? timeoutSec * 1000 : 0,
+          approxInputBytes: approxInputBytes(sz, dataType),
+        });
 
         for (let r = 0; r < algoRounds && !didTimeout; r++) {
           // Yield to the event loop between rounds so a click on Stop can register
@@ -8696,6 +9981,19 @@ export default function BenchmarkVisualizer() {
           } else {
             copy = input as unknown[];
           }
+          const roundScenario = algoRoundScenarios[r] ?? scenarioList[0];
+          logRunProbe("benchmark.round", {
+            algo: id,
+            n: sz,
+            round: r,
+            totalRounds: algoRounds,
+            warmup: r < effectiveWarmup,
+            dataType,
+            scenario: roundScenario,
+            inputLen: (input as unknown[]).length,
+            duplicatePerRound,
+            engine: wasmFn ? "wasm" : gpuFn ? "webgpu" : "v8",
+          });
           const t0 = performance.now();
           // Wrap the sort call so a throwing custom function doesn't kill the
           // whole benchmark. On error, mark the algo as failed via sampleProofs,
@@ -8710,6 +10008,9 @@ export default function BenchmarkVisualizer() {
             }
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
+            console.error("[codecookbook] benchmark.round failed", {
+              algo: id, n: sz, round: r, dataType, scenario: roundScenario, err,
+            });
             setSampleProofs(prev => prev[id] ? prev : {
               ...prev,
               [id]: {
@@ -8723,6 +10024,16 @@ export default function BenchmarkVisualizer() {
             break;
           }
           lastElapsed = performance.now() - t0;
+
+          // Yield to the event loop between rounds when a round took long
+          // enough to make the UI feel locked. The `setTimeout(0)` releases
+          // the main thread back to the browser for paint, input handling
+          // (so Stop becomes responsive), and React state flushes. We only
+          // yield when the round was >50 ms because adding a microtask after
+          // every tiny round would dominate the cost for fast sorts.
+          if (lastElapsed > 50 && !stopRef.current) {
+            await new Promise<void>(resolve => { setTimeout(resolve, 0); });
+          }
 
           // Per-sort timeout. When disabled (timeoutEnabled === false), runs uncapped.
           if (timeoutEnabled && lastElapsed >= timeoutSec * 1000) { didTimeout = true; best = lastElapsed; break; }
@@ -8743,6 +10054,10 @@ export default function BenchmarkVisualizer() {
           } else {
             best = Math.min(best, lastElapsed);
             postWarmupTimes.push(lastElapsed);
+            const sc = algoRoundScenarios[r] ?? scenarioList[0];
+            const stArr = scenarioTimes.get(sc) ?? [];
+            stArr.push(lastElapsed);
+            scenarioTimes.set(sc, stArr);
           }
         }
 
@@ -8750,7 +10065,14 @@ export default function BenchmarkVisualizer() {
         if (stopRef.current) break;
 
         // Edge case: all rounds were warmup — use the last timing
-        if (best === Infinity && !didTimeout) { best = lastElapsed; postWarmupTimes.push(lastElapsed); }
+        if (best === Infinity && !didTimeout) {
+          best = lastElapsed;
+          postWarmupTimes.push(lastElapsed);
+          const sc = algoRoundScenarios[Math.max(0, algoRounds - 1)] ?? scenarioList[0];
+          const stArr = scenarioTimes.get(sc) ?? [];
+          stArr.push(lastElapsed);
+          scenarioTimes.set(sc, stArr);
+        }
 
         // Compute mean and std dev for error bands
         let meanMs: number | undefined;
@@ -8782,6 +10104,12 @@ export default function BenchmarkVisualizer() {
           // makes allocBytes a clean in-place proof: ~0 for a genuinely in-place
           // sort, ~8·n for one that allocates an O(n) buffer (merge, radix…).
           const spaceCopy = [...spaceInput];
+          logRunProbe("benchmark.space", { algo: id, n: sz, dataType, pass: "alloc", engine: wasmFn ? "wasm" : gpuFn ? "webgpu" : "v8" });
+          // Yield before the alloc-measurement pass: it re-runs the same sort
+          // a second time and would otherwise extend the freeze that the
+          // timing pass already imposed. setTimeout(0) lets the browser
+          // commit a paint + flush state updates between passes.
+          await new Promise<void>(resolve => { setTimeout(resolve, 0); });
           // Both space-measurement passes wrap the sort call so a buggy custom
           // function falls back to theoretical bytes instead of crashing the run.
           try {
@@ -8807,6 +10135,16 @@ export default function BenchmarkVisualizer() {
 
         if (!acc[id]) acc[id] = [];
         acc[id].push({ n: sz, timeMs: best, meanMs, stdDev, roundTimes: postWarmupTimes.length > 1 ? [...postWarmupTimes] : undefined, spaceBytes, heapDeltaBytes: heapDeltaForPoint, allocBytes, timedOut: didTimeout || undefined });
+        if (!didTimeout && scenarioTimes.size > 0) {
+          const sSample = effectiveAuxBytes(id, allocBytes, spaceBytes ?? 0, sz);
+          for (const [sc, times] of scenarioTimes) {
+            if (times.length === 0) continue;
+            const meanT = times.reduce((a, b) => a + b, 0) / times.length;
+            detailedBatchRef.current.push({
+              dt: dataType, scenario: sc, algo: id, n: sz, timeMs: meanT, spaceBytes: sSample,
+            });
+          }
+        }
         if (didTimeout) timedOutAlgos.add(id);
 
         done++;
@@ -8865,13 +10203,9 @@ export default function BenchmarkVisualizer() {
           const tSample = p.meanMs ?? p.timeMs;
           // Prefer the instrumented aux byte count when present (even 0 is
           // valid); fall back to the heap-delta spaceBytes otherwise.
-          const sSample = p.allocBytes != null ? p.allocBytes : (p.spaceBytes ?? 0);
+          const sSample = effectiveAuxBytes(id, p.allocBytes, p.spaceBytes ?? 0, p.n);
           const key = String(p.n);
-          const existing = algoMap[key] ?? { meanTimeMs: 0, meanSpaceBytes: 0, runs: 0 };
-          const runs = existing.runs + 1;
-          const meanTimeMs    = (existing.meanTimeMs    * existing.runs + tSample) / runs;
-          const meanSpaceBytes = (existing.meanSpaceBytes * existing.runs + sSample) / runs;
-          algoMap[key] = { meanTimeMs, meanSpaceBytes, runs };
+          algoMap[key] = mergeSessionSample(algoMap[key], tSample, sSample);
         }
         dtMap[id] = algoMap;
       }
@@ -8883,7 +10217,8 @@ export default function BenchmarkVisualizer() {
     // Update the persistent winners log: every successful (algo, size) point
     // from this run contributes one sample to a rolling average keyed by
     // (dataType, algoId, size). Skip timed-out / failed sorts so they don't
-    // poison the means.
+    // poison the means. WinnerLog now shares the SessionLog shape, so we
+    // use the same helper with 0 for the space sample.
     setWinnerLog(prev => {
       const next: WinnerLog = { ...prev };
       const dtKey = dataType;
@@ -8894,10 +10229,7 @@ export default function BenchmarkVisualizer() {
           if (p.timedOut || p.timeMs <= 0) continue;
           const sampleMs = p.meanMs ?? p.timeMs;
           const key = String(p.n);
-          const existing = algoMap[key] ?? { meanMs: 0, runs: 0 };
-          const runs = existing.runs + 1;
-          const meanMs = (existing.meanMs * existing.runs + sampleMs) / runs;
-          algoMap[key] = { meanMs, runs };
+          algoMap[key] = mergeSessionSample(algoMap[key], sampleMs, 0);
         }
         dtMap[id] = algoMap;
       }
@@ -8905,6 +10237,16 @@ export default function BenchmarkVisualizer() {
       try { localStorage.setItem("codecookbook.winnerLog", JSON.stringify(next)); } catch { /* quota */ }
       return next;
     });
+
+    const detailedBatch = detailedBatchRef.current;
+    detailedBatchRef.current = [];
+    if (detailedBatch.length > 0) {
+      setDetailedSessionLog(prev => {
+        const next = appendDetailedSamples(prev, detailedBatch);
+        persistDetailedSessionLog(next);
+        return next;
+      });
+    }
 
     setStatus("done");
 
@@ -9007,14 +10349,60 @@ export default function BenchmarkVisualizer() {
   );
   const largestDone = completedNs.size > 0 ? Math.max(...completedNs) : null;
   const summaryResults: SummaryResult[] = largestDone !== null
-    ? chartAlgos
-        .filter(id => curveDataExt[id]?.some(p => p.n === largestDone && !p.timedOut))
-        .map(id => {
-          const pt = curveDataExt[id]!.find(p => p.n === largestDone)!;
-          return { id, timeMs: pt.meanMs ?? pt.timeMs, meanMs: pt.meanMs, stdDev: pt.stdDev };
-        })
-        .sort((a, b) => a.timeMs - b.timeMs)
-        .map((r, i) => ({ ...r, rank: i + 1 }))
+    ? (() => {
+        // Successful algos at largestDone — measured time, kept as-is.
+        const ok = chartAlgos
+          .filter(id => curveDataExt[id]?.some(p => p.n === largestDone && !p.timedOut))
+          .map(id => {
+            const pt = curveDataExt[id]!.find(p => p.n === largestDone)!;
+            const samples = pt.roundTimes ?? [];
+            const ci = samples.length >= 2
+              ? PermStrategy.confidenceIntervalFromSamples(samples)
+              : null;
+            return {
+              id,
+              timeMs: pt.meanMs ?? pt.timeMs,
+              meanMs: pt.meanMs,
+              stdDev: pt.stdDev,
+              samples: samples.length > 0 ? samples : undefined,
+              sampleCount: samples.length || undefined,
+              ciHalfWidth: ci && Number.isFinite(ci.halfWidth) ? ci.halfWidth : undefined,
+              ciRatio:     ci && Number.isFinite(ci.ratio)     ? ci.ratio     : undefined,
+            } satisfies Omit<SummaryResult, "rank">;
+          });
+
+        // Timed-out algos at largestDone — extrapolated time via log-log fit
+        // on their safe (non-timed-out) points. Get sorted INTO the main
+        // ascending order at the position predicted by the fit, instead of
+        // shunted into a separate block. When no safe points exist, the row
+        // becomes "unfittable" and goes to the bottom with a ceiling sentinel.
+        const okIds = new Set(ok.map(r => r.id));
+        const timed = chartAlgos
+          .filter(id => !okIds.has(id))
+          .filter(id => curveDataExt[id]?.some(p => p.n === largestDone && p.timedOut))
+          .map(id => {
+            const safePts = (curveDataExt[id] ?? [])
+              .filter(p => !p.timedOut && p.timeMs > 0)
+              .map(p => ({ n: p.n, val: p.timeMs }));
+            const fit = fitLogLog(safePts);
+            const estMs = fit ? fit.k * fit.fn(largestDone) : null;
+            const timedAtN = curveDataExt[id]?.find(p => p.n === largestDone && p.timedOut)?.n ?? largestDone;
+            return {
+              id,
+              // Unfittable rows take CHURN_BUDGET_MS as the sort key so they
+              // sit at the bottom of the ranking — they took at least this
+              // long before hitting the timeout, by definition.
+              timeMs: estMs != null && Number.isFinite(estMs) ? estMs : CHURN_BUDGET_MS,
+              timedOut: true,
+              timedAtN,
+              unfittable: !estMs || !Number.isFinite(estMs),
+            } satisfies Omit<SummaryResult, "rank">;
+          });
+
+        return [...ok, ...timed]
+          .sort((a, b) => a.timeMs - b.timeMs)
+          .map((r, i) => ({ ...r, rank: i + 1 }));
+      })()
     : [];
 
   const summarySpaceResults: SummaryResult[] = largestDone !== null
@@ -9028,8 +10416,29 @@ export default function BenchmarkVisualizer() {
         .map((r, i) => ({ ...r, rank: i + 1 }))
     : [];
 
-  const summaryFastest = summaryResults[0]?.timeMs ?? 1;
-  const summarySlowest = summaryResults.at(-1)?.timeMs ?? 1;
+  // Scale bars + "× slower" ratios against actually MEASURED times so the
+  // visual stays anchored to real data. A wildly-large timed-out extrapolation
+  // would otherwise crush all the real bars to single-pixel slivers.
+  const summarySuccessful = summaryResults.filter(r => !r.timedOut);
+  const summaryFastest = summarySuccessful[0]?.timeMs ?? summaryResults[0]?.timeMs ?? 1;
+  const summarySlowest = summarySuccessful.at(-1)?.timeMs ?? summaryResults.at(-1)?.timeMs ?? 1;
+
+  // Statistical-tie detection: a row is considered tied with the row directly
+  // above it (by time rank) when (timeMs - prev.timeMs) is smaller than the
+  // sum of their 95% CI half-widths — i.e. their confidence intervals
+  // overlap. The tied row gets a "≈" prefix in the rank column so the user
+  // sees that the ordering is within measurement noise. Falls back to "no
+  // tie" when either side lacks a CI (single sample, etc.).
+  const tiedWithPrev = new Set<string>();
+  for (let i = 1; i < summaryResults.length; i++) {
+    const prev = summaryResults[i - 1];
+    const curr = summaryResults[i];
+    if (curr.ciHalfWidth == null || prev.ciHalfWidth == null) continue;
+    const gap = curr.timeMs - prev.timeMs;
+    if (gap < curr.ciHalfWidth + prev.ciHalfWidth) {
+      tiedWithPrev.add(curr.id);
+    }
+  }
 
   // Calibrate Big-O reference lines: anchor O(n log n) to fastest real time at smallest valid n
   const calibN = chartSizes.find(n => n >= 2);
@@ -9061,6 +10470,8 @@ export default function BenchmarkVisualizer() {
     ...refRows,
   ].sort((a, b) => a.timeMs - b.timeMs);
   const hasCurveData = Object.values(curveData).some(pts => pts.length > 0);
+  const showChurnOps = churnMode && status !== "running";
+  const showRunOps = !showChurnOps && (status === "running" || hasCurveData);
 
   return (
     <div className="flex flex-col" style={{ position: "relative" }}>
@@ -9109,6 +10520,38 @@ export default function BenchmarkVisualizer() {
           </div>
         </div>
       )}
+
+      {sessionPurgeConfirmOpen && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 50,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          background: "rgba(0,0,0,0.55)", backdropFilter: "blur(2px)",
+        }}>
+          <div style={{
+            background: "var(--color-surface-2)", border: "1px solid #ef5350",
+            borderRadius: 12, padding: "24px 28px", maxWidth: 400, width: "90%",
+            boxShadow: "0 8px 40px rgba(0,0,0,0.4)",
+          }}>
+            <p style={{ fontSize: 11, fontWeight: 700, color: "#ef5350", marginBottom: 8 }}>
+              Purge session aggregates?
+            </p>
+            <p style={{ fontSize: 11, color: "var(--color-text)", marginBottom: 6, lineHeight: 1.5 }}>
+              This permanently deletes all session-side data: rolling curves, command center stats, winners log, ghost runs, run count, and permutation-run progress.
+            </p>
+            <p style={{ fontSize: 11, color: "var(--color-muted)", marginBottom: 20, lineHeight: 1.5 }}>
+              The current run chart on the right is not affected. This cannot be undone unless you have an exported JSON backup.
+            </p>
+            <div className="flex gap-2 justify-end">
+              <button onClick={cancelPurgeSession} style={btn("secondary", { padding: "4px 14px" })}>
+                Cancel
+              </button>
+              <button onClick={purgeSessionAggregates} style={btn("danger", { padding: "4px 14px" })}>
+                Purge session
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* ── Algorithm Benchmark ── */}
       <div className="flex flex-col">
 
@@ -9128,185 +10571,81 @@ export default function BenchmarkVisualizer() {
 
       <div className="flex flex-col lg:flex-row">
 
-        {/* ── Left pane: controls + config + session-wide views ──
-            Order is intentional: the things you DO (Run, Churn, engine status)
-            sit at the top so they're always visible without scrolling. Below
-            that comes the config card (algos, sizes, scenarios, advanced).
-            Below that comes the readout (Settings summary), and finally the
-            cross-run session views (summary, winners, big-O, matrix, curves,
-            sort network, 3D history). Top-to-bottom matches a typical
-            workflow: act → configure → review. */}
+        {/* ── Left pane: run setup + session aggregates ── */}
         <div
           className="lg:w-1/2 lg:h-full lg:overflow-y-auto border-b lg:border-b-0 lg:border-r"
           style={{ borderColor: "var(--color-border)" }}
         >
           <div className="px-5 py-4 flex flex-col gap-3">
-            {/* ── Controls panel (top-anchored) ── */}
-            <div
-              className="rounded-xl p-3 flex flex-col gap-2"
-              style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)" }}
-            >
-              {/* Engine indicator — visible whenever Wasm is the chosen
-                  engine, so the next-run engine state is legible without
-                  expanding Advanced. Also surfaces "requested but not loaded"
-                  so the user can see why their badges never appeared. */}
-              {engine === "wasm" && (
-                <div className="print:hidden text-[10px]" style={{ fontFamily: "monospace" }}>
-                  {wasmBundle ? (
-                    <span style={{
-                      display: "inline-flex", alignItems: "center", gap: 4,
-                      padding: "1px 7px", borderRadius: 4,
-                      background: "rgba(124,106,247,0.15)",
-                      border: "1px solid rgba(124,106,247,0.5)",
-                      color: "var(--color-accent)", fontWeight: 700,
-                    }}>
-                      Engine: Wasm ready — fires for insertion / quick / logos on integer data
-                    </span>
-                  ) : (
-                    <span style={{
-                      display: "inline-flex", alignItems: "center", gap: 4,
-                      padding: "1px 7px", borderRadius: 4,
-                      background: "rgba(255,183,77,0.10)",
-                      border: "1px solid rgba(255,183,77,0.45)",
-                      color: "#ffb74d",
-                    }}>
-                      Engine: Wasm selected but .wasm not loaded — every algo will silently fall back to V8. Run <code>npm run build:wasm</code>, then refresh.
-                    </span>
-                  )}
-                </div>
-              )}
-
-              {/* Same banner shape for the WebGPU engine. Three states:
-                  - bundle.ready=true AND WEBGPU_SUPPORTED non-empty → cyan "GPU ready" banner
-                  - bundle.ready=true AND WEBGPU_SUPPORTED empty   → amber "selected but no kernels ported" banner
-                  - bundle.ready=false                              → amber "selected but unavailable" banner */}
-              {engine === "webgpu" && webgpuBundle != null && (
-                <div className="print:hidden text-[10px]" style={{ fontFamily: "monospace" }}>
-                  {webgpuBundle.ready && WEBGPU_SUPPORTED.size > 0 ? (
-                    <span style={{
-                      display: "inline-flex", alignItems: "center", gap: 4,
-                      padding: "1px 7px", borderRadius: 4,
-                      background: "rgba(34,197,194,0.14)",
-                      border: "1px solid rgba(34,197,194,0.55)",
-                      color: "#0e9b96", fontWeight: 700,
-                    }}>
-                      Engine: WebGPU ready — fires for {[...WEBGPU_SUPPORTED].join(" / ")} on integer data
-                    </span>
-                  ) : webgpuBundle.ready ? (
-                    <span style={{
-                      display: "inline-flex", alignItems: "center", gap: 4,
-                      padding: "1px 7px", borderRadius: 4,
-                      background: "rgba(255,183,77,0.10)",
-                      border: "1px solid rgba(255,183,77,0.45)",
-                      color: "#ffb74d",
-                    }}>
-                      Engine: WebGPU adapter detected but no GPU kernels ported yet — every algo will fall back to V8 until <code>WEBGPU_SUPPORTED</code> in <code>lib/webgpuSorts.ts</code> gains an entry.
-                    </span>
-                  ) : (
-                    <span style={{
-                      display: "inline-flex", alignItems: "center", gap: 4,
-                      padding: "1px 7px", borderRadius: 4,
-                      background: "rgba(255,183,77,0.10)",
-                      border: "1px solid rgba(255,183,77,0.45)",
-                      color: "#ffb74d",
-                    }}>
-                      Engine: WebGPU selected but unavailable — {webgpuBundle.reason}. Every algo will fall back to V8.
-                    </span>
-                  )}
-                </div>
-              )}
-
-              {/* Run / Stop buttons moved to a floating bottom-right panel
-                  that swaps with RunningDashboard depending on status —
-                  see the FloatingRunPanel render near the bottom of this file. */}
-
-              {/* ── Churn Mode toggle + live telemetry ──
-                  Lives directly below the Run button because it's the
-                  "background mode" sibling of "fire one measured run". */}
-              {(() => {
-                const churnEligible = ([...selected].filter(id => !slowDisabled(id)).length + savedSorts.filter(s => s.enabled).length) > 0;
-                const startedAt = churnTotals.startedAt;
-                const runtimeMs = churnMode && startedAt != null ? Date.now() - startedAt : 0;
-                const probesPerSec = runtimeMs > 250 ? (churnTotals.probes / (runtimeMs / 1000)) : 0;
-                return (
-                  <div className="print:hidden flex flex-col gap-2">
-                    <ChurnIndicator
-                      active={churnMode}
-                      complete={churnComplete}
-                      onToggle={() => {
-                        // Toggle-ON starts a fresh session: totals zeroed and
-                        // history cleared so the sparklines draw from scratch.
-                        // Toggle-OFF leaves the displays frozen so the user can
-                        // review the last session's data. Per-algo adaptive
-                        // state (the AIMD memory) persists across toggles so
-                        // the learned ceilings aren't thrown away.
-                        if (churnMode) {
-                          setChurnMode(false);
-                        } else {
-                          setChurnTotals({ probes: 0, timeouts: 0, startedAt: null, lastProbeAt: null });
-                          churnHistoryRef.current = {};
-                          setChurnHistory({});
-                          // Reset the sweep-completion flags so a fresh
-                          // session starts in the "sweeping" state, not in
-                          // "done" left over from the previous session.
-                          churnCompleteRef.current = false;
-                          setChurnComplete(false);
-                          setChurnMode(true);
-                        }
-                      }}
-                      disabled={!churnEligible || status === "running"}
-                      probeCount={churnTotals.probes}
-                      probesPerSec={probesPerSec}
-                    />
-                    {churnMode && (
-                      <div className="cc-churn-box" style={{ padding: "8px 10px", borderRadius: 6 }}>
-                        <ChurnTelemetry
-                          state={churnState}
-                          history={churnHistory}
-                          totals={churnTotals}
-                          algoNames={ALGO_NAMES}
-                          algoColors={ALGO_COLORS}
-                          runtimeMs={runtimeMs}
-                          budgetMs={CHURN_BUDGET_MS}
-                          nMin={CHURN_N_MIN}
-                          nMax={CHURN_N_MAX}
-                          samplesPerLevel={CHURN_SAMPLES_PER_LEVEL}
-                          complete={churnComplete}
-                        />
-                        <p style={{ fontSize: 8, color: "var(--color-muted)", marginTop: 6, fontFamily: "monospace", lineHeight: 1.4 }}>
-                          structured sweep: {CHURN_SAMPLES_PER_LEVEL} samples per level, then double n · saturates on any probe &gt; {CHURN_BUDGET_MS / 1000}s · stops when every algo has saturated · routes through the active engine ({engine === "wasm" ? "Wasm" : engine === "webgpu" ? "WebGPU" : "V8"}) · flushes to curveData / sessionLog / winnerLog / ghostRuns every ~{CHURN_FLUSH_INTERVAL_MS / 1000}s so every panel updates in near-real-time
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-
-              {/* Settings summary — what *will* run. A compact readout of the
-                  active config so the user can verify before clicking Run
-                  without expanding the config card below. */}
-              {status !== "running" && (
-                <div className="text-[10px] print:hidden flex flex-col gap-0.5" style={{ color: "var(--color-muted)", fontFamily: "monospace", borderTop: "1px dashed var(--color-border)", paddingTop: 6 }}>
-                  <span>
-                    {[...activeAlgos, ...enabledSavedSorts.map(s => `custom-${s.id}`)]
-                      .map(id => ALGO_NAMES[id] ?? id)
-                      .join(", ") || <span style={{ color: "#ef5350" }}>no algorithms selected</span>}
-                  </span>
-                  <span>
-                    {[...scenarios].join(", ")} · n={sortedSizes.map(n => fmtN(n)).join(", ")} · {rounds} round{rounds !== 1 ? "s" : ""} · {warmup} warm-up · engine: {engine === "wasm" && wasmBundle ? "Wasm" : engine === "webgpu" && webgpuBundle?.ready ? "WebGPU" : "V8"}
-                  </span>
-                </div>
-              )}
-
-            </div>
+            {/* ── Run setup (top of left column) ── */}
+            <div id="toc-controls" className="flex flex-col gap-3">
 
             {/* ── Config card (algos, sizes, scenarios, advanced) ── */}
             <div
-              className="rounded-xl p-4"
+              className="rounded-xl p-4 flex flex-col gap-2"
               style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)" }}
             >
+              {/* Engine status is conveyed by the per-algo Wasm/GPU pills in
+                  the Rankings table (which algos actually fired through the
+                  alternate engine). The two large top-of-card banners were
+                  duplicative of the engine selector dropdown. */}
+
+              {/* Data Type — moved to the top of the config card because
+                  every downstream control (input-size limits, algorithm
+                  compatibility, custom-sort applicability) flows from this
+                  choice. Segmented single-select. Each run rebuilds sort
+                  functions fresh (freshSortFn) so switching types can't
+                  carry V8 megamorphic deopt across runs. */}
+              <div id="toc-data-type" className="mb-4 print:hidden">
+                <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--color-muted)" }}>Data Type</p>
+                <div
+                  style={{
+                    display: "inline-flex",
+                    borderRadius: 7,
+                    border: "1px solid var(--color-border)",
+                    background: "var(--color-surface-1)",
+                    overflow: "hidden",
+                  }}
+                >
+                  {(["integer", "float", "string"] as DataType[]).map((dt, i) => {
+                    const active = dataType === dt;
+                    return (
+                      <button
+                        key={dt}
+                        onClick={() => setDataType(dt)}
+                        title={
+                          dt === "integer" ? "Random 32-bit integers" :
+                          dt === "float"   ? "Random doubles" :
+                                             "Random fixed-length strings"
+                        }
+                        style={{
+                          padding: "4px 14px", fontSize: 11, cursor: "pointer",
+                          background: active ? "var(--color-accent)" : "transparent",
+                          color: active ? "#fff" : "var(--color-muted)",
+                          fontWeight: active ? 600 : 400,
+                          border: "none",
+                          borderLeft: i > 0 ? "1px solid var(--color-border)" : "none",
+                          transition: "background 0.12s, color 0.12s",
+                        }}
+                      >
+                        {dt.charAt(0).toUpperCase() + dt.slice(1)}
+                      </button>
+                    );
+                  })}
+                </div>
+                {dataType !== "integer" && (() => {
+                  const skipped = [...ALGO_INCOMPATIBLE[dataType]];
+                  const skippedNames = skipped.map(id => ALGO_NAMES[id] ?? id).join(", ");
+                  return skipped.length > 0 ? (
+                    <p className="text-xs mt-1.5" style={{ color: "var(--color-muted)" }}>
+                      <span style={{ color: "var(--color-state-swap)" }}>⚠</span> {skippedNames} will be skipped (incompatible with {dataType}s)
+                    </p>
+                  ) : null;
+                })()}
+              </div>
+
               {/* Input sizes */}
-              <div className="mb-4">
+              <div id="toc-input-sizes" className="mb-4">
                 <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
                   Input sizes (n)
                   {sortedSizes.length > 0 && (
@@ -9439,46 +10778,14 @@ export default function BenchmarkVisualizer() {
                 ))}
               </div>
 
-              {/* Scenario presets */}
-              <div className="mb-4 print:hidden">
-                <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--color-muted)" }}>Quick presets</p>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                  {SCENARIO_PRESETS
-                    .filter(preset => has("advanced") || !(preset as { poly?: boolean }).poly)
-                    .map(preset => {
-                    const isPoly = Boolean((preset as { poly?: boolean }).poly);
-                    return (
-                    <button
-                      key={preset.label}
-                      title={preset.desc}
-                      onClick={() => {
-                        setSelected(new Set(preset.algos as unknown as string[]));
-                        setSelectedSizes(new Set(preset.sizes as unknown as number[]));
-                        setScenarios(new Set(preset.scenarios));
-                        if (preset.pivot) setQuickPivot(preset.pivot);
-                        setPolymorphicMode(isPoly);
-                      }}
-                      style={{
-                        padding: "2px 9px", fontSize: 9, borderRadius: 4, cursor: "pointer",
-                        background: isPoly && polymorphicMode ? "color-mix(in srgb, var(--color-accent) 18%, transparent)" : "var(--color-surface-1)",
-                        border: `1px solid ${isPoly && polymorphicMode ? "var(--color-accent)" : "var(--color-border)"}`,
-                        color: isPoly && polymorphicMode ? "var(--color-accent)" : "var(--color-muted)", whiteSpace: "nowrap",
-                      }}
-                    >
-                      {isPoly ? `⇄ ${preset.label}` : preset.label}
-                    </button>
-                    );
-                  })}
-                </div>
-                {polymorphicMode && (
-                  <p className="text-[10px] mt-1.5" style={{ color: "var(--color-accent)", fontFamily: "monospace" }}>
-                    Polymorphic sweep active — each measured sort sorts integer + float + string (summed); runs on the main thread, type-safe sorts only.
-                  </p>
-                )}
-              </div>
+              {polymorphicMode && (
+                <p className="text-[10px] mb-3 print:hidden" style={{ color: "var(--color-accent)", fontFamily: "monospace" }}>
+                  Polymorphic sweep active — each measured sort sorts integer + float + string (summed); runs on the main thread, type-safe sorts only.
+                </p>
+              )}
 
               {/* Algorithm checkboxes */}
-              <div className="mb-4">
+              <div id="toc-algorithms" className="mb-4">
                 <div className="flex items-center gap-2 mb-2.5">
                   <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
                     Algorithms
@@ -9538,7 +10845,7 @@ export default function BenchmarkVisualizer() {
                             // tables so missing entries silently degrade.
                             const timeBigO = ALGO_TIME[item.id];
                             const isStable = ALGO_STABLE[item.id];
-                            const inPlace = ALGO_INFO[item.id]?.inPlace;
+                            const inPlace = catalogInPlace(item.id) ?? ALGO_INFO[item.id]?.inPlace;
                             // Best-time-per-dtype lookup — empty until the
                             // session has recorded a measurement for this
                             // (algo, dtype). We render only the dtypes that
@@ -9740,8 +11047,23 @@ export default function BenchmarkVisualizer() {
                   );
                 })()}
 
-                {/* Custom sort function */}
-                <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--color-border)" }}>
+                {/* Custom sort function — styled as a callout panel so it
+                    pairs visually with the Advanced section below: both are
+                    "power-user surfaces" that benefit from clear visual
+                    separation from the everyday Input-sizes / Algorithms /
+                    Data-type controls above. Accent-tinted background + a
+                    1.5px accent border + an inset emoji-free icon mark it
+                    as a distinct sub-region without screaming. */}
+                <div
+                  id="toc-custom-sort"
+                  className="mt-4"
+                  style={{
+                    borderRadius: 8,
+                    padding: "10px 12px",
+                    background: "color-mix(in srgb, var(--color-accent) 5%, var(--color-surface-1))",
+                    border: "1.5px solid color-mix(in srgb, var(--color-accent) 32%, var(--color-border))",
+                  }}
+                >
                   {/* Collapsible header */}
                   <button
                     type="button"
@@ -9749,14 +11071,17 @@ export default function BenchmarkVisualizer() {
                     className="flex items-center gap-1 w-full"
                     style={{ background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left" }}
                   >
-                    <ChevronRight size={12} style={{
-                      color: "var(--color-muted)",
+                    <ChevronRight size={14} style={{
+                      color: "var(--color-accent)",
                       transform: customSortOpen ? "rotate(90deg)" : "none",
                       transition: "transform 0.15s ease",
                       flexShrink: 0,
                     }} />
-                    <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
+                    <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-accent)" }}>
                       Custom Sort
+                    </span>
+                    <span style={{ fontSize: 9, color: "var(--color-muted)", marginLeft: 4, fontFamily: "monospace" }}>
+                      · write &amp; benchmark your own
                     </span>
                     {customSortEnabled && (
                       <span style={{
@@ -10128,66 +11453,31 @@ export default function BenchmarkVisualizer() {
                 )}
               </div>
 
-              {/* Data Type — segmented single-select. Each run rebuilds sort
-                  functions fresh (freshSortFn) so switching types can't carry
-                  V8 megamorphic deopt across runs. */}
-              <div className="mb-4 print:hidden">
-                <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--color-muted)" }}>Data Type</p>
-                <div
-                  style={{
-                    display: "inline-flex",
-                    borderRadius: 7,
-                    border: "1px solid var(--color-border)",
-                    background: "var(--color-surface-1)",
-                    overflow: "hidden",
-                  }}
-                >
-                  {(["integer", "float", "string"] as DataType[]).map((dt, i) => {
-                    const active = dataType === dt;
-                    return (
-                      <button
-                        key={dt}
-                        onClick={() => setDataType(dt)}
-                        title={
-                          dt === "integer" ? "Random 32-bit integers" :
-                          dt === "float"   ? "Random doubles" :
-                                             "Random fixed-length strings"
-                        }
-                        style={{
-                          padding: "4px 14px", fontSize: 11, cursor: "pointer",
-                          background: active ? "var(--color-accent)" : "transparent",
-                          color: active ? "#fff" : "var(--color-muted)",
-                          fontWeight: active ? 600 : 400,
-                          border: "none",
-                          borderLeft: i > 0 ? "1px solid var(--color-border)" : "none",
-                          transition: "background 0.12s, color 0.12s",
-                        }}
-                      >
-                        {dt.charAt(0).toUpperCase() + dt.slice(1)}
-                      </button>
-                    );
-                  })}
-                </div>
-                {dataType !== "integer" && (() => {
-                  const skipped = [...ALGO_INCOMPATIBLE[dataType]];
-                  const skippedNames = skipped.map(id => ALGO_NAMES[id] ?? id).join(", ");
-                  return skipped.length > 0 ? (
-                    <p className="text-xs mt-1.5" style={{ color: "var(--color-muted)" }}>
-                      <span style={{ color: "var(--color-state-swap)" }}>⚠</span> {skippedNames} will be skipped (incompatible with {dataType}s)
-                    </p>
-                  ) : null;
-                })()}
-              </div>
-
-              {/* Advanced */}
-              {has("advanced") && <div className="print:hidden mb-4">
+              {/* Advanced — matching callout treatment to Custom Sort above.
+                  Both sit below Data Type as a paired "power-user" group: a
+                  tinted accent background, 1.5px accent border, and slightly
+                  oversized chevron so the surface reads as a distinct
+                  sub-region of the config card. */}
+              {has("advanced") && <div
+                id="toc-advanced"
+                className="print:hidden mb-4 mt-4"
+                style={{
+                  borderRadius: 8,
+                  padding: "10px 12px",
+                  background: "color-mix(in srgb, var(--color-accent) 5%, var(--color-surface-1))",
+                  border: "1.5px solid color-mix(in srgb, var(--color-accent) 32%, var(--color-border))",
+                }}
+              >
                 <button
                   onClick={() => setAdvancedOpen(o => !o)}
                   className="flex items-center gap-1"
-                  style={btn("ghost", { padding: 0, fontSize: 9, fontWeight: 600, letterSpacing: "0.07em", textTransform: "uppercase" })}
+                  style={btn("ghost", { padding: 0, fontSize: 11, fontWeight: 700, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--color-accent)" })}
                 >
-                  <ChevronRight size={12} style={{ transform: advancedOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s ease" }} />
+                  <ChevronRight size={14} style={{ color: "var(--color-accent)", transform: advancedOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s ease" }} />
                   Advanced
+                  <span style={{ fontSize: 9, color: "var(--color-muted)", marginLeft: 4, fontFamily: "monospace", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>
+                    · scenarios, distributions, engine, rounds, custom flags
+                  </span>
                 </button>
 
                 {advancedOpen && (
@@ -10383,7 +11673,7 @@ export default function BenchmarkVisualizer() {
 
                       <AdvToggle checked={useWorkerIsolation} onChange={setUseWorkerIsolation} label="Web Worker isolation" disabled={!duplicatePerRound}>
                         Each algorithm runs in its own Worker thread — JIT compilation and GC for one algo cannot pollute timing of another.
-                        <span style={{ color: "#ffb74d" }}> Tradeoff: ~10–50 ms overhead per worker creation; space measurement falls back to theoretical.</span>
+                        <span style={{ color: "#ffb74d" }}> Tradeoff: ~10–50 ms worker creation overhead. Space measurement runs as a separate main-thread pass (the worker&apos;s own allocations aren&apos;t reachable to <code>Array.prototype</code> instrumentation patched only in the main isolate); on browsers without <code>performance.memory</code> (Firefox, Safari) or for sorts whose allocations escape Array-prototype instrumentation (spread, internal scratch, throws), it falls back to theoretical.</span>
                         {!duplicatePerRound && <span style={{ color: "#ffb74d" }}> (Disabled while &ldquo;Duplicate input&rdquo; is off.)</span>}
                       </AdvToggle>
 
@@ -10515,6 +11805,189 @@ export default function BenchmarkVisualizer() {
                 </div>
               )}
 
+            </div>{/* end config card */}
+
+            {/* ── Run · parameters ── */}
+            <div
+              className="rounded-xl p-3 flex flex-col gap-3 print:hidden"
+              style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)" }}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
+                    Run · parameters
+                  </p>
+                  <p className="text-[10px] mt-1" style={{ color: "var(--color-muted)", fontFamily: "monospace", lineHeight: 1.45 }}>
+                    {status === "running"
+                      ? "Active benchmark — parameters frozen at run start."
+                      : status === "done" && runParamsView.frozen
+                        ? "Last run configuration. Change settings above, then Re-run."
+                        : "Live preview of what the next Run will execute."}
+                  </p>
+                </div>
+                {status === "running" && (
+                  <span style={{
+                    fontSize: 9, fontWeight: 700, fontFamily: "monospace",
+                    padding: "2px 8px", borderRadius: 4,
+                    background: "rgba(139,58,42,0.15)", color: "var(--color-accent)",
+                    border: "1px solid var(--color-accent)",
+                  }}>
+                    Running
+                  </span>
+                )}
+                {status === "done" && !runParamsView.configChangedSinceRun && (
+                  <span style={{
+                    fontSize: 9, fontWeight: 600, fontFamily: "monospace",
+                    padding: "2px 8px", borderRadius: 4,
+                    background: "rgba(77,182,172,0.12)", color: "#4db6ac",
+                    border: "1px solid rgba(77,182,172,0.35)",
+                  }}>
+                    Done
+                  </span>
+                )}
+                {status === "done" && runParamsView.configChangedSinceRun && (
+                  <span style={{
+                    fontSize: 9, fontWeight: 600, fontFamily: "monospace",
+                    padding: "2px 8px", borderRadius: 4,
+                    background: "rgba(255,183,77,0.12)", color: "#ffb74d",
+                    border: "1px solid rgba(255,183,77,0.35)",
+                  }}>
+                    Config changed
+                  </span>
+                )}
+              </div>
+
+              <div className="flex flex-col gap-1.5" style={{ fontFamily: "monospace" }}>
+                {([
+                  {
+                    label: "Algorithms",
+                    value: runParamsView.algos.length > 0
+                      ? runParamsView.algos.map(id => ALGO_NAMES[id] ?? id).join(", ")
+                      : null,
+                    empty: "none selected",
+                  },
+                  {
+                    label: "Scenarios",
+                    value: runParamsView.scenarioList.length > 0
+                      ? runParamsView.scenarioList.map(s => SCENARIO_OPTIONS.find(o => o.id === s)?.label ?? s).join(", ")
+                      : null,
+                    empty: "none selected",
+                  },
+                  {
+                    label: "Sizes (n)",
+                    value: runParamsView.sizes.length > 0
+                      ? runParamsView.sizes.map(n => fmtN(n)).join(", ")
+                      : null,
+                    empty: "none selected",
+                  },
+                  {
+                    label: "Rounds",
+                    value: `${runParamsView.rounds} round${runParamsView.rounds !== 1 ? "s" : ""}, ${runParamsView.warmup} warm-up discarded`,
+                  },
+                  { label: "Engine", value: runParamsView.engine },
+                  ...(runParamsView.extras.length > 0
+                    ? [{ label: "Options", value: runParamsView.extras.join(" · ") }]
+                    : []),
+                  ...(status === "running"
+                    ? [{
+                        label: "Progress",
+                        value: `${currentAlgo ? (ALGO_NAMES[currentAlgo] ?? currentAlgo) : "—"} · n=${currentN != null ? fmtN(currentN) : "—"} · ${progress.done}/${progress.total}${progress.total > 0 ? ` (${Math.round((progress.done / progress.total) * 100)}%)` : ""}`,
+                      }]
+                    : []),
+                ] as const).map((row) => {
+                  const { label, value } = row;
+                  const empty = "empty" in row ? row.empty : undefined;
+                  return (
+                  <div key={label} className="flex gap-2 items-start text-[10px]" style={{ lineHeight: 1.45 }}>
+                    <span className="shrink-0" style={{ color: "var(--color-muted)", width: 76 }}>{label}</span>
+                    <span style={{ color: value == null || value === "" ? "#ef5350" : "var(--color-text)", wordBreak: "break-word" }}>
+                      {value == null || value === "" ? empty ?? "—" : value}
+                    </span>
+                  </div>
+                  );
+                })}
+              </div>
+
+              <div className="flex flex-wrap gap-2 pt-1" style={{ borderTop: "1px dashed var(--color-border)" }}>
+                {status === "running" ? (
+                  <button
+                    onClick={stop}
+                    disabled={stopPending}
+                    style={btn("danger", { padding: "6px 16px", fontSize: 12, opacity: stopPending ? 0.5 : 1, cursor: stopPending ? "not-allowed" : "pointer" })}
+                  >
+                    <Square size={12} strokeWidth={2} fill="currentColor" />
+                    {stopPending ? "Stopping…" : "Stop"}
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => run()}
+                      disabled={!canRun}
+                      style={btn("primary", { padding: "6px 16px", fontSize: 12, opacity: canRun ? 1 : 0.5, cursor: canRun ? "pointer" : "not-allowed" })}
+                    >
+                      <Play size={12} strokeWidth={2} />
+                      {status === "done" ? "Re-run" : "Run benchmark"}
+                    </button>
+                    {status === "done" && (
+                      <button onClick={reset} style={btn("secondary", { padding: "6px 14px", fontSize: 12 })}>
+                        <RotateCcw size={12} strokeWidth={1.75} /> Reset
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+              {runValidationHint && status !== "running" && (
+                <p className="text-[10px]" style={{ color: "#ef5350", fontFamily: "monospace", marginTop: -4 }}>
+                  {runValidationHint}
+                </p>
+              )}
+            </div>
+
+            <div
+              className="rounded-xl p-3 print:hidden flex flex-col gap-3"
+              style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)" }}
+            >
+              <PermutationStrategyPicker
+                value={permutationStrategy}
+                disabled={churnMode}
+                expanded={permutationStrategyExpanded}
+                onChange={setPermutationStrategy}
+                onToggleExpanded={() => setPermutationStrategyExpanded(e => !e)}
+              />
+              <ChurnControls
+                active={churnMode}
+                complete={churnComplete}
+                disabled={!churnEligible}
+                probeCount={churnTotals.probes}
+                probesPerSec={churnProbesPerSec}
+                onStart={handleChurnStart}
+                onStop={handleChurnStop}
+                showTelemetry={false}
+                state={churnState}
+                history={churnHistory}
+                totals={churnTotals}
+                runtimeMs={churnRuntimeMs}
+                algoNames={ALGO_NAMES}
+                algoColors={ALGO_COLORS}
+                contextLabels={churnContextLabels}
+                budgetMs={CHURN_BUDGET_MS}
+                nMin={CHURN_N_MIN}
+                nMax={churnNMax}
+                dtypesRequired={CHURN_DTYPE_GATE}
+              />
+            </div>
+
+            </div>{/* end run setup */}
+
+            {/* ── Session aggregates ── */}
+            <div
+              className="rounded-xl p-3 flex flex-col gap-3"
+              style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)" }}
+            >
+              <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
+                Session
+              </p>
+
               {/* ── Session data toolbar ──
                   Export + import of the aggregate stores the session views
                   read from (sessionLog / winnerLog / ghostRuns). JSON is the
@@ -10530,12 +12003,11 @@ export default function BenchmarkVisualizer() {
                 };
                 const hasData =
                   Object.keys(sessionLog).length > 0 ||
-                  Object.keys(winnerLog).length > 0 ||
                   Object.keys(ghostRuns).length > 0;
                 const exportJson = () => {
                   if (!hasData) return;
                   downloadSessionBlob(
-                    buildSessionDataJson(sessionLog, winnerLog, ghostRuns),
+                    buildSessionDataJson(sessionLog, sessionLog, ghostRuns),
                     `codecookbook-session-${stamp()}.json`,
                     "application/json",
                   );
@@ -10565,11 +12037,14 @@ export default function BenchmarkVisualizer() {
                     // rather than merge — merging would silently double-count
                     // runs in the rolling-mean buckets.
                     setSessionLog(result.data.sessionLog);
-                    setWinnerLog(result.data.winnerLog);
+                    setWinnerLog(result.data.sessionLog);
                     setGhostRuns(result.data.ghostRuns);
+                    const migrated = migrateFlatSessionLog(result.data.sessionLog);
+                    setDetailedSessionLog(migrated);
                     try { localStorage.setItem("codecookbook.sessionLog", JSON.stringify(result.data.sessionLog)); } catch {}
                     try { localStorage.setItem("codecookbook.winnerLog",  JSON.stringify(result.data.winnerLog));  } catch {}
                     try { localStorage.setItem("codecookbook.ghostRuns",  JSON.stringify(result.data.ghostRuns));  } catch {}
+                    persistDetailedSessionLog(migrated);
                     const counts = Object.keys(result.data.sessionLog).length;
                     setSessionImportMsg({ kind: "ok", text: `Imported ${counts} data type${counts !== 1 ? "s" : ""} from ${file.name}` });
                   }).catch(err => {
@@ -10582,7 +12057,7 @@ export default function BenchmarkVisualizer() {
                   color: "var(--color-muted)", fontFamily: "monospace",
                 };
                 return (
-                  <div className="rounded-xl px-3 py-2 flex flex-wrap items-center gap-2 print:hidden" style={{ background: "var(--color-surface-1)", border: "1px solid var(--color-border)" }}>
+                  <div id="toc-session-data" className="rounded-xl px-3 py-2 flex flex-wrap items-center gap-2 print:hidden" style={{ background: "var(--color-surface-1)", border: "1px solid var(--color-border)" }}>
                     <span className="text-[9px] uppercase tracking-wider" style={{ color: "var(--color-muted)", fontWeight: 600 }}>
                       Session data
                     </span>
@@ -10614,6 +12089,20 @@ export default function BenchmarkVisualizer() {
                         style={{ display: "none" }}
                       />
                     </label>
+                    <button
+                      onClick={requestPurgeSession}
+                      disabled={!hasSessionAggregateData}
+                      title="Clear all session aggregates (curves, command center, winners, ghost runs, churn). Requires confirmation."
+                      style={{
+                        ...btnStyle,
+                        borderColor: hasSessionAggregateData ? "#ef5350" : "var(--color-border)",
+                        color: hasSessionAggregateData ? "#ef5350" : "var(--color-muted)",
+                        opacity: hasSessionAggregateData ? 1 : 0.4,
+                        cursor: hasSessionAggregateData ? "pointer" : "not-allowed",
+                      }}
+                    >
+                      Purge
+                    </button>
                     {sessionImportMsg && (
                       <span style={{
                         fontSize: 9, fontFamily: "monospace",
@@ -10627,78 +12116,56 @@ export default function BenchmarkVisualizer() {
                 );
               })()}
 
-              {/* Three at-a-glance numbers + best-per-type callouts. */}
-              <SessionSummary
-                log={sessionLog}
+              <SessionCommandCenter
+                log={detailedSessionLog}
                 runCount={runCount}
                 sessionStartedAt={sessionStartedAt}
                 algoNames={ALGO_NAMES}
                 algoColors={ALGO_COLORS}
+                onClear={requestPurgeSession}
               />
 
-              {/* Running log of winners across runs — broken out by data type.
-                  Persisted to localStorage; accumulates rolling means per
-                  (dataType, algoId, size) at the end of each successful run.
-                  `spaceMap` is the SessionLog (which carries meanSpaceBytes per
-                  bucket), used to compute the in-place % column on each row. */}
-              <WinnersLog
-                log={winnerLog}
-                spaceMap={sessionLog}
-                ghostRuns={ghostRuns}
-                algoNames={ALGO_NAMES}
-                algoColors={ALGO_COLORS}
-                onClear={() => {
-                  setWinnerLog({});
-                  try { localStorage.removeItem("codecookbook.winnerLog"); } catch { /* noop */ }
-                }}
-              />
-
-              {/* Empirical Big-O fit across the session — flags when a sort's
-                  measured slope drifts more than 0.2 from its theoretical
-                  complexity class. Useful sanity check for implementations. */}
-              <SessionBigO
-                log={sessionLog}
-                algoNames={ALGO_NAMES}
-                algoColors={ALGO_COLORS}
-                algoTime={ALGO_TIME}
-              />
-
-              {/* Session-wide head-to-head matrices. Like the per-run pair
-                  matrix, but tallying W/L across EVERY (dataType, n) bucket
-                  in the session, separately for time and aux memory. */}
-              <SessionMatrix
-                log={sessionLog}
-                algoNames={ALGO_NAMES}
-                algoColors={ALGO_COLORS}
-              />
+              <div id="toc-winners-log">
+                <WinnersLog
+                  log={sessionLog}
+                  detailedLog={detailedSessionLog}
+                  ghostRuns={ghostRuns}
+                  algoNames={ALGO_NAMES}
+                  algoColors={ALGO_COLORS}
+                  onClear={requestPurgeSession}
+                />
+              </div>
 
               {/* Session-wide aggregate speed + memory curves. Same shape as
                   the per-run curve, but persisted across every benchmark in
                   this session. Color by algorithm, dashed/dotted/solid by
                   integer/float/string so all three types overlay on one chart. */}
-              <SessionCurves
-                log={sessionLog}
-                algoNames={ALGO_NAMES}
-                algoColors={ALGO_COLORS}
-                onClear={() => {
-                  setSessionLog({});
-                  try { localStorage.removeItem("codecookbook.sessionLog"); } catch { /* noop */ }
-                }}
-              />
+              <div id="toc-session-curves">
+                <SessionCurves
+                  log={sessionLog}
+                  algoNames={ALGO_NAMES}
+                  algoColors={ALGO_COLORS}
+                  onClear={requestPurgeSession}
+                />
+              </div>
 
               {/* ── Sort network graph ──
-                  Cytoscape rendering of every (algorithm, data-type) measurement
-                  in the session. Each algo is a node connected to one of three
-                  data-type hubs by an edge whose color encodes speed (green =
-                  fastest of that algo's dtypes, red = slowest), width encodes
-                  memory (log-scaled across all edges), and line-style encodes
-                  the dtype convention (integer = dotted, float = dashed,
-                  string = solid — applied everywhere, see lib/dataTypeStyle.ts). */}
-              <SortNetworkGraph
-                log={sessionLog}
-                algoNames={ALGO_NAMES}
-                algoColors={ALGO_COLORS}
-              />
+                  Hidden until at least one normal Run completes OR a churn
+                  sweep saturates. Pre-completion the graph would just be
+                  mid-update noise; once a run is committed we have a coherent
+                  set of (algo, dtype, n) measurements to draw. The graph
+                  itself adds edge labels with the actual data values (time
+                  + n) on the highest-n edge per algo/dtype pair so the
+                  meaning of the encodings is legible at a glance. */}
+              {(runCount > 0 || churnComplete) && (
+                <div id="toc-sort-network">
+                  <SortNetworkGraph
+                    log={sessionLog}
+                    algoNames={ALGO_NAMES}
+                    algoColors={ALGO_COLORS}
+                  />
+                </div>
+              )}
 
               {/* ── 3D history view ──
                   Lower-left long-term-view: every stored ghost run rendered as
@@ -10711,7 +12178,7 @@ export default function BenchmarkVisualizer() {
                   actually readable). Hidden until at least one algorithm has
                   some history to show. */}
               {chartAlgos.length > 0 && (Object.values(ghostRuns).some(r => r.length > 0) || hasCurveData) && (
-                <div className="rounded-xl p-4" style={{ background: "var(--color-surface-1)", border: "1px solid var(--color-border)" }}>
+                <div id="toc-history-3d" className="rounded-xl p-4" style={{ background: "var(--color-surface-1)", border: "1px solid var(--color-border)" }}>
                   <div className="flex items-center justify-between mb-3">
                     <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
                       3D History
@@ -10728,22 +12195,518 @@ export default function BenchmarkVisualizer() {
                 </div>
               )}
             </div>
+      {/* ── Rankings section ── */}
+      {summaryResults.length > 0 && (
+        <div
+          id="toc-rankings"
+          ref={resultsRef}
+          className="px-5 py-4 overflow-x-auto"
+          style={{ borderTop: "1px solid var(--color-border)" }}
+        >
+          <p className="text-xs font-semibold uppercase tracking-wider mb-4" style={{ color: "var(--color-muted)" }}>
+            Rankings
+            {largestDone != null && <> · n={largestDone.toLocaleString()}</>}
+            {chartSizes.length > 1 && <span style={{ fontWeight: 400, textTransform: "none" }}> (largest)</span>}
+          </p>
+          {summaryResults.length > 0 && (() => {
+            const COL = { bl: "1px solid var(--color-border)", pl: 4 } as const;
+            const BAR_W = 40;
+            const longestName = Math.max(...tableRows.map(r => {
+              if (r.kind === "ref") return r.label.length;
+              if (r.id === "timsort-js") return (ALGO_NAMES["timsort-js"] ?? "TimSort (JS)").length;
+              return ALGO_NAMES[r.id]?.length ?? 0;
+            }));
+            const NAME_W = Math.ceil(longestName * 5.5) + 29;
+            const getBestSpace = (id: string) => {
+              const p = curveDataExt[id]?.find(pt => pt.n === largestDone);
+              if (p?.allocBytes && p.allocBytes > 0) return p.allocBytes;
+              if (p?.spaceBytes && p.spaceBytes > 0) return p.spaceBytes;
+              return largestDone ? theoreticalSpaceBytes(id, largestDone) : 0;
+            };
+            const spaceFastest = Math.min(
+              ...summaryResults.map(r => getBestSpace(r.id)).filter(v => v > 0 && v < Infinity)
+            );
+            const spaceSlowest = Math.max(...summaryResults.map(r => getBestSpace(r.id)), 1);
+            const CW  = 52;
+            const CSW = 72;
+            const colW = (w: number, i: number): React.CSSProperties => ({
+              width: w, flexShrink: 0, textAlign: "center", fontFamily: "monospace",
+              borderLeft: i > 0 ? COL.bl : undefined, paddingLeft: i > 0 ? COL.pl : 0, overflow: "hidden",
+            });
+            const cellHd = (i: number, w = CW): React.CSSProperties => ({
+              ...colW(w, i), fontSize: 8, color: "var(--color-muted)",
+            });
+            const cell = (color: string, i: number, w = CW): React.CSSProperties => ({
+              ...colW(w, i), color,
+            });
+            const handleSort = (col: SortCol) => {
+              if (sortCol === col) setSortDir(d => d === "asc" ? "desc" : "asc");
+              else { setSortCol(col); setSortDir("asc"); }
+            };
+            const sortIcon = (col: SortCol) => sortCol === col ? (sortDir === "asc" ? " ↑" : " ↓") : "";
+            const hdBtn = (col: SortCol, i: number, w = CW): React.CSSProperties => ({
+              ...cellHd(i, w),
+              cursor: "pointer", userSelect: "none", background: "none", border: "none", padding: 0,
+              color: sortCol === col ? "var(--color-text)" : "var(--color-muted)",
+            });
+            const algoSortKeys = new Map(summaryResults.map(r => {
+              const sv = getBestSpace(r.id);
+              const sr = sv > 0 && spaceFastest > 0 && spaceFastest < Infinity ? sv / spaceFastest : 0;
+              const tp = (curveDataExt[r.id] ?? []).filter(p => p.timeMs > 0).map(p => ({ n: p.n, val: p.timeMs }));
+              const sp = (curveDataExt[r.id] ?? []).filter(p => (p.allocBytes ?? p.spaceBytes ?? 0) > 0).map(p => ({ n: p.n, val: p.allocBytes ?? p.spaceBytes! }));
+              const tf = fitLogLog(tp);
+              const sf = fitLogLog(sp);
+              return [r.id, {
+                spaceVal: sv, spaceRatio: sr,
+                tLabel: tf?.label ?? (ALGO_TIME[r.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? ""),
+                sLabel: sf?.label ?? (ALGO_SPACE[r.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? ""),
+                fitK: tf?.k,
+              }];
+            }));
+            const algoName = (id: string) => ALGO_NAMES[id] ?? id;
+            const sortedAlgoRows = [...summaryResults.map(r => ({ ...r, kind: "algo" as const }))].sort((a, b) => {
+              const ak = algoSortKeys.get(a.id)!;
+              const bk = algoSortKeys.get(b.id)!;
+              let cmp = 0;
+              switch (sortCol) {
+                case "name":  cmp = algoName(a.id).localeCompare(algoName(b.id)); break;
+                case "speed":
+                case "time":  cmp = a.timeMs - b.timeMs; break;
+                case "tvsb":  cmp = a.timeMs - b.timeMs; break;
+                case "tbigo": cmp = ak.tLabel.localeCompare(bk.tLabel); break;
+                case "fit":   cmp = (ak.fitK ?? 0) - (bk.fitK ?? 0); break;
+                case "space": cmp = ak.spaceVal - bk.spaceVal; break;
+                case "svsb":  cmp = ak.spaceRatio - bk.spaceRatio; break;
+                case "sbigo": cmp = ak.sLabel.localeCompare(bk.sLabel); break;
+              }
+              return sortDir === "asc" ? cmp : -cmp;
+            });
+            const sortedTableRows: TableRow[] = [
+              ...sortedAlgoRows,
+              ...refRows.sort((a, b) => a.timeMs - b.timeMs),
+            ];
+            return (
+              <div style={{ fontSize: 10 }}>
+                <div className="flex items-center mb-1.5">
+                  <button onClick={() => handleSort("name")} style={{ width: NAME_W, flexShrink: 0, textAlign: "left", fontSize: 8, fontFamily: "monospace", cursor: "pointer", userSelect: "none", background: "none", border: "none", padding: "0 4px 0 18px", color: sortCol === "name" ? "var(--color-text)" : "var(--color-muted)" }}>
+                    name{sortIcon("name")}
+                  </button>
+                  <button onClick={() => handleSort("speed")} style={{ width: BAR_W, flexShrink: 0, textAlign: "center", fontSize: 8, fontFamily: "monospace", cursor: "pointer", userSelect: "none", background: "none", border: "none", padding: 0, color: sortCol === "speed" ? "var(--color-text)" : "var(--color-muted)" }}>
+                    speed{sortIcon("speed")}
+                  </button>
+                  <button onClick={() => handleSort("space")} style={{ width: BAR_W, flexShrink: 0, textAlign: "center", fontSize: 8, fontFamily: "monospace", cursor: "pointer", userSelect: "none", background: "none", border: "none", padding: 0, color: sortCol === "space" ? "var(--color-text)" : "var(--color-muted)" }}>
+                    space{sortIcon("space")}
+                  </button>
+                  <div style={{ display: "flex", borderLeft: COL.bl }}>
+                    <button style={hdBtn("time",  0)}      onClick={() => handleSort("time")}>time{sortIcon("time")}</button>
+                    <button style={hdBtn("tvsb",  1)}      onClick={() => handleSort("tvsb")}>t vs best{sortIcon("tvsb")}</button>
+                    <button style={hdBtn("tbigo", 1)}      onClick={() => handleSort("tbigo")}>t big O{sortIcon("tbigo")}</button>
+                    <button style={hdBtn("fit",   1)}      onClick={() => handleSort("fit")} title="Empirically fitted exponent k (time ∝ nᵏ)">fit nᵏ{sortIcon("fit")}</button>
+                    <div style={cellHd(1)}                 title="Coefficient of variation across the last GHOST_MAX runs at this n. Low (<5%) = rock-steady; medium (5–15%) = some jitter; high (>15%) = noisy or thermally-throttled. Needs ≥2 ghost runs at this n to compute.">stab.</div>
+                    <div style={cellHd(1)}                 title="Working-set cache level at the largest measured n">cache</div>
+                    <button style={hdBtn("space", 1, CSW)} onClick={() => handleSort("space")}>space{sortIcon("space")}</button>
+                    <button style={hdBtn("svsb",  1)}      onClick={() => handleSort("svsb")}>s vs best{sortIcon("svsb")}</button>
+                    <button style={hdBtn("sbigo", 1)}      onClick={() => handleSort("sbigo")}>s big O{sortIcon("sbigo")}</button>
+                  </div>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  {sortedTableRows.map((row) => {
+                    if (row.kind === "ref") {
+                      const barPct    = Math.min(100, summarySlowest > 0 ? (row.timeMs / summarySlowest) * 100 : 0);
+                      const overScale = row.timeMs > summarySlowest;
+                      return (
+                        <div key={`ref-${row.label}`} className="flex items-center" style={{ opacity: 0.6 }}>
+                          <div className="flex items-center gap-1.5" style={{ width: NAME_W, flexShrink: 0, paddingRight: 4 }}>
+                            <span className="font-mono" style={{ width: 14, textAlign: "right", flexShrink: 0, color: "var(--color-muted)" }}>—</span>
+                            <span className="font-mono italic truncate" style={{ color: row.color }}>{row.label}</span>
+                          </div>
+                          <div style={{ width: BAR_W, flexShrink: 0, padding: "0 5px", display: "flex", alignItems: "center" }}>
+                            <div style={{ flex: 1, borderRadius: 3, overflow: "hidden", background: "var(--color-surface-3)", height: 8 }}>
+                              <div style={{ width: `${overScale ? 100 : barPct}%`, height: "100%", borderRadius: 3, minWidth: 3, background: row.color, opacity: 0.4, backgroundImage: "repeating-linear-gradient(90deg, transparent, transparent 4px, rgba(0,0,0,0.25) 4px, rgba(0,0,0,0.25) 5px)" }} />
+                            </div>
+                          </div>
+                          <div style={{ width: BAR_W, flexShrink: 0, padding: "0 5px", display: "flex", alignItems: "center" }}>
+                            <div style={{ flex: 1, borderRadius: 3, background: "var(--color-surface-3)", height: 8 }} />
+                          </div>
+                          <div style={{ display: "flex", borderLeft: COL.bl }}>
+                            <div style={cell(row.color, 0)}>{overScale ? "↑" : ""}{fmtPredicted(row.timeMs)}</div>
+                            <div style={cell("var(--color-muted)", 1)}>{(row.timeMs / summaryFastest).toFixed(1)}×</div>
+                            <div style={cell("var(--color-muted)", 1)}>{row.label.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn")}</div>
+                            <div style={cell("var(--color-muted)", 1)}>—</div>
+                            <div style={cell("var(--color-muted)", 1)} title="Reference rows are projected, not measured — no CoV applies">—</div>
+                            <div style={cell("var(--color-muted)", 1)}>—</div>
+                            <div style={cell("var(--color-muted)", 1, CSW)}>—</div>
+                            <div style={cell("var(--color-muted)", 1)}>—</div>
+                            <div style={cell("var(--color-muted)", 1)}>—</div>
+                          </div>
+                        </div>
+                      );
+                    }
+                    const barPct     = summarySlowest > 0 ? Math.min(100, (row.timeMs / summarySlowest) * 100) : 0;
+                    const rankClr    = rankColor(row.rank, summaryResults.length);
+                    const dotColor   = ALGO_COLORS[row.id];
+                    const pt             = curveDataExt[row.id]?.find(p => p.n === largestDone);
+                    const spaceVal       = pt?.spaceBytes;
+                    const allocVal       = pt?.allocBytes;
+                    const spaceIsMeasured = spaceVal != null && spaceVal > 0;
+                    const allocIsMeasured = allocVal != null && allocVal > 0;
+                    const spaceTheo      = largestDone != null ? theoreticalSpaceBytes(row.id, largestDone) : null;
+                    const spaceForChart  = allocIsMeasured ? allocVal! : spaceIsMeasured ? spaceVal! : (spaceTheo ?? 0);
+                    const spaceRatio = spaceForChart > 0 && spaceFastest > 0 && spaceFastest < Infinity ? spaceForChart / spaceFastest : null;
+                    // Timed-out rows: display extrapolated time prefixed with
+                    // "~" in the state-swap color. Unfittable rows (no safe
+                    // points to extrapolate from) show ">budget" instead.
+                    const timeStr    = row.timedOut
+                      ? (row.unfittable ? `>${(CHURN_BUDGET_MS / 1000).toFixed(0)}s` : `~${fmtPredicted(row.timeMs)}`)
+                      : fmtTime(row.timeMs);
+                    const spRatioStr = spaceRatio != null ? (spaceRatio < 1.05 ? "—" : `${spaceRatio.toFixed(1)}×`) : "—";
+                    const timePts  = (curveDataExt[row.id] ?? []).filter(p => p.timeMs > 0).map(p => ({ n: p.n, val: p.timeMs }));
+                    const spacePts = (curveDataExt[row.id] ?? []).filter(p => (p.allocBytes ?? p.spaceBytes ?? 0) > 0).map(p => ({ n: p.n, val: p.allocBytes ?? p.spaceBytes! }));
+                    const timeFit  = fitLogLog(timePts);
+                    const spaceFit = fitLogLog(spacePts);
+                    const tBigOLabel = timeFit?.label ?? (ALGO_TIME[row.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? "—");
+                    const sBigOLabel = spaceFit?.label ?? (ALGO_SPACE[row.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? "—");
+                    const tPct = largestDone != null && timeFit ? timeFit.pctAt(largestDone, row.timeMs) : null;
+                    const sPct = largestDone != null && spaceFit && spaceVal ? spaceFit.pctAt(largestDone, spaceVal) : null;
+                    const isHoverT = hoverBigO?.id === row.id && hoverBigO.type === "time";
+                    const isHoverS = hoverBigO?.id === row.id && hoverBigO.type === "space";
+                    const fmtPct = (pct: number) => `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
+                    const canDl    = largestDone != null;
+                    const handleDl = () => {
+                      if (!largestDone) return;
+                      const n = largestDone;
+                      const spaceClz = ALGO_SPACE[row.id] ?? "unknown";
+                      let spaceBreakdown: Record<string, unknown>;
+                      if (spaceClz === "O(1)") {
+                        spaceBreakdown = { class: "O(1) — constant", explanation: "In-place sort. Uses only a fixed number of scalar variables regardless of n.", constant_overhead_bytes: 200 };
+                      } else if (spaceClz === "O(log n)") {
+                        const depth = Math.ceil(Math.log2(Math.max(n, 2)));
+                        spaceBreakdown = { class: "O(log n) — logarithmic", explanation: `Max call stack depth = ⌈log₂(${n})⌉ = ${depth} frames. Each frame ~64 bytes.`, max_recursion_depth: depth, bytes_per_frame: 64, total_bytes: depth * 64 };
+                      } else if (spaceClz === "O(n)") {
+                        spaceBreakdown = { class: "O(n) — linear", explanation: `Auxiliary array of n elements. ${n.toLocaleString()} × 8 bytes = ${(n * 8).toLocaleString()} bytes.`, auxiliary_elements: n, bytes_per_element: 8, total_bytes: n * 8 };
+                      } else {
+                        spaceBreakdown = { class: spaceClz, explanation: "See algorithm documentation.", theoretical_bytes: theoreticalSpaceBytes(row.id, n) };
+                      }
+                      const sampleCount = Math.min(Math.ceil(n * 0.05), 25);
+                      const inputSample = generateBenchmarkInput(sampleCount, "random");
+                      const sortedSample = SORT_FNS[row.id]?.([...inputSample]) ?? [...inputSample].sort((a, b) => a - b);
+                      const proof = { proof_type: "space_complexity_verification", algorithm: ALGO_NAMES[row.id], n, time_complexity: ALGO_TIME[row.id], space_complexity: spaceClz, space_breakdown: spaceBreakdown, measured_heap_delta_bytes: (spaceVal != null && spaceVal > 0) ? spaceVal : null, theoretical_bytes: theoreticalSpaceBytes(row.id, n), input_sample: { note: `${sampleCount} of ${n.toLocaleString()} elements (${sampleCount === 25 ? "capped at 25" : "5%"}). Uniform integers in [0, 10 000).`, count: sampleCount, values: inputSample, sorted: sortedSample }, generated_at: new Date().toISOString() };
+                      const blob = new Blob([JSON.stringify(proof, null, 2)], { type: "application/json" });
+                      const url  = URL.createObjectURL(blob);
+                      const a    = document.createElement("a");
+                      a.href = url; a.download = `space-proof-${row.id}-n${n}.json`; a.click();
+                      URL.revokeObjectURL(url);
+                    };
+                    return (
+                      <div
+                        key={row.id}
+                        className="flex items-center"
+                        style={row.timedOut ? { opacity: 0.55 } : undefined}
+                      >
+                        <div className="flex items-center gap-1.5" style={{ width: NAME_W, flexShrink: 0, paddingRight: 4 }}>
+                          <span
+                            className="font-mono"
+                            style={{ width: 14, textAlign: "right", flexShrink: 0, color: rankClr }}
+                            title={tiedWithPrev.has(row.id)
+                              ? `Statistically tied with rank ${row.rank - 1} — 95% CIs overlap`
+                              : undefined}
+                          >
+                            {tiedWithPrev.has(row.id) ? "≈" : row.rank}
+                          </span>
+                          <span style={{ width: 5, height: 5, borderRadius: "50%", background: dotColor, flexShrink: 0, display: "inline-block" }} />
+                          <span className="min-w-0 flex flex-col leading-tight">
+                            <WithAlgoTooltip id={row.id}>
+                              <span className="truncate flex items-center gap-1" style={{
+                                color: sampleProofs[row.id]?.failed ? "#ef5350" : "var(--color-text)",
+                                fontWeight: row.rank === 1 ? 600 : 400,
+                                textDecoration: sampleProofs[row.id]?.failed ? "line-through" : "none",
+                                textDecorationColor: "rgba(239,83,80,0.55)",
+                              }}>
+                                {ALGO_NAMES[row.id]}
+                                {wasmExecutedAlgos.has(row.id) && (
+                                  <span title={`This algorithm ran via the AssemblyScript-compiled Wasm module (int32 port). Marshalling cost is included in the timing.`} style={{
+                                    fontSize: 6, fontWeight: 700, fontFamily: "monospace",
+                                    padding: "0px 3px", borderRadius: 2, whiteSpace: "nowrap",
+                                    background: "rgba(124,106,247,0.18)",
+                                    border: "1px solid rgba(124,106,247,0.55)",
+                                    color: "var(--color-accent)", textDecoration: "none",
+                                    flexShrink: 0,
+                                  }}>
+                                    Wasm
+                                  </span>
+                                )}
+                                {webgpuExecutedAlgos.has(row.id) && (
+                                  <span title={`This algorithm ran via a WebGPU compute pipeline (int32). Buffer copy-in / copy-out cost is included in the timing.`} style={{
+                                    fontSize: 6, fontWeight: 700, fontFamily: "monospace",
+                                    padding: "0px 3px", borderRadius: 2, whiteSpace: "nowrap",
+                                    background: "rgba(34,197,194,0.18)",
+                                    border: "1px solid rgba(34,197,194,0.55)",
+                                    color: "#0e9b96", textDecoration: "none",
+                                    flexShrink: 0,
+                                  }}>
+                                    GPU
+                                  </span>
+                                )}
+                                {sampleProofs[row.id]?.failed && (
+                                  <span title={`Sort produced out-of-order output (sample index ${sampleProofs[row.id].badIdx}). Result is unreliable.`} style={{
+                                    fontSize: 6, fontWeight: 700, fontFamily: "monospace",
+                                    padding: "0px 3px", borderRadius: 2, whiteSpace: "nowrap",
+                                    background: "rgba(239,83,80,0.18)",
+                                    border: "1px solid rgba(239,83,80,0.55)",
+                                    color: "#ef5350", textDecoration: "none",
+                                    flexShrink: 0,
+                                  }}>
+                                    ✗ BROKEN
+                                  </span>
+                                )}
+                              </span>
+                            </WithAlgoTooltip>
+                            {has("research") && largestDone != null && (
+                              <button title={`Load worst-case input for ${ALGO_NAMES[row.id]}`} onClick={() => { const arr = makeAdversarialInput(row.id, Math.min(largestDone, 100)); alert(`Adversarial input for ${ALGO_NAMES[row.id]} (n=${Math.min(largestDone, 100)}):\n[${arr.slice(0,20).join(", ")}${arr.length > 20 ? "..." : ""}]`); }} style={{ fontSize: 7, padding: "0px 4px", borderRadius: 2, cursor: "pointer", background: "rgba(239,83,80,0.1)", border: "1px solid rgba(239,83,80,0.25)", color: "#ef5350", marginTop: 1 }}>⚠ worst</button>
+                            )}
+                            {row.timedOut && row.timedAtN != null && (
+                              <span style={{ fontSize: 8, color: "var(--color-state-swap)" }}>
+                                timed out at n={fmtN(row.timedAtN)}
+                              </span>
+                            )}
+                          </span>
+                        </div>
+                        <div style={{ width: BAR_W, flexShrink: 0, padding: "0 5px", display: "flex", alignItems: "center" }}>
+                          <div style={{ flex: 1, borderRadius: 3, overflow: "hidden", background: "var(--color-surface-3)", height: 8 }}>
+                            <div style={{ width: `${barPct}%`, height: "100%", borderRadius: 3, minWidth: barPct > 0 ? 3 : 0, background: dotColor, opacity: 0.85, transition: "width 0.35s ease" }} />
+                          </div>
+                        </div>
+                        <div style={{ width: BAR_W, flexShrink: 0, padding: "0 5px", display: "flex", alignItems: "center" }}>
+                          <div style={{ flex: 1, borderRadius: 3, overflow: "hidden", background: "var(--color-surface-3)", height: 8 }}>
+                            <div style={{ width: `${spaceForChart > 0 ? Math.min(100, (spaceForChart / spaceSlowest) * 100) : 0}%`, height: "100%", borderRadius: 3, minWidth: spaceForChart > 0 ? 3 : 0, background: dotColor, opacity: 0.5, transition: "width 0.35s ease" }} />
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", borderLeft: COL.bl }}>
+                          <div
+                            style={cell(row.timedOut ? "var(--color-state-swap)" : rankClr, 0)}
+                            title={row.timedOut
+                              ? (row.unfittable
+                                  ? "Algorithm timed out at this n and we have no safe earlier points to extrapolate from"
+                                  : "Extrapolated from the log-log fit on this algo's non-timed-out points")
+                              : undefined}
+                          >
+                            <span>{timeStr}</span>
+                            {has("advanced") && row.meanMs != null && (
+                              <span
+                                style={{ display: "block", fontSize: 7, color: "var(--color-muted)", marginTop: 1 }}
+                                title={row.ciHalfWidth != null && row.sampleCount != null
+                                  ? `Mean ± 95% confidence interval half-width over ${row.sampleCount} samples (Student-t). ratio=${((row.ciRatio ?? 0) * 100).toFixed(1)}% of mean`
+                                  : "Mean ± std dev across post-warmup rounds"}
+                              >
+                                μ {fmtTime(row.meanMs)}
+                                {row.ciHalfWidth != null
+                                  ? ` ±${fmtTime(row.ciHalfWidth)} 95%`
+                                  : row.stdDev != null
+                                    ? ` ±${fmtTime(row.stdDev)}`
+                                    : ""}
+                              </span>
+                            )}
+                          </div>
+                          {/* "× slower than 1st place" multiplier. The winner gets
+                              "0×" (zero times slower than itself) so the column's
+                              text width is consistent across all rows — previous
+                              "—" was one character and broke visual alignment. */}
+                          <div style={cell("var(--color-muted)", 1)}>{row.rank === 1 ? "0×" : `${(row.timeMs / summaryFastest).toFixed(1)}×`}</div>
+                          <div style={{ ...cell("var(--color-text)", 1), opacity: 0.75, cursor: "default" }} title={ALGO_TIME[row.id]} onMouseEnter={() => setHoverBigO({ id: row.id, type: "time" })} onMouseLeave={() => setHoverBigO(null)}>
+                            {isHoverT && tPct !== null ? fmtPct(tPct) : tBigOLabel}
+                          </div>
+                          <div style={{ ...cell("var(--color-muted)", 1), opacity: 0.8, cursor: "default" }} title={timeFit ? `Empirical fit: time ∝ n^${timeFit.k.toFixed(3)} (log-log regression)` : "Not enough data to fit"}>
+                            {timeFit ? `n${toSup(timeFit.k.toFixed(2))}` : "—"}
+                          </div>
+                          {/* stab. column — coefficient of variation across the
+                              algo's last GHOST_MAX ghost runs at this n. Reads
+                              every stored run's points[] for matches, builds the
+                              sample vector, returns CoV%. Color tiers: green
+                              <5%, amber 5-15%, red ≥15%. Falls through to "—"
+                              when fewer than 2 runs have a point at this n. */}
+                          {(() => {
+                            if (!largestDone) return <div style={cell("var(--color-muted)", 1)} title="No completed n to evaluate stability at yet">—</div>;
+                            const samples: number[] = [];
+                            for (const run of (ghostRuns[row.id] ?? [])) {
+                              for (const p of run.points) {
+                                if (p.n === largestDone && p.timeMs > 0) {
+                                  samples.push(p.timeMs);
+                                  break; // one sample per run per n
+                                }
+                              }
+                            }
+                            if (samples.length < 2) {
+                              return <div style={cell("var(--color-muted)", 1)} title={`Need ≥2 ghost runs at n=${largestDone.toLocaleString()} (have ${samples.length})`}>—</div>;
+                            }
+                            const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
+                            if (mean <= 0) return <div style={cell("var(--color-muted)", 1)} title="Mean ≤0 — can't compute CoV">—</div>;
+                            // Sample stdev (Bessel's correction — n-1 in denominator).
+                            const variance = samples.reduce((s, x) => s + (x - mean) ** 2, 0) / (samples.length - 1);
+                            const std = Math.sqrt(variance);
+                            const cov = (std / mean) * 100;
+                            const color = cov < 5 ? "#4db6ac" : cov < 15 ? "#ffb74d" : "#ef5350";
+                            const label = cov < 5 ? "stable" : cov < 15 ? "jittery" : "noisy";
+                            return (
+                              <div
+                                style={cell(color, 1)}
+                                title={`CoV = ${cov.toFixed(1)}% across ${samples.length} ghost run${samples.length !== 1 ? "s" : ""} at n=${largestDone.toLocaleString()} (mean ${fmtTime(mean)}, σ ${fmtTime(std)}) — ${label}`}
+                              >
+                                {cov.toFixed(0)}%
+                              </div>
+                            );
+                          })()}
+                          {(() => {
+                            if (!largestDone) return <div style={cell("var(--color-muted)", 1)}>—</div>;
+                            const cl = cacheLevel(row.id, largestDone);
+                            return <div style={cell(cl.color, 1)} title={`Array of ${largestDone.toLocaleString()} × 8B = ${fmtBytes(largestDone * 8)} working set → ${cl.label}`}>{cl.label}</div>;
+                          })()}
+                          <div style={{ ...cell("var(--color-text)", 1, CSW), opacity: 0.75 }} title={`aux ${ALGO_SPACE[row.id] ?? "—"} · total ${totalSpaceLabel(row.id)}`}>
+                            <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 1 }}>
+                              <span style={{ color: allocIsMeasured ? "#4db6ac" : "var(--color-muted)", fontFamily: "monospace", fontSize: "inherit" }} title="Auxiliary alloc: bytes counted via patched Array + typed-array constructors">
+                                {allocIsMeasured ? fmtBytes(allocVal!) : "—"} <span style={{ fontSize: 7 }}>aux</span>
+                              </span>
+                              {(() => {
+                                // Use heapDeltaBytes (real measurement only)
+                                // rather than spaceVal (which can carry a
+                                // theoretical estimate that'd false-flag the
+                                // verdict for unknown / custom sorts).
+                                const v = inPlaceVerdict(allocVal, pt?.heapDeltaBytes, largestDone ?? 0, row.id);
+                                if (!v) return null;
+                                return (
+                                  <span title={v.title} style={{ fontSize: 7, fontFamily: "monospace", fontWeight: 700, padding: "0 5px", borderRadius: 8, background: v.bg, color: v.color, cursor: "help" }}>
+                                    {v.label}
+                                  </span>
+                                );
+                              })()}
+                              {allocIsMeasured && largestDone != null && (
+                                <span style={{ fontSize: 7, fontFamily: "monospace", color: "#80cbc4", opacity: 0.85 }} title={`Total: auxiliary (${fmtBytes(allocVal!)}) + input (${fmtBytes(largestDone * 8)})`}>
+                                  {fmtBytes(allocVal! + largestDone * 8)} total
+                                </span>
+                              )}
+                              <span style={{ fontSize: 7, fontFamily: "monospace", color: spaceIsMeasured ? "#ffb74d" : "var(--color-muted)", opacity: 0.85 }} title="V8 heap delta (unreliable for fast sorts)">
+                                {spaceIsMeasured ? fmtBytes(spaceVal!) : "—"} heap Δ
+                              </span>
+                              <span style={{ fontSize: 7, fontFamily: "monospace", color: "var(--color-muted)", opacity: 0.7 }} title="Theoretical auxiliary: worst-case estimate from Big-O class">
+                                {spaceTheo != null ? fmtBytes(spaceTheo) : "—"} est. aux
+                                {canDl && has("research") && (
+                                  <> · <a onClick={handleDl} style={{ color: "var(--color-accent)", cursor: "pointer", textDecoration: "underline" }} title="Download space proof JSON">proof</a></>
+                                )}
+                              </span>
+                            </span>
+                          </div>
+                          <div style={cell("var(--color-muted)", 1)}>{spRatioStr}</div>
+                          <div style={{ ...cell("var(--color-text)", 1), opacity: 0.75, cursor: "default" }} title={ALGO_SPACE[row.id]} onMouseEnter={() => setHoverBigO({ id: row.id, type: "space" })} onMouseLeave={() => setHoverBigO(null)}>
+                            {isHoverS && sPct !== null ? fmtPct(sPct) : sBigOLabel}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* ── Time complexity section ── */}
+      {showRunOps && has("advanced") && (chartMode === "time" || chartMode === "space") && status === "done" && (
+        <div id="toc-time-complexity" className="px-5 py-4" style={{ borderTop: "1px solid var(--color-border)" }}>
+          <p className="text-xs font-semibold uppercase tracking-wider mb-4" style={{ color: "var(--color-muted)" }}>Time Complexity Analysis</p>
+          <MathPanel
+            data={curveDataExt}
+            algos={chartAlgos}
+            mode={chartMode}
+            sampleProofs={sampleProofs}
+          />
+        </div>
+      )}
           </div>
         </div>
 
-        {/* ── Right pane: performance curve ──
-            Must scroll independently or the Time Complexity Analysis section
-            at the bottom falls below the viewport on desktop and is unreachable. */}
+        {/* ── Right pane: live operations (churn or benchmark) ── */}
         <div className="lg:w-1/2 lg:h-full lg:overflow-y-auto border-l" style={{ borderColor: "var(--color-border)" }}>
 
           <div className="px-5 py-4 flex flex-col gap-4">
-            {/* Skeleton previews — show what will appear once the benchmark runs.
-                Visible only when we haven't run yet AND aren't currently running. */}
-            {!hasCurveData && status !== "running" && (
-              <ResultsSkeleton algoCount={Math.max(1, [...activeAlgos].length + enabledSavedSorts.length)} />
-            )}
-            {(hasCurveData || status === "running") && (
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--color-muted)" }}>
+                {showChurnOps ? "Permutation run" : showRunOps ? "Benchmark" : "Live"}
+              </p>
+            </div>
+
+            {showChurnOps && (
               <div
+                className="rounded-xl p-4 flex flex-col gap-3"
+                style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)" }}
+              >
+                {permutationStrategy === "ladder" ? (
+                  <ChurnTelemetry
+                    state={churnState}
+                    history={churnHistory}
+                    totals={churnTotals}
+                    algoNames={ALGO_NAMES}
+                    algoColors={ALGO_COLORS}
+                    contextLabels={churnContextLabels}
+                    runtimeMs={churnRuntimeMs}
+                    budgetMs={CHURN_BUDGET_MS}
+                    nMin={CHURN_N_MIN}
+                    nMax={churnNMax}
+                    dtypesRequired={CHURN_DTYPE_GATE}
+                    complete={churnComplete}
+                  />
+                ) : permutationStrategy === "ramp" ? (
+                  <RampTelemetry
+                    pool={[...activeAlgos]}
+                    sizes={sortedSizes}
+                    state={rampStateRef.current}
+                    totals={churnTotals}
+                    complete={churnComplete}
+                    algoNames={ALGO_NAMES}
+                    algoColors={ALGO_COLORS}
+                  />
+                ) : (
+                  <CoverageHeatmap
+                    grid={permutationGrid}
+                    mode={permutationStrategy}
+                    samplesPerCell={SPREAD_SAMPLES_PER_CELL}
+                    budgetTargetCI={BUDGET_TARGET_CI}
+                    budgetMinSamples={BUDGET_MIN_SAMPLES}
+                    budgetMaxSamples={BUDGET_MAX_SAMPLES}
+                    algoNames={ALGO_NAMES}
+                    algoColors={ALGO_COLORS}
+                  />
+                )}
+              </div>
+            )}
+
+            {showRunOps && status === "running" && (
+              <RunningDashboard
+                algos={runConfig?.algos ?? activeAlgos}
+                currentAlgo={currentAlgo}
+                currentN={currentN}
+                progress={progress}
+                curveData={curveData}
+                memSamples={memSamples}
+                sortPreviewSteps={currentAlgo ? (prerunSteps[currentAlgo] ?? null) : null}
+                sortPreviewLabels={prerunSampleLabels}
+                dataType={dataType}
+                configLine={`${[...scenarios].join(", ")} · ${rounds} round${rounds !== 1 ? "s" : ""} · ${warmup} warm-up${polymorphicMode ? " · polymorphic (int+float+string)" : (useWorkerIsolation ? " · worker isolation" : "")}${adversarialEnabled ? " · adversarial" : ""}${engine === "wasm" && wasmBundle != null ? " · engine: Wasm" : ""}${engine === "webgpu" && webgpuBundle?.ready ? " · engine: WebGPU" : ""}`}
+                algoNames={ALGO_NAMES}
+                algoColors={ALGO_COLORS}
+                onStop={stop}
+                stopPending={stopPending}
+                tabHidden={tabHiddenDuringRun}
+                workerIsolation={useWorkerIsolation}
+                runStartedAt={runStartedAt}
+                notifyOnDone={notifyOnDone}
+                onToggleNotify={toggleNotifyOnDone}
+                embedded
+              />
+            )}
+
+            {showRunOps && (hasCurveData || status === "running") && (
+              <div
+                id="toc-chart"
                 className="rounded-xl p-4"
                 style={resultsMaximized ? {
                   position: "fixed", inset: 0, zIndex: 9000,
@@ -11122,19 +13085,6 @@ export default function BenchmarkVisualizer() {
                   </>
                 )}
 
-                {/* Live sample sort — 10-element step animation for the active algorithm */}
-                {status === "running" && currentAlgo && (
-                  <RunningSortPreview
-                    algoId={currentAlgo}
-                    algoName={ALGO_NAMES[currentAlgo] ?? currentAlgo}
-                    color={ALGO_COLORS[currentAlgo] ?? "#888"}
-                    steps={prerunSteps[currentAlgo] ?? null}
-                    dataType={dataType}
-                    initialLabels={prerunSampleLabels}
-                    loop
-                  />
-                )}
-
                 {/* Placeholder while first result loads */}
                 {!hasCurveData && status === "running" && (
                   <div className="flex items-center justify-center"
@@ -11196,437 +13146,6 @@ export default function BenchmarkVisualizer() {
             )}
           </div>
 
-      {/* ── Rankings section ── */}
-      {summaryResults.length > 0 && (
-        <div
-          ref={resultsRef}
-          className="px-5 py-4 overflow-x-auto"
-          style={{ borderTop: "1px solid var(--color-border)" }}
-        >
-          <p className="text-xs font-semibold uppercase tracking-wider mb-4" style={{ color: "var(--color-muted)" }}>
-            Rankings
-            {largestDone != null && <> · n={largestDone.toLocaleString()}</>}
-            {chartSizes.length > 1 && <span style={{ fontWeight: 400, textTransform: "none" }}> (largest)</span>}
-          </p>
-          {summaryResults.length > 0 && (() => {
-            const COL = { bl: "1px solid var(--color-border)", pl: 4 } as const;
-            const BAR_W = 40;
-            const longestName = Math.max(...tableRows.map(r => {
-              if (r.kind === "ref") return r.label.length;
-              if (r.id === "timsort-js") return (ALGO_NAMES["timsort-js"] ?? "TimSort (JS)").length;
-              return ALGO_NAMES[r.id]?.length ?? 0;
-            }));
-            const NAME_W = Math.ceil(longestName * 5.5) + 29;
-            const getBestSpace = (id: string) => {
-              const p = curveDataExt[id]?.find(pt => pt.n === largestDone);
-              if (p?.allocBytes && p.allocBytes > 0) return p.allocBytes;
-              if (p?.spaceBytes && p.spaceBytes > 0) return p.spaceBytes;
-              return largestDone ? theoreticalSpaceBytes(id, largestDone) : 0;
-            };
-            const spaceFastest = Math.min(
-              ...summaryResults.map(r => getBestSpace(r.id)).filter(v => v > 0 && v < Infinity)
-            );
-            const spaceSlowest = Math.max(...summaryResults.map(r => getBestSpace(r.id)), 1);
-            const CW  = 52;
-            const CSW = 72;
-            const colW = (w: number, i: number): React.CSSProperties => ({
-              width: w, flexShrink: 0, textAlign: "center", fontFamily: "monospace",
-              borderLeft: i > 0 ? COL.bl : undefined, paddingLeft: i > 0 ? COL.pl : 0, overflow: "hidden",
-            });
-            const cellHd = (i: number, w = CW): React.CSSProperties => ({
-              ...colW(w, i), fontSize: 8, color: "var(--color-muted)",
-            });
-            const cell = (color: string, i: number, w = CW): React.CSSProperties => ({
-              ...colW(w, i), color,
-            });
-            const handleSort = (col: SortCol) => {
-              if (sortCol === col) setSortDir(d => d === "asc" ? "desc" : "asc");
-              else { setSortCol(col); setSortDir("asc"); }
-            };
-            const sortIcon = (col: SortCol) => sortCol === col ? (sortDir === "asc" ? " ↑" : " ↓") : "";
-            const hdBtn = (col: SortCol, i: number, w = CW): React.CSSProperties => ({
-              ...cellHd(i, w),
-              cursor: "pointer", userSelect: "none", background: "none", border: "none", padding: 0,
-              color: sortCol === col ? "var(--color-text)" : "var(--color-muted)",
-            });
-            const algoSortKeys = new Map(summaryResults.map(r => {
-              const sv = getBestSpace(r.id);
-              const sr = sv > 0 && spaceFastest > 0 && spaceFastest < Infinity ? sv / spaceFastest : 0;
-              const tp = (curveDataExt[r.id] ?? []).filter(p => p.timeMs > 0).map(p => ({ n: p.n, val: p.timeMs }));
-              const sp = (curveDataExt[r.id] ?? []).filter(p => (p.allocBytes ?? p.spaceBytes ?? 0) > 0).map(p => ({ n: p.n, val: p.allocBytes ?? p.spaceBytes! }));
-              const tf = fitLogLog(tp);
-              const sf = fitLogLog(sp);
-              return [r.id, {
-                spaceVal: sv, spaceRatio: sr,
-                tLabel: tf?.label ?? (ALGO_TIME[r.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? ""),
-                sLabel: sf?.label ?? (ALGO_SPACE[r.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? ""),
-                fitK: tf?.k,
-              }];
-            }));
-            const algoName = (id: string) => ALGO_NAMES[id] ?? id;
-            const sortedAlgoRows = [...summaryResults.map(r => ({ ...r, kind: "algo" as const }))].sort((a, b) => {
-              const ak = algoSortKeys.get(a.id)!;
-              const bk = algoSortKeys.get(b.id)!;
-              let cmp = 0;
-              switch (sortCol) {
-                case "name":  cmp = algoName(a.id).localeCompare(algoName(b.id)); break;
-                case "speed":
-                case "time":  cmp = a.timeMs - b.timeMs; break;
-                case "tvsb":  cmp = a.timeMs - b.timeMs; break;
-                case "tbigo": cmp = ak.tLabel.localeCompare(bk.tLabel); break;
-                case "fit":   cmp = (ak.fitK ?? 0) - (bk.fitK ?? 0); break;
-                case "space": cmp = ak.spaceVal - bk.spaceVal; break;
-                case "svsb":  cmp = ak.spaceRatio - bk.spaceRatio; break;
-                case "sbigo": cmp = ak.sLabel.localeCompare(bk.sLabel); break;
-              }
-              return sortDir === "asc" ? cmp : -cmp;
-            });
-            const sortedTableRows: TableRow[] = [
-              ...sortedAlgoRows,
-              ...refRows.sort((a, b) => a.timeMs - b.timeMs),
-            ];
-            return (
-              <div style={{ fontSize: 10 }}>
-                <div className="flex items-center mb-1.5">
-                  <button onClick={() => handleSort("name")} style={{ width: NAME_W, flexShrink: 0, textAlign: "left", fontSize: 8, fontFamily: "monospace", cursor: "pointer", userSelect: "none", background: "none", border: "none", padding: "0 4px 0 18px", color: sortCol === "name" ? "var(--color-text)" : "var(--color-muted)" }}>
-                    name{sortIcon("name")}
-                  </button>
-                  <button onClick={() => handleSort("speed")} style={{ width: BAR_W, flexShrink: 0, textAlign: "center", fontSize: 8, fontFamily: "monospace", cursor: "pointer", userSelect: "none", background: "none", border: "none", padding: 0, color: sortCol === "speed" ? "var(--color-text)" : "var(--color-muted)" }}>
-                    speed{sortIcon("speed")}
-                  </button>
-                  <button onClick={() => handleSort("space")} style={{ width: BAR_W, flexShrink: 0, textAlign: "center", fontSize: 8, fontFamily: "monospace", cursor: "pointer", userSelect: "none", background: "none", border: "none", padding: 0, color: sortCol === "space" ? "var(--color-text)" : "var(--color-muted)" }}>
-                    space{sortIcon("space")}
-                  </button>
-                  <div style={{ display: "flex", borderLeft: COL.bl }}>
-                    <button style={hdBtn("time",  0)}      onClick={() => handleSort("time")}>time{sortIcon("time")}</button>
-                    <button style={hdBtn("tvsb",  1)}      onClick={() => handleSort("tvsb")}>t vs best{sortIcon("tvsb")}</button>
-                    <button style={hdBtn("tbigo", 1)}      onClick={() => handleSort("tbigo")}>t big O{sortIcon("tbigo")}</button>
-                    <button style={hdBtn("fit",   1)}      onClick={() => handleSort("fit")} title="Empirically fitted exponent k (time ∝ nᵏ)">fit nᵏ{sortIcon("fit")}</button>
-                    <div style={cellHd(1)}                 title="Coefficient of variation across the last GHOST_MAX runs at this n. Low (<5%) = rock-steady; medium (5–15%) = some jitter; high (>15%) = noisy or thermally-throttled. Needs ≥2 ghost runs at this n to compute.">stab.</div>
-                    <div style={cellHd(1)}                 title="Working-set cache level at the largest measured n">cache</div>
-                    <button style={hdBtn("space", 1, CSW)} onClick={() => handleSort("space")}>space{sortIcon("space")}</button>
-                    <button style={hdBtn("svsb",  1)}      onClick={() => handleSort("svsb")}>s vs best{sortIcon("svsb")}</button>
-                    <button style={hdBtn("sbigo", 1)}      onClick={() => handleSort("sbigo")}>s big O{sortIcon("sbigo")}</button>
-                  </div>
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  {largestDone !== null && (() => {
-                    const timedOutRows = (runConfig?.algos ?? []).filter(id =>
-                      curveDataExt[id]?.some(p => p.n === largestDone && p.timedOut)
-                    );
-                    if (timedOutRows.length === 0) return null;
-                    return timedOutRows.map(id => {
-                      const safePts = (curveDataExt[id] ?? []).filter(p => !p.timedOut && p.timeMs > 0).map(p => ({ n: p.n, val: p.timeMs }));
-                      const fit = fitLogLog(safePts);
-                      const timedN = curveDataExt[id]?.find(p => p.n === largestDone && p.timedOut)?.n;
-                      const estMs = fit ? fit.k * fit.fn(largestDone) : null;
-                      const dotColor = ALGO_COLORS[id] ?? "#888";
-                      return (
-                        <div key={`timed-${id}`} className="flex items-center" style={{ opacity: 0.5 }}>
-                          <div className="flex items-center gap-1.5" style={{ width: NAME_W, flexShrink: 0, paddingRight: 4 }}>
-                            <span className="font-mono" style={{ width: 14, textAlign: "right", flexShrink: 0, color: "var(--color-muted)" }}>—</span>
-                            <span style={{ width: 5, height: 5, borderRadius: "50%", background: dotColor, flexShrink: 0, display: "inline-block" }} />
-                            <span className="min-w-0 flex flex-col leading-tight">
-                              <span className="truncate" style={{ color: "var(--color-text)" }}>{ALGO_NAMES[id]}</span>
-                              <span style={{ fontSize: 8, color: "var(--color-state-swap)" }}>timed out at n={timedN != null ? fmtN(timedN) : "?"}</span>
-                            </span>
-                          </div>
-                          <div style={{ width: BAR_W, flexShrink: 0, padding: "0 5px", display: "flex", alignItems: "center" }}>
-                            <div style={{ flex: 1, borderRadius: 3, overflow: "hidden", background: "var(--color-surface-3)", height: 8 }}>
-                              <div style={{ width: "100%", height: "100%", borderRadius: 3, background: "var(--color-state-swap)", opacity: 0.4 }} />
-                            </div>
-                          </div>
-                          <div style={{ width: BAR_W, flexShrink: 0 }} />
-                          <div style={{ display: "flex", borderLeft: COL.bl }}>
-                            <div style={cell("var(--color-state-swap)", 0)} title={estMs != null ? `Extrapolated from fit on non-timed-out points` : "Not enough data to estimate"}>
-                              {estMs != null ? `~${fmtPredicted(estMs)}` : ">10 s"}
-                            </div>
-                            <div style={cell("var(--color-muted)", 1)}>{estMs != null ? `${(estMs / summaryFastest).toFixed(0)}×` : "—"}</div>
-                            <div style={cell("var(--color-muted)", 1)}>{ALGO_TIME[id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? "—"}</div>
-                            <div style={cell("var(--color-muted)", 1)}>{fit?.label ?? "—"}</div>
-                            <div style={cell("var(--color-muted)", 1)} title="No CoV: the algo timed out and isn't sampled in ghost runs at this n">—</div>
-                            <div style={cell("var(--color-muted)", 1)}>—</div>
-                            <div style={cell("var(--color-muted)", 1, CSW)}>—</div>
-                            <div style={cell("var(--color-muted)", 1)}>—</div>
-                            <div style={cell("var(--color-muted)", 1)}>—</div>
-                          </div>
-                        </div>
-                      );
-                    });
-                  })()}
-                  {sortedTableRows.map((row) => {
-                    if (row.kind === "ref") {
-                      const barPct    = Math.min(100, summarySlowest > 0 ? (row.timeMs / summarySlowest) * 100 : 0);
-                      const overScale = row.timeMs > summarySlowest;
-                      return (
-                        <div key={`ref-${row.label}`} className="flex items-center" style={{ opacity: 0.6 }}>
-                          <div className="flex items-center gap-1.5" style={{ width: NAME_W, flexShrink: 0, paddingRight: 4 }}>
-                            <span className="font-mono" style={{ width: 14, textAlign: "right", flexShrink: 0, color: "var(--color-muted)" }}>—</span>
-                            <span className="font-mono italic truncate" style={{ color: row.color }}>{row.label}</span>
-                          </div>
-                          <div style={{ width: BAR_W, flexShrink: 0, padding: "0 5px", display: "flex", alignItems: "center" }}>
-                            <div style={{ flex: 1, borderRadius: 3, overflow: "hidden", background: "var(--color-surface-3)", height: 8 }}>
-                              <div style={{ width: `${overScale ? 100 : barPct}%`, height: "100%", borderRadius: 3, minWidth: 3, background: row.color, opacity: 0.4, backgroundImage: "repeating-linear-gradient(90deg, transparent, transparent 4px, rgba(0,0,0,0.25) 4px, rgba(0,0,0,0.25) 5px)" }} />
-                            </div>
-                          </div>
-                          <div style={{ width: BAR_W, flexShrink: 0, padding: "0 5px", display: "flex", alignItems: "center" }}>
-                            <div style={{ flex: 1, borderRadius: 3, background: "var(--color-surface-3)", height: 8 }} />
-                          </div>
-                          <div style={{ display: "flex", borderLeft: COL.bl }}>
-                            <div style={cell(row.color, 0)}>{overScale ? "↑" : ""}{fmtPredicted(row.timeMs)}</div>
-                            <div style={cell("var(--color-muted)", 1)}>{(row.timeMs / summaryFastest).toFixed(1)}×</div>
-                            <div style={cell("var(--color-muted)", 1)}>{row.label.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn")}</div>
-                            <div style={cell("var(--color-muted)", 1)}>—</div>
-                            <div style={cell("var(--color-muted)", 1)} title="Reference rows are projected, not measured — no CoV applies">—</div>
-                            <div style={cell("var(--color-muted)", 1)}>—</div>
-                            <div style={cell("var(--color-muted)", 1, CSW)}>—</div>
-                            <div style={cell("var(--color-muted)", 1)}>—</div>
-                            <div style={cell("var(--color-muted)", 1)}>—</div>
-                          </div>
-                        </div>
-                      );
-                    }
-                    const barPct     = summarySlowest > 0 ? (row.timeMs / summarySlowest) * 100 : 0;
-                    const rankClr    = rankColor(row.rank, summaryResults.length);
-                    const dotColor   = ALGO_COLORS[row.id];
-                    const pt             = curveDataExt[row.id]?.find(p => p.n === largestDone);
-                    const spaceVal       = pt?.spaceBytes;
-                    const allocVal       = pt?.allocBytes;
-                    const spaceIsMeasured = spaceVal != null && spaceVal > 0;
-                    const allocIsMeasured = allocVal != null && allocVal > 0;
-                    const spaceTheo      = largestDone != null ? theoreticalSpaceBytes(row.id, largestDone) : null;
-                    const spaceForChart  = allocIsMeasured ? allocVal! : spaceIsMeasured ? spaceVal! : (spaceTheo ?? 0);
-                    const spaceRatio = spaceForChart > 0 && spaceFastest > 0 && spaceFastest < Infinity ? spaceForChart / spaceFastest : null;
-                    const timeStr    = fmtTime(row.timeMs);
-                    const spRatioStr = spaceRatio != null ? (spaceRatio < 1.05 ? "—" : `${spaceRatio.toFixed(1)}×`) : "—";
-                    const timePts  = (curveDataExt[row.id] ?? []).filter(p => p.timeMs > 0).map(p => ({ n: p.n, val: p.timeMs }));
-                    const spacePts = (curveDataExt[row.id] ?? []).filter(p => (p.allocBytes ?? p.spaceBytes ?? 0) > 0).map(p => ({ n: p.n, val: p.allocBytes ?? p.spaceBytes! }));
-                    const timeFit  = fitLogLog(timePts);
-                    const spaceFit = fitLogLog(spacePts);
-                    const tBigOLabel = timeFit?.label ?? (ALGO_TIME[row.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? "—");
-                    const sBigOLabel = spaceFit?.label ?? (ALGO_SPACE[row.id]?.replace(/^O\(/, "").replace(/\)$/, "").replace(/ log n/g, "logn") ?? "—");
-                    const tPct = largestDone != null && timeFit ? timeFit.pctAt(largestDone, row.timeMs) : null;
-                    const sPct = largestDone != null && spaceFit && spaceVal ? spaceFit.pctAt(largestDone, spaceVal) : null;
-                    const isHoverT = hoverBigO?.id === row.id && hoverBigO.type === "time";
-                    const isHoverS = hoverBigO?.id === row.id && hoverBigO.type === "space";
-                    const fmtPct = (pct: number) => `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
-                    const canDl    = largestDone != null;
-                    const handleDl = () => {
-                      if (!largestDone) return;
-                      const n = largestDone;
-                      const spaceClz = ALGO_SPACE[row.id] ?? "unknown";
-                      let spaceBreakdown: Record<string, unknown>;
-                      if (spaceClz === "O(1)") {
-                        spaceBreakdown = { class: "O(1) — constant", explanation: "In-place sort. Uses only a fixed number of scalar variables regardless of n.", constant_overhead_bytes: 200 };
-                      } else if (spaceClz === "O(log n)") {
-                        const depth = Math.ceil(Math.log2(Math.max(n, 2)));
-                        spaceBreakdown = { class: "O(log n) — logarithmic", explanation: `Max call stack depth = ⌈log₂(${n})⌉ = ${depth} frames. Each frame ~64 bytes.`, max_recursion_depth: depth, bytes_per_frame: 64, total_bytes: depth * 64 };
-                      } else if (spaceClz === "O(n)") {
-                        spaceBreakdown = { class: "O(n) — linear", explanation: `Auxiliary array of n elements. ${n.toLocaleString()} × 8 bytes = ${(n * 8).toLocaleString()} bytes.`, auxiliary_elements: n, bytes_per_element: 8, total_bytes: n * 8 };
-                      } else {
-                        spaceBreakdown = { class: spaceClz, explanation: "See algorithm documentation.", theoretical_bytes: theoreticalSpaceBytes(row.id, n) };
-                      }
-                      const sampleCount = Math.min(Math.ceil(n * 0.05), 25);
-                      const inputSample = generateBenchmarkInput(sampleCount, "random");
-                      const sortedSample = SORT_FNS[row.id]?.([...inputSample]) ?? [...inputSample].sort((a, b) => a - b);
-                      const proof = { proof_type: "space_complexity_verification", algorithm: ALGO_NAMES[row.id], n, time_complexity: ALGO_TIME[row.id], space_complexity: spaceClz, space_breakdown: spaceBreakdown, measured_heap_delta_bytes: (spaceVal != null && spaceVal > 0) ? spaceVal : null, theoretical_bytes: theoreticalSpaceBytes(row.id, n), input_sample: { note: `${sampleCount} of ${n.toLocaleString()} elements (${sampleCount === 25 ? "capped at 25" : "5%"}). Uniform integers in [0, 10 000).`, count: sampleCount, values: inputSample, sorted: sortedSample }, generated_at: new Date().toISOString() };
-                      const blob = new Blob([JSON.stringify(proof, null, 2)], { type: "application/json" });
-                      const url  = URL.createObjectURL(blob);
-                      const a    = document.createElement("a");
-                      a.href = url; a.download = `space-proof-${row.id}-n${n}.json`; a.click();
-                      URL.revokeObjectURL(url);
-                    };
-                    return (
-                      <div key={row.id} className="flex items-center">
-                        <div className="flex items-center gap-1.5" style={{ width: NAME_W, flexShrink: 0, paddingRight: 4 }}>
-                          <span className="font-mono" style={{ width: 14, textAlign: "right", flexShrink: 0, color: rankClr }}>{row.rank}</span>
-                          <span style={{ width: 5, height: 5, borderRadius: "50%", background: dotColor, flexShrink: 0, display: "inline-block" }} />
-                          <span className="min-w-0 flex flex-col leading-tight">
-                            <WithAlgoTooltip id={row.id}>
-                              <span className="truncate flex items-center gap-1" style={{
-                                color: sampleProofs[row.id]?.failed ? "#ef5350" : "var(--color-text)",
-                                fontWeight: row.rank === 1 ? 600 : 400,
-                                textDecoration: sampleProofs[row.id]?.failed ? "line-through" : "none",
-                                textDecorationColor: "rgba(239,83,80,0.55)",
-                              }}>
-                                {ALGO_NAMES[row.id]}
-                                {wasmExecutedAlgos.has(row.id) && (
-                                  <span title={`This algorithm ran via the AssemblyScript-compiled Wasm module (int32 port). Marshalling cost is included in the timing.`} style={{
-                                    fontSize: 6, fontWeight: 700, fontFamily: "monospace",
-                                    padding: "0px 3px", borderRadius: 2, whiteSpace: "nowrap",
-                                    background: "rgba(124,106,247,0.18)",
-                                    border: "1px solid rgba(124,106,247,0.55)",
-                                    color: "var(--color-accent)", textDecoration: "none",
-                                    flexShrink: 0,
-                                  }}>
-                                    Wasm
-                                  </span>
-                                )}
-                                {webgpuExecutedAlgos.has(row.id) && (
-                                  <span title={`This algorithm ran via a WebGPU compute pipeline (int32). Buffer copy-in / copy-out cost is included in the timing.`} style={{
-                                    fontSize: 6, fontWeight: 700, fontFamily: "monospace",
-                                    padding: "0px 3px", borderRadius: 2, whiteSpace: "nowrap",
-                                    background: "rgba(34,197,194,0.18)",
-                                    border: "1px solid rgba(34,197,194,0.55)",
-                                    color: "#0e9b96", textDecoration: "none",
-                                    flexShrink: 0,
-                                  }}>
-                                    GPU
-                                  </span>
-                                )}
-                                {sampleProofs[row.id]?.failed && (
-                                  <span title={`Sort produced out-of-order output (sample index ${sampleProofs[row.id].badIdx}). Result is unreliable.`} style={{
-                                    fontSize: 6, fontWeight: 700, fontFamily: "monospace",
-                                    padding: "0px 3px", borderRadius: 2, whiteSpace: "nowrap",
-                                    background: "rgba(239,83,80,0.18)",
-                                    border: "1px solid rgba(239,83,80,0.55)",
-                                    color: "#ef5350", textDecoration: "none",
-                                    flexShrink: 0,
-                                  }}>
-                                    ✗ BROKEN
-                                  </span>
-                                )}
-                              </span>
-                            </WithAlgoTooltip>
-                            {has("research") && largestDone != null && (
-                              <button title={`Load worst-case input for ${ALGO_NAMES[row.id]}`} onClick={() => { const arr = makeAdversarialInput(row.id, Math.min(largestDone, 100)); alert(`Adversarial input for ${ALGO_NAMES[row.id]} (n=${Math.min(largestDone, 100)}):\n[${arr.slice(0,20).join(", ")}${arr.length > 20 ? "..." : ""}]`); }} style={{ fontSize: 7, padding: "0px 4px", borderRadius: 2, cursor: "pointer", background: "rgba(239,83,80,0.1)", border: "1px solid rgba(239,83,80,0.25)", color: "#ef5350", marginTop: 1 }}>⚠ worst</button>
-                            )}
-                          </span>
-                        </div>
-                        <div style={{ width: BAR_W, flexShrink: 0, padding: "0 5px", display: "flex", alignItems: "center" }}>
-                          <div style={{ flex: 1, borderRadius: 3, overflow: "hidden", background: "var(--color-surface-3)", height: 8 }}>
-                            <div style={{ width: `${barPct}%`, height: "100%", borderRadius: 3, minWidth: barPct > 0 ? 3 : 0, background: dotColor, opacity: 0.85, transition: "width 0.35s ease" }} />
-                          </div>
-                        </div>
-                        <div style={{ width: BAR_W, flexShrink: 0, padding: "0 5px", display: "flex", alignItems: "center" }}>
-                          <div style={{ flex: 1, borderRadius: 3, overflow: "hidden", background: "var(--color-surface-3)", height: 8 }}>
-                            <div style={{ width: `${spaceForChart > 0 ? Math.min(100, (spaceForChart / spaceSlowest) * 100) : 0}%`, height: "100%", borderRadius: 3, minWidth: spaceForChart > 0 ? 3 : 0, background: dotColor, opacity: 0.5, transition: "width 0.35s ease" }} />
-                          </div>
-                        </div>
-                        <div style={{ display: "flex", borderLeft: COL.bl }}>
-                          <div style={cell(rankClr, 0)}>
-                            <span>{timeStr}</span>
-                            {has("advanced") && row.meanMs != null && (
-                              <span style={{ display: "block", fontSize: 7, color: "var(--color-muted)", marginTop: 1 }}>μ {fmtTime(row.meanMs)}{row.stdDev != null ? ` ±${fmtTime(row.stdDev)}` : ""}</span>
-                            )}
-                          </div>
-                          {/* "× slower than 1st place" multiplier. The winner gets
-                              "0×" (zero times slower than itself) so the column's
-                              text width is consistent across all rows — previous
-                              "—" was one character and broke visual alignment. */}
-                          <div style={cell("var(--color-muted)", 1)}>{row.rank === 1 ? "0×" : `${(row.timeMs / summaryFastest).toFixed(1)}×`}</div>
-                          <div style={{ ...cell("var(--color-text)", 1), opacity: 0.75, cursor: "default" }} title={ALGO_TIME[row.id]} onMouseEnter={() => setHoverBigO({ id: row.id, type: "time" })} onMouseLeave={() => setHoverBigO(null)}>
-                            {isHoverT && tPct !== null ? fmtPct(tPct) : tBigOLabel}
-                          </div>
-                          <div style={{ ...cell("var(--color-muted)", 1), opacity: 0.8, cursor: "default" }} title={timeFit ? `Empirical fit: time ∝ n^${timeFit.k.toFixed(3)} (log-log regression)` : "Not enough data to fit"}>
-                            {timeFit ? `n${toSup(timeFit.k.toFixed(2))}` : "—"}
-                          </div>
-                          {/* stab. column — coefficient of variation across the
-                              algo's last GHOST_MAX ghost runs at this n. Reads
-                              every stored run's points[] for matches, builds the
-                              sample vector, returns CoV%. Color tiers: green
-                              <5%, amber 5-15%, red ≥15%. Falls through to "—"
-                              when fewer than 2 runs have a point at this n. */}
-                          {(() => {
-                            if (!largestDone) return <div style={cell("var(--color-muted)", 1)} title="No completed n to evaluate stability at yet">—</div>;
-                            const samples: number[] = [];
-                            for (const run of (ghostRuns[row.id] ?? [])) {
-                              for (const p of run.points) {
-                                if (p.n === largestDone && p.timeMs > 0) {
-                                  samples.push(p.timeMs);
-                                  break; // one sample per run per n
-                                }
-                              }
-                            }
-                            if (samples.length < 2) {
-                              return <div style={cell("var(--color-muted)", 1)} title={`Need ≥2 ghost runs at n=${largestDone.toLocaleString()} (have ${samples.length})`}>—</div>;
-                            }
-                            const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
-                            if (mean <= 0) return <div style={cell("var(--color-muted)", 1)} title="Mean ≤0 — can't compute CoV">—</div>;
-                            // Sample stdev (Bessel's correction — n-1 in denominator).
-                            const variance = samples.reduce((s, x) => s + (x - mean) ** 2, 0) / (samples.length - 1);
-                            const std = Math.sqrt(variance);
-                            const cov = (std / mean) * 100;
-                            const color = cov < 5 ? "#4db6ac" : cov < 15 ? "#ffb74d" : "#ef5350";
-                            const label = cov < 5 ? "stable" : cov < 15 ? "jittery" : "noisy";
-                            return (
-                              <div
-                                style={cell(color, 1)}
-                                title={`CoV = ${cov.toFixed(1)}% across ${samples.length} ghost run${samples.length !== 1 ? "s" : ""} at n=${largestDone.toLocaleString()} (mean ${fmtTime(mean)}, σ ${fmtTime(std)}) — ${label}`}
-                              >
-                                {cov.toFixed(0)}%
-                              </div>
-                            );
-                          })()}
-                          {(() => {
-                            if (!largestDone) return <div style={cell("var(--color-muted)", 1)}>—</div>;
-                            const cl = cacheLevel(row.id, largestDone);
-                            return <div style={cell(cl.color, 1)} title={`Array of ${largestDone.toLocaleString()} × 8B = ${fmtBytes(largestDone * 8)} working set → ${cl.label}`}>{cl.label}</div>;
-                          })()}
-                          <div style={{ ...cell("var(--color-text)", 1, CSW), opacity: 0.75 }} title={`aux ${ALGO_SPACE[row.id] ?? "—"} · total ${totalSpaceLabel(row.id)}`}>
-                            <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 1 }}>
-                              <span style={{ color: allocIsMeasured ? "#4db6ac" : "var(--color-muted)", fontFamily: "monospace", fontSize: "inherit" }} title="Auxiliary alloc: bytes counted via patched Array + typed-array constructors">
-                                {allocIsMeasured ? fmtBytes(allocVal!) : "—"} <span style={{ fontSize: 7 }}>aux</span>
-                              </span>
-                              {(() => {
-                                // Use heapDeltaBytes (real measurement only)
-                                // rather than spaceVal (which can carry a
-                                // theoretical estimate that'd false-flag the
-                                // verdict for unknown / custom sorts).
-                                const v = inPlaceVerdict(allocVal, pt?.heapDeltaBytes, largestDone ?? 0);
-                                if (!v) return null;
-                                return (
-                                  <span title={v.title} style={{ fontSize: 7, fontFamily: "monospace", fontWeight: 700, padding: "0 5px", borderRadius: 8, background: v.bg, color: v.color, cursor: "help" }}>
-                                    {v.label}
-                                  </span>
-                                );
-                              })()}
-                              {allocIsMeasured && largestDone != null && (
-                                <span style={{ fontSize: 7, fontFamily: "monospace", color: "#80cbc4", opacity: 0.85 }} title={`Total: auxiliary (${fmtBytes(allocVal!)}) + input (${fmtBytes(largestDone * 8)})`}>
-                                  {fmtBytes(allocVal! + largestDone * 8)} total
-                                </span>
-                              )}
-                              <span style={{ fontSize: 7, fontFamily: "monospace", color: spaceIsMeasured ? "#ffb74d" : "var(--color-muted)", opacity: 0.85 }} title="V8 heap delta (unreliable for fast sorts)">
-                                {spaceIsMeasured ? fmtBytes(spaceVal!) : "—"} heap Δ
-                              </span>
-                              <span style={{ fontSize: 7, fontFamily: "monospace", color: "var(--color-muted)", opacity: 0.7 }} title="Theoretical auxiliary: worst-case estimate from Big-O class">
-                                {spaceTheo != null ? fmtBytes(spaceTheo) : "—"} est. aux
-                                {canDl && has("research") && (
-                                  <> · <a onClick={handleDl} style={{ color: "var(--color-accent)", cursor: "pointer", textDecoration: "underline" }} title="Download space proof JSON">proof</a></>
-                                )}
-                              </span>
-                            </span>
-                          </div>
-                          <div style={cell("var(--color-muted)", 1)}>{spRatioStr}</div>
-                          <div style={{ ...cell("var(--color-text)", 1), opacity: 0.75, cursor: "default" }} title={ALGO_SPACE[row.id]} onMouseEnter={() => setHoverBigO({ id: row.id, type: "space" })} onMouseLeave={() => setHoverBigO(null)}>
-                            {isHoverS && sPct !== null ? fmtPct(sPct) : sBigOLabel}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })()}
-          {status === "done" && summaryResults.length >= 2 && (
-            <PairMatrix results={summaryResults} spaceResults={summarySpaceResults} />
-          )}
-        </div>
-      )}
-
-      {/* ── Time complexity section ── */}
-      {has("advanced") && (chartMode === "time" || chartMode === "space") && status === "done" && (
-        <div className="px-5 py-4" style={{ borderTop: "1px solid var(--color-border)" }}>
-          <p className="text-xs font-semibold uppercase tracking-wider mb-4" style={{ color: "var(--color-muted)" }}>Time Complexity Analysis</p>
-          <MathPanel
-            data={curveDataExt}
-            algos={chartAlgos}
-            mode={chartMode}
-            sampleProofs={sampleProofs}
-          />
-        </div>
-      )}
 
         </div>
 
@@ -11634,125 +13153,10 @@ export default function BenchmarkVisualizer() {
 
       </div>{/* end benchmark section */}
 
-      {/* ── Live running dashboard — consolidated status + sparklines ── */}
-      {status === "running" && (
-        <RunningDashboard
-          algos={runConfig?.algos ?? activeAlgos}
-          currentAlgo={currentAlgo}
-          currentN={currentN}
-          progress={progress}
-          curveData={curveData}
-          memSamples={memSamples}
-          sortPreviewSteps={currentAlgo ? (prerunSteps[currentAlgo] ?? null) : null}
-          sortPreviewLabels={prerunSampleLabels}
-          dataType={dataType}
-          configLine={`${[...scenarios].join(", ")} · ${rounds} round${rounds !== 1 ? "s" : ""} · ${warmup} warm-up${polymorphicMode ? " · polymorphic (int+float+string)" : (useWorkerIsolation ? " · worker isolation" : "")}${adversarialEnabled ? " · adversarial" : ""}${engine === "wasm" && wasmBundle != null ? " · engine: Wasm" : ""}${engine === "webgpu" && webgpuBundle?.ready ? " · engine: WebGPU" : ""}`}
-          algoNames={ALGO_NAMES}
-          algoColors={ALGO_COLORS}
-          onStop={stop}
-          stopPending={stopPending}
-          tabHidden={tabHiddenDuringRun}
-          workerIsolation={useWorkerIsolation}
-          runStartedAt={runStartedAt}
-          notifyOnDone={notifyOnDone}
-          onToggleNotify={toggleNotifyOnDone}
-        />
-      )}
-
-      {/* ── Floating Run panel ──
-          Sits in the same bottom-right slot as RunningDashboard but is only
-          visible while idle/done. The two swap based on `status`: idle → Run,
-          running → live dashboard with a Stop button, done → Re-run + Reset.
-          Hidden on print and on the mobile sticky-bar viewport size (the
-          mobile bar at the bottom of the page already covers Run/Stop). */}
-      {status !== "running" && (
-        <div
-          className="hidden lg:flex print:hidden fixed lg:right-4 lg:bottom-4 z-40 flex-col gap-1 rounded-xl"
-          style={{
-            background: "color-mix(in srgb, var(--color-surface-1) 96%, transparent)",
-            backdropFilter: "blur(8px)",
-            WebkitBackdropFilter: "blur(8px)",
-            border: "1px solid var(--color-border)",
-            boxShadow: "0 12px 40px -8px rgba(0,0,0,0.45)",
-            padding: "10px 12px",
-            minWidth: 240,
-          }}
-        >
-          <div className="flex gap-1.5">
-            <button
-              onClick={() => run()}
-              disabled={!canRun}
-              style={btn("primary", { padding: "6px 14px", flex: 1, justifyContent: "center", fontSize: 12, opacity: canRun ? 1 : 0.5, cursor: canRun ? "pointer" : "not-allowed" })}
-            >
-              <Play size={12} strokeWidth={2} />
-              {status === "done" ? "Re-run" : "Run"}
-            </button>
-            {status === "done" && (
-              <button onClick={reset} style={btn("secondary", { padding: "6px 12px", fontSize: 12 })}>
-                <RotateCcw size={12} strokeWidth={1.75} /> Reset
-              </button>
-            )}
-          </div>
-          {/* One-line summary so the user can verify what's about to run
-              without bouncing back to the config card on the left. */}
-          <div className="text-[9px] mt-1" style={{ color: "var(--color-muted)", fontFamily: "monospace", lineHeight: 1.4 }}>
-            {canRun ? (
-              <>
-                {(activeAlgos.length + enabledSavedSorts.length)} algo{(activeAlgos.length + enabledSavedSorts.length) !== 1 ? "s" : ""}
-                {" · "}
-                n={sortedSizes.length === 0 ? "—" : sortedSizes.length === 1 ? fmtN(sortedSizes[0]) : `${fmtN(sortedSizes[0])}…${fmtN(sortedSizes[sortedSizes.length - 1])}`}
-                {" · "}
-                {rounds}× · {engine === "wasm" && wasmBundle ? "Wasm" : engine === "webgpu" && webgpuBundle?.ready ? "WebGPU" : "V8"}
-              </>
-            ) : (
-              <span style={{ color: "#ef5350" }}>
-                {activeAlgos.length + enabledSavedSorts.length === 0
-                  ? "select at least one algorithm"
-                  : selectedSizes.size === 0
-                    ? "select at least one input size"
-                    : scenarios.size === 0
-                      ? "select at least one scenario"
-                      : "not ready"}
-              </span>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ── Mobile sticky run/stop bar ── */}
-      <div
-        className="lg:hidden print:hidden fixed bottom-0 left-0 right-0 flex gap-2 px-4 py-3"
-        style={{
-          background: "var(--color-surface-1)",
-          borderTop: "1px solid var(--color-border)",
-          zIndex: 40,
-          paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))",
-        }}
-      >
-        {status === "running" ? (
-          <button
-            onClick={stop}
-            disabled={stopPending}
-            style={btn("danger", { flex: 1, justifyContent: "center", padding: "6px 0", opacity: stopPending ? 0.5 : 1, cursor: stopPending ? "not-allowed" : "pointer" })}
-          >
-            <Square size={13} strokeWidth={2} fill="currentColor" /> {stopPending ? "Stopping…" : "Stop"}
-          </button>
-        ) : (
-          <button
-            onClick={() => run()}
-            disabled={!canRun}
-            style={btn("primary", { flex: 1, justifyContent: "center", padding: "6px 0", opacity: canRun ? 1 : 0.5, cursor: canRun ? "pointer" : "not-allowed" })}
-          >
-            <Play size={13} strokeWidth={2} />
-            {status === "done" ? "Re-run" : "Run benchmark"}
-          </button>
-        )}
-        {status === "done" && (
-          <button onClick={reset} style={btn("secondary", { padding: "6px 14px" })}>
-            <RotateCcw size={12} strokeWidth={1.75} />
-          </button>
-        )}
-      </div>
+      {/* Floating table of contents — pinned tab on the right edge that
+          expands into a section index. IntersectionObserver tracks which
+          section is currently visible and highlights it. */}
+      <FloatingTOC />
 
     </div>
   );

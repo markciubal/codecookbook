@@ -6,6 +6,7 @@ import {
   makeAdversarialInput,
   type BenchmarkScenario, type QuickPivot, type ShellGaps, type CustomDistribution,
 } from "./benchmark";
+import { logRunProbe } from "./run-log";
 
 export interface WorkerRequest {
   runId: string;
@@ -70,6 +71,17 @@ export interface WorkerResponse {
   const totalRounds = allInputs.length;
   // 0 (or undefined) means uncapped — caller disabled the timeout knob.
   const TIMEOUT_MS = timeoutMs && timeoutMs > 0 ? timeoutMs : Infinity;
+
+  logRunProbe("benchmark.worker.start", {
+    algo: algoId,
+    n,
+    totalRounds,
+    warmup,
+    timeoutMs: TIMEOUT_MS === Infinity ? 0 : TIMEOUT_MS,
+    hasAdversarial: !!adversarialInput,
+    custom: !!customFnStr,
+  });
+
   const start = performance.now();
   const postWarmupTimes: number[] = [];
   let best = Infinity;
@@ -87,6 +99,14 @@ export interface WorkerResponse {
 
   for (let r = 0; r < totalRounds; r++) {
     if (performance.now() - start > TIMEOUT_MS) { didTimeout = true; break; }
+    logRunProbe("benchmark.worker.round", {
+      algo: algoId,
+      n,
+      round: r,
+      totalRounds,
+      warmup: r < effectiveWarmup,
+      inputLen: allInputs[r]?.length ?? 0,
+    });
     const copy = allInputs[r].slice();
     const t0 = performance.now();
     // Wrap the sort call so a throwing user/custom function reports an
@@ -96,6 +116,7 @@ export interface WorkerResponse {
       safeFn(copy);
     } catch (err) {
       runtimeError = err instanceof Error ? err.message : String(err);
+      console.error("[codecookbook] benchmark.worker.round failed", { algo: algoId, n, round: r, err });
       break;
     }
     lastElapsed = performance.now() - t0;

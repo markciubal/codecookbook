@@ -21,8 +21,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="h-full antialiased">
-      <body className="h-full flex flex-col lg:flex-row" style={{ background: "var(--color-bg)", color: "var(--color-text)" }}>
+    <html lang="en" className="h-full antialiased" suppressHydrationWarning>
+      <body className="h-full flex flex-col lg:flex-row" suppressHydrationWarning style={{ background: "var(--color-bg)", color: "var(--color-text)" }}>
         <ServiceWorkerRegistration />
         <Navigation />
         <main className="flex-1 min-h-0 overflow-y-auto">

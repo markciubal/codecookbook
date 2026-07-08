@@ -16,6 +16,45 @@ function toSup(s: string): string {
 
 export { toSup };
 
+const EULER = Math.E;
+
+/** Skip e^k ticks that sit on a base-10 grid line (already labeled). */
+function nearPowerOf10(v: number): boolean {
+  if (v <= 0) return true;
+  const lg = Math.log10(v);
+  return Math.abs(lg - Math.round(lg)) < 0.015;
+}
+
+export function formatEulerPowerTick(k: number): string {
+  if (k === 0) return "1";
+  if (k === 1) return "e";
+  if (k === -1) return "e⁻¹";
+  return k > 0 ? `e${toSup(String(k))}` : `e${toSup(String(k))}`;
+}
+
+/** Powers of e (Euler's number) visible on a log-y performance chart. */
+export function buildEulerLogYTicks(
+  minV: number,
+  maxV: number,
+  yAt: (v: number) => number,
+  plotTop: number,
+  plotBottom: number,
+): { v: number; y: number; label: string }[] {
+  if (minV <= 0 || maxV <= 0) return [];
+  const kMin = Math.floor(Math.log(minV) / Math.log(EULER));
+  const kMax = Math.ceil(Math.log(maxV) / Math.log(EULER));
+  const out: { v: number; y: number; label: string }[] = [];
+  for (let k = kMin; k <= kMax; k++) {
+    const v = Math.pow(EULER, k);
+    if (v < minV * 0.85 || v > maxV * 1.15) continue;
+    if (nearPowerOf10(v)) continue;
+    const y = yAt(v);
+    if (y < plotTop - 2 || y > plotBottom + 2) continue;
+    out.push({ v, y, label: formatEulerPowerTick(k) });
+  }
+  return out;
+}
+
 export function fitLogLog(points: { n: number; val: number }[]): FitResult | null {
   const valid = points.filter(p => p.val > 0 && p.n > 1);
   if (valid.length < 2) return null;

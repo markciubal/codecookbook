@@ -5,7 +5,7 @@ import { Lock, Unlock } from "lucide-react";
 import type { CurveData, CurvePoint, GhostRuns } from "@/lib/benchmark-store";
 import { noiseLabel } from "@/lib/benchmark-stats";
 import { fmtN, fmtTime, fmtBytes, fmtPredicted } from "./formatters";
-import { fitLogLog, BIG_O_REFS, SPACE_BIG_O_REFS, toSup, type FitResult } from "./fit-log-log";
+import { fitLogLog, BIG_O_REFS, SPACE_BIG_O_REFS, buildEulerLogYTicks, toSup, type FitResult } from "./fit-log-log";
 import { chartBtn, CHART_SLOW_IDS, CHART_SLOW_THRESHOLD } from "./chart-ui";
 
 export default function CurveChart({
@@ -238,6 +238,10 @@ export default function CurveChart({
       })()
     : [0.25, 0.5, 0.75, 1].map(f => ({ v: maxY * f, y: yAt(maxY * f) }));
 
+  const eulerYTicks = yLogScale
+    ? buildEulerLogYTicks(minPosY * 0.5, maxY, yAt, pT, pT + iH)
+    : [];
+
   const getSvgX = (e: React.MouseEvent<SVGSVGElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     return ((e.clientX - rect.left) / rect.width) * VW;
@@ -453,7 +457,7 @@ const overlayBtnBase: React.CSSProperties = chartBtn("secondary", {
         <button
           onClick={() => setYLogScale(v => !v)}
           style={{ ...overlayBtnBase, color: yLogScale ? "var(--color-accent)" : "var(--color-muted)", border: `1px solid ${yLogScale ? "var(--color-accent)" : "var(--color-border)"}` }}
-          title={yLogScale ? "Switch to linear Y scale" : "Switch to log Y scale"}
+          title={yLogScale ? "Switch to linear Y scale (hides e, e²… grid)" : "Switch to log Y scale — adds Euler e^k reference lines"}
         >
           {yLogScale ? "log" : "lin"}
         </button>
@@ -486,11 +490,28 @@ const overlayBtnBase: React.CSSProperties = chartBtn("secondary", {
       </defs>
       {/* horizontal grid + y labels */}
       {yTicks.map(({ v, y }) => (
-        <g key={v}>
+        <g key={`y10-${v}`}>
           <line x1={pL} y1={y} x2={VW - pR} y2={y}
             stroke="var(--color-border)" strokeWidth={0.6} strokeDasharray="3 3" />
           <text x={pL - 5} y={y + 4} textAnchor="end" fontSize={9}
             fill="var(--color-muted)">{fmtY(v)}</text>
+        </g>
+      ))}
+
+      {/* Euler's number grid — e, e², e³… when log-y is active (natural-log decades). */}
+      {eulerYTicks.map(({ v, y, label }) => (
+        <g key={`ye-${label}-${v}`} style={{ pointerEvents: "none" }}>
+          <line x1={pL} y1={y} x2={VW - pR} y2={y}
+            stroke="#4db6ac" strokeWidth={0.5} strokeDasharray="2 4" opacity={0.45}
+            clipPath="url(#inner-plot-clip)" />
+          <text x={VW - pR + 3} y={y + 3} textAnchor="start" fontSize={7}
+            fontFamily="monospace" fill="#4db6ac" opacity={0.85}>
+            {label}
+          </text>
+          <text x={pL - 5} y={y + 3} textAnchor="end" fontSize={7}
+            fontFamily="monospace" fill="#4db6ac" opacity={0.7}>
+            {fmtY(v)}
+          </text>
         </g>
       ))}
 

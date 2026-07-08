@@ -34,6 +34,8 @@ interface Props {
   sortPreviewSteps?: SortStep[] | null;
   sortPreviewLabels?: string[];
   dataType?: DataType;
+  /** When true, render inline in the right pane instead of as a floating panel. */
+  embedded?: boolean;
 }
 
 /*
@@ -49,6 +51,7 @@ export default function RunningDashboard({
   algos, currentAlgo, currentN, progress, curveData, memSamples,
   configLine, algoNames, algoColors, onStop, stopPending, tabHidden, workerIsolation,
   runStartedAt, notifyOnDone, onToggleNotify, sortPreviewSteps, sortPreviewLabels, dataType = "integer",
+  embedded = false,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false);
   const pct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
@@ -93,15 +96,15 @@ export default function RunningDashboard({
 
   return (
     <div
-      className="fixed left-2 right-2 bottom-[76px] z-50 h-[33vh]
-                 lg:left-auto lg:right-4 lg:bottom-4 lg:w-[400px] lg:h-auto lg:max-h-[62vh]
-                 flex flex-col rounded-xl overflow-hidden print:hidden"
+      className={embedded
+        ? "flex flex-col rounded-xl overflow-hidden print:hidden w-full max-h-[70vh]"
+        : "fixed left-2 right-2 bottom-[76px] z-50 h-[33vh] lg:left-auto lg:right-4 lg:bottom-4 lg:w-[400px] lg:h-auto lg:max-h-[62vh] flex flex-col rounded-xl overflow-hidden print:hidden"}
       style={{
-        background: "color-mix(in srgb, var(--color-surface-1) 96%, transparent)",
-        backdropFilter: "blur(8px)",
-        WebkitBackdropFilter: "blur(8px)",
+        background: embedded ? "var(--color-surface-2)" : "color-mix(in srgb, var(--color-surface-1) 96%, transparent)",
+        backdropFilter: embedded ? undefined : "blur(8px)",
+        WebkitBackdropFilter: embedded ? undefined : "blur(8px)",
         border: "1px solid var(--color-border)",
-        boxShadow: "0 12px 40px -8px rgba(0,0,0,0.45)",
+        boxShadow: embedded ? "none" : "0 12px 40px -8px rgba(0,0,0,0.45)",
       }}
     >
       {/* Header — progress + stop + collapse */}

@@ -1,10 +1,29 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Network, Download } from "lucide-react";
 import CytoscapeBase, { type CytoscapeBaseHandle } from "./CytoscapeBase";
 import type { SessionLog } from "./SessionCurves";
 import { cyLineStyle, DT_LABEL, DT_LEGEND_TEXT, type DataType } from "@/lib/dataTypeStyle";
+
+// ── Register cytoscape-fcose lazily, once per page ──────────────────────────
+// fcose is the "Fast Compound Spring Embedder" layout — same family as cose
+// but with better repulsion handling and tighter cluster separation. We
+// register it via cytoscape.use(...) on first need, gated by a module-level
+// promise so concurrent mounts don't race on the registration.
+let fcoseRegister: Promise<void> | null = null;
+function ensureFcoseRegistered(): Promise<void> {
+  if (fcoseRegister) return fcoseRegister;
+  fcoseRegister = (async () => {
+    const [{ default: cytoscape }, { default: fcose }] = await Promise.all([
+      import("cytoscape"),
+      // @ts-expect-error — cytoscape-fcose ships no .d.ts in its npm release
+      import("cytoscape-fcose"),
+    ]);
+    cytoscape.use(fcose);
+  })();
+  return fcoseRegister;
+}
 
 /*
  * Network view of every (algorithm, data-type) measurement in the session.
@@ -101,6 +120,43 @@ const STYLESHEET: object[] = [
       "target-arrow-shape": "none",
       "source-arrow-shape": "none",
       "opacity": 0.7,
+    },
+  },
+  // Primary edges (largest n per algo/dtype pair) get a readable label
+  // showing the actual measurement values inline. Background pill keeps the
+  // text legible regardless of which color the edge ended up at.
+  //
+  // NOTE: cytoscape draws labels on a canvas/SVG layer that does NOT resolve
+  // CSS custom properties. Passing `var(--color-text)` here resolves to an
+  // invalid color and falls back to BLACK — which is what caused the
+  // "black on black" symptom. Hard-coded hex values are required.
+  {
+    selector: "edge[primary = 1]",
+    style: {
+      "label": "data(label)",
+      "font-size": 9,
+      "font-family": "monospace",
+      "font-weight": 700,
+      // White text reads on the dark pill in both light + dark themes.
+      "color": "#ffffff",
+      "text-rotation": "autorotate",
+      "text-margin-y": -6,
+      // Dark semi-opaque pill — black-ish so the white text always pops.
+      "text-background-color": "#1a1a1a",
+      "text-background-opacity": 0.88,
+      "text-background-shape": "round-rectangle",
+      "text-background-padding": "3px",
+      // Border keeps the visual link to the edge's own color (data() refs
+      // work fine in cytoscape — they're not CSS vars, they're a cytoscape
+      // selector that reads element data fields).
+      "text-border-width": 0.8,
+      "text-border-color": "data(lineColor)",
+      "text-border-opacity": 0.95,
+      // Outline around the glyphs so even if the pill background gets
+      // partially obscured by overlapping edges, the text stays readable.
+      "text-outline-color": "#000000",
+      "text-outline-opacity": 0.7,
+      "text-outline-width": 0.6,
     },
   },
 ];
@@ -377,39 +433,86 @@ function aggregate(log: SessionLog): Cell[] {
 interface CyElement {
   group: "nodes" | "edges";
   data: Record<string, string | number>;
+  /** Predetermined seed position for cytoscape's preset/cose layouts —
+   *  cose then "spreads" from these starting coords rather than re-rolling
+   *  random positions each render. Edges ignore this field. */
+  position?: { x: number; y: number };
 }
+
+/** items/sec — n / (timeMs/1000). The simplified mode shows max(items/sec)
+ *  per (algo, dtype) pair, which is a cleaner one-number answer to "how
+ *  fast does this algo actually throughput data?" than the time+n combo. */
+function itemsPerSec(c: Cell): number {
+  return c.timeMs > 0 ? c.n / (c.timeMs / 1000) : 0;
+}
+
+function fmtIps(ips: number): string {
+  if (ips >= 1e9) return `${(ips / 1e9).toFixed(1)}G/s`;
+  if (ips >= 1e6) return `${(ips / 1e6).toFixed(1)}M/s`;
+  if (ips >= 1e3) return `${(ips / 1e3).toFixed(0)}k/s`;
+  return `${ips.toFixed(0)}/s`;
+}
+
+type GraphMode = "detailed" | "simplified";
 
 function buildElements(
   log: SessionLog,
   algoNames: Record<string, string>,
   algoColors: Record<string, string>,
+  mode: GraphMode = "detailed",
 ): { elements: CyElement[]; cells: Cell[] } {
-  const cells = aggregate(log);
-  if (cells.length === 0) return { elements: [], cells };
+  const rawCells = aggregate(log);
+  if (rawCells.length === 0) return { elements: [], cells: rawCells };
 
-  // Bucket cells by (dtype, n) so each measurement's color is its rank
-  // *within its size class* — at this n on this dtype, who's fastest? Picking
-  // the bucket scope lets the chart answer "which algo wins at each size?"
-  // directly. The alternative (per-algo normalization across sizes) would
-  // collapse most edges to red because small-n measurements always look
-  // fast relative to large-n on the same algo.
+  // ── Simplified mode aggregation ─────────────────────────────────────────
+  // Collapse the per-(algo, dtype, n) cells down to one cell per (algo, dtype)
+  // — the one with the highest items/sec across all measured n. This is the
+  // "best throughput we ever saw" view: one edge per pair, labeled with the
+  // peak items/sec, no fan-out clutter from intermediate sizes.
+  const cells = mode === "simplified"
+    ? (() => {
+        const bestByPair = new Map<string, Cell>();
+        for (const c of rawCells) {
+          if (c.timeMs <= 0 || c.n <= 0) continue;
+          const k = `${c.algo}|${c.dt}`;
+          const best = bestByPair.get(k);
+          if (!best || itemsPerSec(c) > itemsPerSec(best)) bestByPair.set(k, c);
+        }
+        return [...bestByPair.values()];
+      })()
+    : rawCells;
+
+  // Color scoping depends on mode:
+  //   detailed   → rank within (dtype, n) bucket (who wins this exact cell?)
+  //   simplified → rank within dtype only (who has the best max-throughput
+  //                on this dtype overall?)
+  // Both answers are "speed ranking", just at different granularities.
   const bucket = new Map<string, Cell[]>();
   for (const c of cells) {
-    const k = `${c.dt}|${c.n}`;
+    const k = mode === "simplified" ? c.dt : `${c.dt}|${c.n}`;
     if (!bucket.has(k)) bucket.set(k, []);
     bucket.get(k)!.push(c);
   }
   const colorFor = (c: Cell): string => {
-    const b = bucket.get(`${c.dt}|${c.n}`) ?? [];
+    const k = mode === "simplified" ? c.dt : `${c.dt}|${c.n}`;
+    const b = bucket.get(k) ?? [];
     if (b.length < 2) return "#7aa3d8";
-    const times = b.map(x => x.timeMs);
-    const fast = Math.min(...times);
-    const slow = Math.max(...times);
-    if (slow === fast) return "#7aa3d8";
-    // Log-space normalization keeps the gradient readable when times span
-    // decades (counting sort: 1ms, bubble sort: 8s at the same n).
-    const t = (Math.log10(c.timeMs) - Math.log10(fast)) / (Math.log10(slow) - Math.log10(fast));
-    return speedHsl(t);
+    // In detailed mode rank by timeMs (lower = better). In simplified mode
+    // rank by items/sec (higher = better) so the green-is-fast invariant
+    // holds even though we flipped the underlying metric.
+    const score = (cell: Cell) => mode === "simplified" ? itemsPerSec(cell) : cell.timeMs;
+    const scores = b.map(score);
+    const best = mode === "simplified" ? Math.max(...scores) : Math.min(...scores);
+    const worst = mode === "simplified" ? Math.min(...scores) : Math.max(...scores);
+    if (best === worst) return "#7aa3d8";
+    // Log-space normalization keeps the gradient readable across decades.
+    const cScore = score(c);
+    const t = mode === "simplified"
+      ? (Math.log10(Math.max(1, best))   - Math.log10(Math.max(1, cScore))) /
+        (Math.log10(Math.max(1, best))   - Math.log10(Math.max(1, worst)))
+      : (Math.log10(cScore) - Math.log10(best)) /
+        (Math.log10(worst) - Math.log10(best));
+    return speedHsl(Math.max(0, Math.min(1, t)));
   };
 
   // Width encodes n directly — see `makeNToWidth` for the log-scaling rule.
@@ -417,6 +520,58 @@ function buildElements(
   // CSV / JSON) also needs to emit per-edge weights and we want one source
   // of truth for the mapping.
   const nToWidth = makeNToWidth(cells);
+
+  // ── Predetermined node positions ────────────────────────────────────────
+  // Hand-computed (x, y) seeds for cytoscape's layout. Dtype hubs anchor an
+  // equilateral triangle in the inner orbit; algorithm nodes ride an outer
+  // ring around them, sorted alphabetically by display name so the placement
+  // is stable across renders (you always know where Quick Sort is).
+  //
+  // Why seed instead of let cose roll random positions? cose with random
+  // seeding shuffles the whole layout every render — adding one new algo
+  // would relocate everybody. Seeding pins the global structure ("dtypes
+  // inside, algos outside, triangle anchor at top") and lets the simulation
+  // do collision separation from those starting points instead of from
+  // scratch. That's the "predetermined location + separate dynamically"
+  // contract: positions are predictable, but cose still gets to push out.
+  const CX = 500, CY = 320;       // center of the layout canvas
+  const HUB_R = 110;              // dtype-hub orbit radius
+  const ALGO_R = 380;             // algo-node orbit radius
+  // Fixed compass for the dtype hubs — integer at top, float bottom-right,
+  // string bottom-left. Matches the conventional "int = most discrete,
+  // float = continuous, string = symbolic" ordering used in the legend.
+  const DT_ANGLE: Record<DataType, number> = {
+    integer: -Math.PI / 2,
+    float:    Math.PI / 6,
+    string:   5 * Math.PI / 6,
+  };
+  const algoIds = [...new Set(cells.map(c => c.algo))]
+    .sort((a, b) => (algoNames[a] ?? a).localeCompare(algoNames[b] ?? b));
+  const algoPos: Record<string, { x: number; y: number }> = {};
+  algoIds.forEach((id, i) => {
+    // Start the outer ring at the top and march clockwise.
+    const angle = (i / Math.max(1, algoIds.length)) * 2 * Math.PI - Math.PI / 2;
+    algoPos[id] = { x: CX + Math.cos(angle) * ALGO_R, y: CY + Math.sin(angle) * ALGO_R };
+  });
+
+  // Identify the "primary" edge per (algo, dtype) pair — defined as the
+  // measurement with the largest n. That's the most asymptotically meaningful
+  // sample, and it's the only edge in each fan that gets a text label
+  // attached. Labeling every parallel edge would create overlapping label
+  // chains; one label per pair gives enough signal to read the encoding.
+  const primaryByPair = new Map<string, number>();
+  for (const c of cells) {
+    const k = `${c.algo}|${c.dt}`;
+    const prev = primaryByPair.get(k);
+    if (prev == null || c.n > prev) primaryByPair.set(k, c.n);
+  }
+
+  // Compact label for the chart — time + n side by side. fmtN ships smaller
+  // strings (e.g. "1M" not "1,000,000") which is critical inline on an edge.
+  const compactMs = (ms: number) =>
+    ms < 1 ? `${ms.toFixed(2)}ms`
+    : ms < 1000 ? `${ms.toFixed(0)}ms`
+    : `${(ms / 1000).toFixed(1)}s`;
 
   const elements: CyElement[] = [];
   const algoSeen = new Set<string>();
@@ -433,10 +588,12 @@ function buildElements(
           label: (algoNames[c.algo] ?? c.algo).replace(" Sort", ""),
           color: algoColors[c.algo] ?? "#888",
         },
+        position: algoPos[c.algo],
       });
     }
     if (!dtSeen.has(c.dt)) {
       dtSeen.add(c.dt);
+      const angle = DT_ANGLE[c.dt];
       elements.push({
         group: "nodes",
         data: {
@@ -445,20 +602,34 @@ function buildElements(
           label: DT_LABEL[c.dt],
           borderStyle: cyLineStyle(c.dt),
         },
+        position: { x: CX + Math.cos(angle) * HUB_R, y: CY + Math.sin(angle) * HUB_R },
       });
     }
+    // In simplified mode every edge is the only edge for its pair, so it's
+    // primary by construction. Label is items/sec instead of the time+n
+    // combo — that's the whole point of this mode (one throughput number
+    // per algo/dtype, no fan-out clutter).
+    const isPrimary = mode === "simplified"
+      ? true
+      : primaryByPair.get(`${c.algo}|${c.dt}`) === c.n;
+    const label = mode === "simplified"
+      ? `${fmtIps(itemsPerSec(c))} @ n=${fmtN(c.n)}`
+      : (isPrimary ? `${compactMs(c.timeMs)} · n=${fmtN(c.n)}` : "");
     elements.push({
       group: "edges",
       data: {
-        // n is in the edge id so cytoscape treats each measurement as its own
-        // edge (parallel edges between the same source/target are allowed
-        // and rendered as fanned-out beziers by the stylesheet below).
         id: `e:${c.algo}:${c.dt}:${c.n}`,
         source: `algo:${c.algo}`,
         target: `dt:${c.dt}`,
         lineColor: colorFor(c),
-        lineWidth: nToWidth(c.n),
+        // In simplified mode, scale width by items/sec instead of raw n —
+        // the thickness now reads as "throughput", matching the label.
+        lineWidth: mode === "simplified"
+          ? Math.max(1, Math.min(20, 1 + Math.log10(Math.max(1, itemsPerSec(c))) * 2.4))
+          : nToWidth(c.n),
         lineStyle: cyLineStyle(c.dt),
+        primary: isPrimary ? 1 : 0,
+        label,
       },
     });
   }
@@ -571,10 +742,17 @@ function summarize(cells: Cell[]): Insights {
 
 export default function SortNetworkGraph({ log, algoNames, algoColors }: SortNetworkGraphProps) {
   const cyRef = useRef<CytoscapeBaseHandle>(null);
+  // View mode toggle:
+  //   "detailed"   — one edge per (algo, dtype, n); labels show time + n
+  //   "simplified" — one edge per (algo, dtype) using the highest items/sec
+  //                  across all measured n; every edge is labeled with the
+  //                  peak throughput. Easier to read at a glance for
+  //                  "which sort is fastest" type questions.
+  const [mode, setMode] = useState<GraphMode>("detailed");
 
   const { elements, cells } = useMemo(
-    () => buildElements(log, algoNames, algoColors),
-    [log, algoNames, algoColors],
+    () => buildElements(log, algoNames, algoColors, mode),
+    [log, algoNames, algoColors, mode],
   );
 
   // Sync the elements into cytoscape and re-run the layout whenever they
@@ -596,21 +774,79 @@ export default function SortNetworkGraph({ log, algoNames, algoColors }: SortNet
       cy.elements().remove();
       for (const el of elements) cy.add(el as Parameters<typeof cy.add>[0]);
     });
-    if (elements.length > 0) {
-      cy.layout({
-        name: "cose",
-        padding: 40,
-        animate: false,
-        // Edges now scale up to 20px — give them lateral room so the fanned
-        // multi-edges between an algo and a dtype hub stay legible. Higher
-        // repulsion + longer ideal length keeps nodes from clumping under
-        // the weight of many thick edges all pulling toward the hubs.
-        idealEdgeLength: () => 140,
-        nodeRepulsion: () => 24000,
-        edgeElasticity: () => 40,
-        fit: true,
-      } as Parameters<typeof cy.layout>[0]).run();
-    }
+
+    // Defer the layout to the next animation frame so the browser can
+    // commit the new elements and paint before the simulation runs.
+    if (elements.length === 0) return;
+    let cancelled = false;
+    const rafId = requestAnimationFrame(() => {
+      ensureFcoseRegistered().then(() => {
+        if (cancelled) return;
+        cy.layout({
+          // fcose — the FAST CoSE Embedder. Compared to plain cose: better
+          // repulsion handling at high node counts, fewer overlap artifacts,
+          // and faster convergence per iteration. Aggressive params below
+          // push nodes apart so dense (algo, dtype-hub) clusters can spread
+          // out instead of stacking on top of each other.
+          name: "fcose",
+          // Seed from the predetermined positions baked into each node
+          // (`position` field set in buildElements) — fcose accepts them
+          // when `randomize: false`. Without this it'd discard our triangle
+          // + outer-ring arrangement and re-roll.
+          randomize: false,
+          // The repulsion knob that matters most for unclumping. fcose's
+          // "nodeRepulsion" is roughly Coulomb force strength — higher =
+          // nodes push each other away harder. 12000 was the default; 60000
+          // sustainedly separates even the tightest preset clusters.
+          nodeRepulsion: () => 60000,
+          // Edges still hold nodes together; loosen the spring so repulsion
+          // wins more often. Higher = looser. 0.45 keeps thick edges short
+          // (matches "more measurements = closer to hub") while letting
+          // sparser pairs fly out.
+          edgeElasticity: () => 0.45,
+          // Ideal edge length controls the "resting distance". Longer = the
+          // simulation tries to keep nodes farther apart. 220 was already
+          // generous; 280 gives the labels room to breathe alongside the
+          // wider edge widths.
+          idealEdgeLength: () => 280,
+          // Gravity pulls everything toward the layout origin. Low so the
+          // outer-ring algos don't get sucked back toward the dtype hubs.
+          gravity: 0.12,
+          // Range force — pushes APART nodes that are inside the same
+          // "compound" parent. We don't use compounds, but a small value
+          // helps prevent the per-dtype hubs from clustering.
+          gravityRangeCompound: 1.5,
+          gravityCompound: 0.5,
+          // Convergence + smoothness.
+          numIter: 1500,
+          // Tile disconnected components so they don't overlap each other
+          // (we have one connected component but the option is harmless).
+          tile: true,
+          fit: true,
+          padding: 80,
+          animate: false,
+          quality: "proof",
+        } as Parameters<typeof cy.layout>[0]).run();
+      }).catch(err => {
+        // If fcose fails to load for any reason, fall back to the built-in
+        // cose so the graph still renders.
+        if (cancelled) return;
+        console.warn("[SortNetworkGraph] fcose registration failed, falling back to cose", err);
+        cy.layout({
+          name: "cose",
+          padding: 60,
+          animate: false,
+          randomize: false,
+          idealEdgeLength: () => 220,
+          nodeRepulsion: () => 80000,
+          edgeElasticity: () => 25,
+          gravity: 0.15,
+          numIter: 400,
+          fit: true,
+        } as Parameters<typeof cy.layout>[0]).run();
+      });
+    });
+    return () => { cancelled = true; cancelAnimationFrame(rafId); };
   }, [elements]);
 
   if (cells.length === 0) return null;
@@ -673,8 +909,46 @@ export default function SortNetworkGraph({ log, algoNames, algoColors }: SortNet
           Sort Network · session
         </span>
         <span className="text-[10px]" style={{ color: "var(--color-muted)", fontFamily: "monospace" }}>
-          one edge per (algorithm, data-type, n) — fans out by n
+          {mode === "simplified"
+            ? "one edge per (algorithm, data-type) — peak items/sec"
+            : "one edge per (algorithm, data-type, n) — fans out by n"}
         </span>
+        {/* Mode toggle — segmented pill switching between the per-n fan-out
+            and the simplified "one peak-throughput edge per pair" view. */}
+        <div
+          className="inline-flex print:hidden"
+          style={{
+            borderRadius: 5,
+            border: "1px solid var(--color-border)",
+            background: "var(--color-surface-1)",
+            overflow: "hidden",
+          }}
+          title="Switch between detailed (per-n fan-out) and simplified (peak items/sec per algo/dtype) views"
+        >
+          {(["detailed", "simplified"] as const).map((m, i) => {
+            const active = mode === m;
+            return (
+              <button
+                key={m}
+                onClick={() => setMode(m)}
+                style={{
+                  padding: "2px 8px",
+                  fontSize: 9,
+                  fontFamily: "monospace",
+                  letterSpacing: "0.04em",
+                  background: active ? "var(--color-accent)" : "transparent",
+                  color: active ? "#fff" : "var(--color-muted)",
+                  fontWeight: active ? 700 : 400,
+                  border: "none",
+                  borderLeft: i > 0 ? "1px solid var(--color-border)" : "none",
+                  cursor: "pointer",
+                }}
+              >
+                {m === "detailed" ? "Detailed" : "Simplified"}
+              </button>
+            );
+          })}
+        </div>
         {/* Export button group — three formats that cover the common
             destinations: GraphML for Gephi/yEd/NetworkX, CSV for pandas/
             spreadsheets, JSON for round-tripping back into cytoscape.js. */}
@@ -702,16 +976,27 @@ export default function SortNetworkGraph({ log, algoNames, algoColors }: SortNet
         </div>
       </div>
 
-      {/* Encoding legend — width now encodes n directly, color is "who's
-          fastest at this size on this dtype", line-style is the dtype
-          convention. */}
+      {/* Encoding legend — what each visual channel means in the current
+          view mode. The semantics shift between detailed and simplified:
+          color and width re-bucket / re-scale, line-style is constant. */}
       <div className="px-3 py-2 flex flex-wrap items-center gap-x-4 gap-y-1" style={{ fontSize: 9, fontFamily: "monospace", color: "var(--color-muted)", borderBottom: "1px solid var(--color-border)" }}>
-        <span><strong style={{ color: "var(--color-text)" }}>color</strong> = speed rank at this (dtype, n) — green wins the bucket, red loses</span>
-        <span><strong style={{ color: "var(--color-text)" }}>width</strong> = log(n) — thicker edges are larger inputs</span>
+        {mode === "simplified" ? (
+          <>
+            <span><strong style={{ color: "var(--color-text)" }}>color</strong> = throughput rank within dtype — green = fastest algo on this dtype, red = slowest</span>
+            <span><strong style={{ color: "var(--color-text)" }}>width</strong> = log(items/sec) — thicker = higher peak throughput</span>
+            <span><strong style={{ color: "var(--color-text)" }}>label</strong> = peak items/sec @ the n where it was achieved</span>
+          </>
+        ) : (
+          <>
+            <span><strong style={{ color: "var(--color-text)" }}>color</strong> = speed rank at this (dtype, n) — green wins the bucket, red loses</span>
+            <span><strong style={{ color: "var(--color-text)" }}>width</strong> = log(n) — thicker edges are larger inputs</span>
+            <span><strong style={{ color: "var(--color-text)" }}>label</strong> = time + n on the largest-n edge of each pair</span>
+          </>
+        )}
         <span><strong style={{ color: "var(--color-text)" }}>line</strong> = {DT_LEGEND_TEXT}</span>
       </div>
 
-      <CytoscapeBase ref={cyRef} stylesheet={STYLESHEET} style={{ height: 380, background: "var(--color-surface-2)" }} />
+      <CytoscapeBase ref={cyRef} stylesheet={STYLESHEET} style={{ height: 560, background: "var(--color-surface-2)" }} />
 
       {/* Summary panel — interpretive bullets derived from the same cells the
           edges show. Answers the questions the visual makes you ask but

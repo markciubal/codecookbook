@@ -12,6 +12,8 @@
   "dependencies": {
     "@types/cytoscape": "^3.21.9",
     "cytoscape": "^3.33.1",
+    "cytoscape-fcose": "^2.2.0",
+    "logos-sort": "^0.3.1",
     "lucide-react": "^0.577.0",
     "next": "16.2.0",
     "react": "19.2.4",

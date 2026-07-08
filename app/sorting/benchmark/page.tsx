@@ -1,7 +1,7 @@
-import BenchmarkVisualizer from "@/components/BenchmarkVisualizer";
+import BenchmarkClientShell from "@/components/BenchmarkClientShell";
 
 export const metadata = { title: "Benchmark – CodeCookbook" };
 
 export default function BenchmarkPage() {
-  return <BenchmarkVisualizer />;
+  return <BenchmarkClientShell />;
 }
